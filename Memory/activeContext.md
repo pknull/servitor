@@ -1,5 +1,5 @@
 ---
-version: "1.0"
+version: "1.1"
 lastUpdated: "2026-03-05"
 lifecycle: "active"
 stakeholder: "all"
@@ -11,49 +11,51 @@ dependencies: ["projectbrief.md"]
 
 ## Current Status
 
-**Phase**: Foundation complete, ready for integration testing
+**Phase**: v1 rebuild complete
 
 **Recent Activity**:
 
-- 2026-03-05: Initial implementation complete
-  - All core modules implemented and tested (37 tests passing)
+- 2026-03-05: v1 clean-room rebuild complete
+  - All core modules reimplemented with tighter code
+  - 48 tests passing (40 unit + 8 integration)
+  - New features: context fetching, cron scheduler, SSE subscription
   - CLI working: `servitor init`, `servitor info`, `servitor exec`, `servitor run`
-  - Release binary built
-  - Git repo initialized with initial commit
 
 ## Implementation Status
 
 | Module | Status | Notes |
 |--------|--------|-------|
-| config | Complete | TOML loading, validation, path expansion |
+| config | Complete | TOML loading, validation, cron expression parsing |
 | identity | Complete | Ed25519 generation, signing, SSB wire format |
-| egregore | Complete | Hook receiver, HTTP publish, message schemas |
+| egregore | Complete | Hook, publish, context fetching, message schemas |
 | mcp | Complete | McpClient trait, stdio + http transports, pool |
 | scope | Complete | Glob matching, allow/block policies |
-| agent | Complete | Provider abstraction, context, tool_use loop |
+| agent | Complete | Provider abstraction, context history, tool_use loop |
+| events | Complete | EventRouter, CronSource, SseSource, McpNotificationSource |
 
-## Next Steps
+## New in v1
 
-**Immediate**:
+- **Context fetching**: `egregore/context.rs` queries feed for conversation history via `parent_id`
+- **Cron scheduling**: `[[schedule]]` config triggers tasks on cron expressions
+- **SSE subscription**: `egregore.subscribe = true` enables real-time task feed
+- **MCP notifications**: `on_notification` config converts server events to tasks
+- **Event router**: Unified dispatch from multiple sources (cron, SSE, MCP, hook)
 
-- Integration test with real MCP server (mcp-server-shell)
-- Test hook mode with egregore daemon
+## Deferred (v2)
 
-**Phase 2**:
-
-- Consumer group coordination
-- Scheduled tasks (cron)
-- Event watchers
-
-**Phase 3**:
-
+- Consumer groups
 - Capability challenges
 - Reputation tracking
-- Probabilistic verification
 
 ## Known Issues
 
 None currently.
+
+## Next Steps
+
+- Integration test with real MCP server (mcp-server-shell)
+- Test SSE subscription with running egregore daemon
+- Test cron task execution in daemon mode
 
 ## Quick Reference
 
@@ -72,4 +74,10 @@ cargo test
 
 # Execute task (requires ANTHROPIC_API_KEY)
 ./target/release/servitor exec "List files in ~/Documents"
+
+# Daemon with cron + SSE
+./target/release/servitor run
+
+# Hook mode (stdin)
+./target/release/servitor run --hook
 ```
