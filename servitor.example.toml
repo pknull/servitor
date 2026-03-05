@@ -1,0 +1,94 @@
+# Servitor Configuration
+# Copy this to servitor.toml and customize for your environment.
+
+[identity]
+# Directory for identity storage (Ed25519 keypair)
+data_dir = "~/.servitor"
+
+[egregore]
+# Egregore API endpoint
+api_url = "http://127.0.0.1:7654"
+
+# Optional: Consumer group for load distribution
+# [egregore.group]
+# name = "servitors"
+# heartbeat_interval_secs = 10
+
+[llm]
+# Provider: "anthropic", "openai", "ollama", "openai-compat"
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+
+# Optional: max_tokens = 4096
+# Optional: temperature = 0.7
+
+# Alternative: Ollama (local inference)
+# [llm]
+# provider = "ollama"
+# base_url = "http://localhost:11434/v1"
+# model = "llama3.3:70b"
+
+# Alternative: OpenAI-compatible endpoint
+# [llm]
+# provider = "openai-compat"
+# base_url = "https://openrouter.ai/api/v1"
+# model = "anthropic/claude-3.5-sonnet"
+# api_key_env = "OPENROUTER_API_KEY"
+
+[agent]
+# Maximum LLM turns per task
+max_turns = 50
+# Task timeout in seconds
+timeout_secs = 300
+# Optional: Custom system prompt prefix
+# system_prompt = "You are a helpful assistant."
+
+[heartbeat]
+# Heartbeat interval for capability advertisement
+interval_secs = 10
+
+# MCP Servers
+# Each server provides tool capabilities to the Servitor.
+
+[mcp.shell]
+transport = "stdio"
+command = "mcp-server-shell"
+# Optional: args = []
+# Optional: env = { "VAR" = "value" }
+timeout_secs = 60
+
+# Scope enforcement
+scope.allow = ["execute:~/scripts/*", "read:*"]
+scope.block = ["execute:/etc/*", "execute:rm *", "execute:sudo *"]
+
+[mcp.docker]
+transport = "stdio"
+command = "mcp-server-docker"
+timeout_secs = 120
+
+scope.allow = ["*"]
+scope.block = ["container_lifecycle:traefik", "container_lifecycle:portainer"]
+
+# HTTP transport example
+# [mcp.remote]
+# transport = "http"
+# url = "http://localhost:3000/mcp"
+# timeout_secs = 30
+# scope.allow = ["*"]
+
+# Scheduled tasks (cron-style)
+# [[schedule]]
+# name = "daily-email-check"
+# cron = "0 9 * * *"
+# task = "Check my email and summarize anything important"
+# notify = "discord:channel:inbox-alerts"
+
+# Event watchers
+# [[watch]]
+# name = "high-priority-email"
+# mcp = "email"
+# event = "new_message"
+# filter = { priority = "high" }
+# task = "Summarize this email: {{event.body}}"
+# notify = "discord:channel:inbox-alerts"
