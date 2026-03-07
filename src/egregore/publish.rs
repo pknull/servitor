@@ -21,8 +21,13 @@ impl EgregoreClient {
         }
     }
 
+    /// Get the API URL.
+    pub fn api_url(&self) -> &str {
+        &self.api_url
+    }
+
     /// Publish a message to egregore.
-    async fn publish<T: Serialize>(&self, content: &T, tags: &[&str]) -> Result<PublishResponse> {
+    async fn publish<T: Serialize>(&self, content: &T, tags: &[&str]) -> Result<PublishedMessage> {
         let url = format!("{}/v1/publish", self.api_url);
 
         let request = PublishRequest {
@@ -48,11 +53,17 @@ impl EgregoreClient {
             });
         }
 
-        let result: PublishResponse = response.json().await.map_err(|e| ServitorError::Egregore {
-            reason: format!("failed to parse publish response: {}", e),
-        })?;
+        let envelope: ApiResponse<PublishedMessage> =
+            response
+                .json()
+                .await
+                .map_err(|e| ServitorError::Egregore {
+                    reason: format!("failed to parse publish response: {}", e),
+                })?;
 
-        Ok(result)
+        envelope.data.ok_or_else(|| ServitorError::Egregore {
+            reason: "publish response missing data field".into(),
+        })
     }
 
     /// Publish a servitor profile (heartbeat/capability advertisement).
@@ -119,9 +130,27 @@ struct PublishRequest {
     tags: Vec<String>,
 }
 
-/// Publish response.
+/// Egregore API response envelope.
 #[derive(Debug, serde::Deserialize)]
-struct PublishResponse {
+struct ApiResponse<T> {
+    #[allow(dead_code)]
+    success: bool,
+    data: Option<T>,
+    #[allow(dead_code)]
+    error: Option<ApiError>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ApiError {
+    #[allow(dead_code)]
+    code: String,
+    #[allow(dead_code)]
+    message: String,
+}
+
+/// Published message data (subset of full Message).
+#[derive(Debug, serde::Deserialize)]
+struct PublishedMessage {
     hash: String,
     #[allow(dead_code)]
     sequence: u64,
@@ -146,10 +175,7 @@ mod tests {
 
     #[test]
     fn profile_serialization() {
-        let profile = ServitorProfile::new(
-            PublicId("@test.ed25519".to_string()),
-            10000,
-        );
+        let profile = ServitorProfile::new(PublicId("@test.ed25519".to_string()), 10000);
         let json = serde_json::to_string(&profile).unwrap();
         assert!(json.contains("servitor_profile"));
     }

@@ -53,6 +53,16 @@ impl Config {
                     });
                 }
             }
+            "codex" => {
+                if self.llm.token_file.is_none() {
+                    return Err(ServitorError::Config {
+                        reason: "codex provider requires token_file".into(),
+                    });
+                }
+            }
+            "claude-code" => {
+                // Claude Code uses CLI authentication, no config needed
+            }
             other => {
                 return Err(ServitorError::Config {
                     reason: format!("unknown LLM provider: {}", other),
@@ -66,14 +76,20 @@ impl Config {
                 "stdio" => {
                     if mcp.command.is_none() {
                         return Err(ServitorError::Config {
-                            reason: format!("MCP server '{}' with stdio transport requires command", name),
+                            reason: format!(
+                                "MCP server '{}' with stdio transport requires command",
+                                name
+                            ),
                         });
                     }
                 }
                 "http" => {
                     if mcp.url.is_none() {
                         return Err(ServitorError::Config {
-                            reason: format!("MCP server '{}' with http transport requires url", name),
+                            reason: format!(
+                                "MCP server '{}' with http transport requires url",
+                                name
+                            ),
                         });
                     }
                 }
@@ -82,6 +98,18 @@ impl Config {
                         reason: format!("MCP server '{}' has unknown transport: {}", name, other),
                     });
                 }
+            }
+        }
+
+        // Validate scheduled tasks
+        for task in &self.schedule {
+            if task.cron.parse::<cron::Schedule>().is_err() {
+                return Err(ServitorError::Config {
+                    reason: format!(
+                        "scheduled task '{}' has invalid cron expression: {}",
+                        task.name, task.cron
+                    ),
+                });
             }
         }
 
@@ -135,6 +163,7 @@ data_dir = "~/.servitor"
 
 [egregore]
 api_url = "http://127.0.0.1:7654"
+subscribe = true
 
 [llm]
 provider = "anthropic"
@@ -146,6 +175,7 @@ transport = "stdio"
 command = "mcp-server-shell"
 scope.allow = ["execute:~/scripts/*"]
 scope.block = ["execute:/etc/*"]
+on_notification = "Handle event: {{notification}}"
 
 [agent]
 max_turns = 50
@@ -153,10 +183,18 @@ timeout_secs = 300
 
 [heartbeat]
 interval_secs = 10
+
+[[schedule]]
+name = "test-task"
+cron = "0 * * * * *"
+task = "Test task"
+publish = true
 "#;
         let config = Config::from_str(toml).unwrap();
         assert_eq!(config.mcp.len(), 1);
         assert!(config.mcp.contains_key("shell"));
+        assert!(config.egregore.subscribe);
+        assert_eq!(config.schedule.len(), 1);
     }
 
     #[test]
@@ -179,6 +217,22 @@ model = "llama3.3:70b"
 
 [mcp.shell]
 transport = "stdio"
+"#;
+        let result = Config::from_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_invalid_cron() {
+        let toml = r#"
+[llm]
+provider = "ollama"
+model = "llama3.3:70b"
+
+[[schedule]]
+name = "bad-cron"
+cron = "not a cron expression"
+task = "Test"
 "#;
         let result = Config::from_str(toml);
         assert!(result.is_err());

@@ -61,13 +61,17 @@ impl HttpMcpClient {
             });
         }
 
-        let rpc_response: JsonRpcResponse = response.json().await.map_err(|e| ServitorError::Mcp {
-            reason: format!("failed to parse response: {}", e),
-        })?;
+        let rpc_response: JsonRpcResponse =
+            response.json().await.map_err(|e| ServitorError::Mcp {
+                reason: format!("failed to parse response: {}", e),
+            })?;
 
         if rpc_response.id != id {
             return Err(ServitorError::Mcp {
-                reason: format!("response ID mismatch: expected {}, got {}", id, rpc_response.id),
+                reason: format!(
+                    "response ID mismatch: expected {}, got {}",
+                    id, rpc_response.id
+                ),
             });
         }
 

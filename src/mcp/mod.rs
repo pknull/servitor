@@ -1,16 +1,12 @@
-//! MCP client abstraction.
+//! MCP (Model Context Protocol) client layer.
 //!
-//! Provides the McpClient trait and implementations for:
-//! - Stdio transport (subprocess JSON-RPC)
-//! - HTTP transport (JSON-RPC over HTTP)
-//!
-//! The pool manages multiple clients and provides tool introspection
-//! with prefixed tool names for LLM consumption.
+//! Provides a unified interface for communicating with MCP servers
+//! over stdio (subprocess) and HTTP transports.
 
 pub mod client;
 pub mod http;
 pub mod pool;
 pub mod stdio;
 
-pub use client::{McpClient, ToolCallResult, ToolDefinition};
+pub use client::{McpClient, ToolCallResult, ToolContent, ToolDefinition};
 pub use pool::{LlmTool, McpPool};

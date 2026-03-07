@@ -1,0 +1,71 @@
+# Servitor Authority Configuration
+#
+# Defines keepers and their permissions for this Servitor.
+# Place this file at: ~/.servitor/authority.toml
+#
+# If no authority.toml exists, Servitor runs in "open mode" — accepting
+# tasks from any source with no restrictions. Use this for development.
+#
+# In production, define keepers and permissions to control access.
+
+# ==============================================================================
+# KEEPERS
+# ==============================================================================
+# A Keeper is a person with identities across planes (egregore, discord, http).
+# Multiple plane identities can map to the same keeper.
+
+[[keeper]]
+name = "pknull"
+# Egregore pubkey (from egregore identity)
+egregore = "@7JIN8TA3bZ1l786oQ6lPN3l94KEFFH0UlVz9lqTr5+E=.ed25519"
+# Discord user ID
+discord = "187488812471943168"
+
+[[keeper]]
+name = "automation"
+# Automation-only identity (no discord)
+egregore = "@AutomationKey.ed25519"
+
+[[keeper]]
+name = "bot-service"
+# HTTP bearer token auth only
+http_token = "secure-bearer-token-here"
+
+# ==============================================================================
+# PERMISSIONS
+# ==============================================================================
+# Permissions map keepers to places and skills using patterns.
+#
+# Place patterns use colon-delimited hierarchy:
+#   *                              - anywhere
+#   egregore:*                     - any egregore
+#   egregore:local                 - this node's egregore
+#   discord:*                      - any Discord
+#   discord:187489110150086656     - specific guild
+#   discord:187489110150086656:*   - any channel in guild
+#   discord:187489110150086656:123 - specific channel
+#
+# Skill patterns:
+#   *                              - all skills
+#   shell                          - MCP server name (all tools)
+#   shell:*                        - explicit wildcard for all tools
+#   shell:execute                  - specific tool
+#   docker:container_*             - wildcard within tool name
+
+# Full access from anywhere
+[[permission]]
+keeper = "pknull"
+place = "*"
+skills = ["*"]
+
+# Limited automation access — only from local egregore, only docker inspect
+[[permission]]
+keeper = "automation"
+place = "egregore:local"
+skills = ["docker:inspect_*", "docker:logs"]
+
+# Bot service can only use shell from Discord guild
+[[permission]]
+keeper = "bot-service"
+place = "discord:187489110150086656:*"
+skills = ["shell:*"]

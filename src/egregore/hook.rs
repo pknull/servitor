@@ -13,9 +13,12 @@ pub fn receive_message() -> Result<EgregoreMessage> {
     let stdin = io::stdin();
     let mut line = String::new();
 
-    stdin.lock().read_line(&mut line).map_err(|e| ServitorError::Egregore {
-        reason: format!("failed to read from stdin: {}", e),
-    })?;
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| ServitorError::Egregore {
+            reason: format!("failed to read from stdin: {}", e),
+        })?;
 
     if line.is_empty() {
         return Err(ServitorError::Egregore {
@@ -73,7 +76,8 @@ mod tests {
             "hash": "def456",
             "signature": "sig123",
             "tags": ["task"]
-        }).to_string()
+        })
+        .to_string()
     }
 
     #[test]

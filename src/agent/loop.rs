@@ -5,8 +5,10 @@ use sha2::{Digest, Sha256};
 
 use crate::agent::context::ConversationContext;
 use crate::agent::provider::{ContentBlock, Provider, StopReason};
+use crate::authority::Authority;
 use crate::config::AgentConfig;
 use crate::egregore::messages::{Attestation, Task, TaskResult, TaskStatus};
+use crate::egregore::EgregoreClient;
 use crate::error::{Result, ServitorError};
 use crate::identity::Identity;
 use crate::mcp::McpPool;
@@ -19,6 +21,9 @@ pub struct AgentExecutor<'a> {
     scope_enforcer: &'a ScopeEnforcer,
     identity: &'a Identity,
     config: &'a AgentConfig,
+    egregore: Option<&'a EgregoreClient>,
+    authority: Option<&'a Authority>,
+    keeper_name: Option<String>,
 }
 
 impl<'a> AgentExecutor<'a> {
@@ -35,13 +40,53 @@ impl<'a> AgentExecutor<'a> {
             scope_enforcer,
             identity,
             config,
+            egregore: None,
+            authority: None,
+            keeper_name: None,
         }
+    }
+
+    /// Set egregore client for context fetching.
+    pub fn with_egregore(mut self, egregore: &'a EgregoreClient) -> Self {
+        self.egregore = Some(egregore);
+        self
+    }
+
+    /// Set authority for skill permission checks.
+    pub fn with_authority(mut self, authority: &'a Authority, keeper_name: Option<String>) -> Self {
+        self.authority = Some(authority);
+        self.keeper_name = keeper_name;
+        self
     }
 
     /// Execute a task and return the signed result.
     pub async fn execute(&self, task: &Task) -> Result<TaskResult> {
         let mut context = ConversationContext::new();
         let tools = self.mcp_pool.tools_for_llm();
+
+        // Fetch conversation history if task has parent_id and egregore is available
+        if let (Some(parent_id), Some(egregore)) = (&task.parent_id, self.egregore) {
+            match egregore.fetch_conversation_history(parent_id).await {
+                Ok(history) if !history.is_empty() => {
+                    tracing::debug!(
+                        parent_id = %parent_id,
+                        turns = history.len(),
+                        "loaded conversation history"
+                    );
+                    context.prepend_history(history);
+                }
+                Ok(_) => {
+                    tracing::debug!(parent_id = %parent_id, "no conversation history found");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        parent_id = %parent_id,
+                        error = %e,
+                        "failed to fetch conversation history, proceeding without"
+                    );
+                }
+            }
+        }
 
         // Build system prompt
         let system = self.build_system_prompt(task);
@@ -86,7 +131,7 @@ impl<'a> AgentExecutor<'a> {
                 return self.build_result(
                     task,
                     TaskStatus::Success,
-                    Some(serde_json::json!({ "response": result_text })),
+                    Some(serde_json::json!({ "text": result_text })),
                     None,
                 );
             }
@@ -99,7 +144,7 @@ impl<'a> AgentExecutor<'a> {
                 return self.build_result(
                     task,
                     TaskStatus::Success,
-                    Some(serde_json::json!({ "response": result_text })),
+                    Some(serde_json::json!({ "text": result_text })),
                     None,
                 );
             }
@@ -112,9 +157,7 @@ impl<'a> AgentExecutor<'a> {
                     Ok(output) => {
                         ContentBlock::tool_result(tool_id, output.text_content(), output.is_error)
                     }
-                    Err(e) => {
-                        ContentBlock::tool_result(tool_id, e.to_string(), true)
-                    }
+                    Err(e) => ContentBlock::tool_result(tool_id, e.to_string(), true),
                 });
             }
 
@@ -131,24 +174,36 @@ impl<'a> AgentExecutor<'a> {
         arguments: &serde_json::Value,
     ) -> Result<crate::mcp::ToolCallResult> {
         // Parse the prefixed tool name
-        let (mcp_name, tool_name) = self
-            .mcp_pool
-            .parse_tool_name(prefixed_name)
-            .ok_or_else(|| ServitorError::Mcp {
-                reason: format!("unknown tool: {}", prefixed_name),
-            })?;
+        let (mcp_name, tool_name) =
+            self.mcp_pool
+                .parse_tool_name(prefixed_name)
+                .ok_or_else(|| ServitorError::Mcp {
+                    reason: format!("unknown tool: {}", prefixed_name),
+                })?;
 
-        // Check scope enforcement
+        // Check authority skill permission if configured
+        if let (Some(authority), Some(keeper_name)) = (self.authority, &self.keeper_name) {
+            let skill = format!("{}:{}", mcp_name, tool_name);
+            let auth_result = authority.authorize_skill(keeper_name, &skill);
+            if !auth_result.allowed {
+                return Err(ServitorError::Unauthorized {
+                    reason: format!(
+                        "keeper '{}' not authorized for skill '{}': {}",
+                        keeper_name, skill, auth_result.reason
+                    ),
+                });
+            }
+        }
+
+        // Check scope enforcement (existing allow/block patterns)
         self.scope_enforcer.check(mcp_name, tool_name, arguments)?;
 
-        tracing::debug!(
-            mcp = mcp_name,
-            tool = tool_name,
-            "executing tool"
-        );
+        tracing::debug!(mcp = mcp_name, tool = tool_name, "executing tool");
 
         // Execute the tool
-        self.mcp_pool.call_tool(prefixed_name, arguments.clone()).await
+        self.mcp_pool
+            .call_tool(prefixed_name, arguments.clone())
+            .await
     }
 
     /// Build the system prompt for the task.
@@ -160,9 +215,11 @@ impl<'a> AgentExecutor<'a> {
             prompt.push_str("\n\n");
         }
 
-        prompt.push_str("You are a Servitor — a task executor in the egregore network. ");
-        prompt.push_str("Execute the user's task using the available tools. ");
-        prompt.push_str("Be concise and focused. When the task is complete, provide a brief summary.\n\n");
+        prompt.push_str(
+            "You are a Servitor — a task executor in the egregore network. \
+             Execute the user's task using the available tools. \
+             Be concise and focused. When the task is complete, provide a brief summary.\n\n",
+        );
 
         // Add context from task if available
         if !task.context.is_empty() {

@@ -72,12 +72,50 @@ pub struct ResourceLimits {
     pub memory_mb: u64,
 }
 
+impl ResourceLimits {
+    /// Detect actual system resources from /proc.
+    /// Falls back to conservative defaults if detection fails.
+    pub fn detect() -> Self {
+        let cpu = Self::detect_cpu_cores().unwrap_or(2);
+        let memory_mb = Self::detect_memory_mb().unwrap_or(4096);
+        Self { cpu, memory_mb }
+    }
+
+    /// Count CPU cores from /proc/cpuinfo.
+    fn detect_cpu_cores() -> Option<u32> {
+        let content = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+        let count = content
+            .lines()
+            .filter(|line| line.starts_with("processor"))
+            .count();
+        if count > 0 {
+            Some(count as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Get total memory in MB from /proc/meminfo.
+    fn detect_memory_mb() -> Option<u64> {
+        let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in content.lines() {
+            if line.starts_with("MemTotal:") {
+                // Format: "MemTotal:       16384000 kB"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(kb) = parts[1].parse::<u64>() {
+                        return Some(kb / 1024); // Convert kB to MB
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
 impl Default for ResourceLimits {
     fn default() -> Self {
-        Self {
-            cpu: 2,
-            memory_mb: 4096,
-        }
+        Self::detect()
     }
 }
 
@@ -184,7 +222,7 @@ pub struct Task {
     #[serde(default)]
     pub required_caps: Vec<String>,
 
-    /// Parent task ID (for sub-tasks).
+    /// Parent message hash (for threading/context).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
 
@@ -199,6 +237,14 @@ pub struct Task {
     /// Task timeout in seconds.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+
+    /// Author identity (egregore pubkey). Set during intake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+
+    /// Resolved keeper name (set after authorization).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeper: Option<String>,
 }
 
 /// Notification message for outbound communication.
@@ -244,7 +290,7 @@ impl Default for NotificationPriority {
     }
 }
 
-/// Generic egregore message envelope (for hook input).
+/// Generic egregore message envelope (for hook input and context fetching).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EgregoreMessage {
     pub author: PublicId,
@@ -270,5 +316,49 @@ impl EgregoreMessage {
         } else {
             None
         }
+    }
+
+    /// Try to parse content as a TaskResult.
+    pub fn as_task_result(&self) -> Option<TaskResult> {
+        if self.content_type() == Some("task_result") {
+            serde_json::from_value(self.content.clone()).ok()
+        } else {
+            None
+        }
+    }
+
+    /// Get the prompt if this is a task message.
+    pub fn prompt(&self) -> Option<&str> {
+        self.content.get("prompt").and_then(|v| v.as_str())
+    }
+
+    /// Get the parent_id if present.
+    pub fn parent_id(&self) -> Option<&str> {
+        self.content.get("parent_id").and_then(|v| v.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_detection_returns_nonzero() {
+        let limits = ResourceLimits::detect();
+        // Should detect at least 1 CPU and some memory
+        assert!(limits.cpu >= 1, "CPU count should be at least 1");
+        assert!(limits.memory_mb >= 512, "Memory should be at least 512 MB");
+        println!(
+            "Detected: {} CPUs, {} MB memory",
+            limits.cpu, limits.memory_mb
+        );
+    }
+
+    #[test]
+    fn resource_limits_default_uses_detection() {
+        let defaults = ResourceLimits::default();
+        let detected = ResourceLimits::detect();
+        assert_eq!(defaults.cpu, detected.cpu);
+        assert_eq!(defaults.memory_mb, detected.memory_mb);
     }
 }

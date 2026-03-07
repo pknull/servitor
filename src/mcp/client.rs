@@ -104,9 +104,18 @@ pub struct ToolCallResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ToolContent {
-    Text { text: String },
-    Image { data: String, mime_type: String },
-    Resource { uri: String, mime_type: Option<String>, text: Option<String> },
+    Text {
+        text: String,
+    },
+    Image {
+        data: String,
+        mime_type: String,
+    },
+    Resource {
+        uri: String,
+        mime_type: Option<String>,
+        text: Option<String>,
+    },
 }
 
 impl ToolCallResult {
