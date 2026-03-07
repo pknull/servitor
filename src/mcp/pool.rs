@@ -50,7 +50,8 @@ impl McpPool {
             }
         };
 
-        self.clients.insert(name.to_string(), Arc::new(RwLock::new(client)));
+        self.clients
+            .insert(name.to_string(), Arc::new(RwLock::new(client)));
         Ok(())
     }
 
@@ -123,15 +124,18 @@ impl McpPool {
         prefixed_name: &str,
         arguments: serde_json::Value,
     ) -> Result<crate::mcp::client::ToolCallResult> {
-        let (server_name, tool_name) = self.parse_tool_name(prefixed_name).ok_or_else(|| {
-            ServitorError::Mcp {
-                reason: format!("unknown tool: {}", prefixed_name),
-            }
-        })?;
+        let (server_name, tool_name) =
+            self.parse_tool_name(prefixed_name)
+                .ok_or_else(|| ServitorError::Mcp {
+                    reason: format!("unknown tool: {}", prefixed_name),
+                })?;
 
-        let client = self.clients.get(server_name).ok_or_else(|| ServitorError::McpServerNotFound {
-            name: server_name.to_string(),
-        })?;
+        let client =
+            self.clients
+                .get(server_name)
+                .ok_or_else(|| ServitorError::McpServerNotFound {
+                    name: server_name.to_string(),
+                })?;
 
         let client = client.read().await;
         client.call_tool(tool_name, arguments).await

@@ -150,9 +150,12 @@ impl PublicId {
         let sig_bytes = B64.decode(signature_b64).map_err(|e| ServitorError::InvalidKeypair {
             reason: format!("signature base64 decode failed: {e}"),
         })?;
-        let sig_bytes: [u8; 64] = sig_bytes.try_into().map_err(|_| ServitorError::InvalidKeypair {
-            reason: "expected 64 bytes for signature".into(),
-        })?;
+        let sig_bytes: [u8; 64] =
+            sig_bytes
+                .try_into()
+                .map_err(|_| ServitorError::InvalidKeypair {
+                    reason: "expected 64 bytes for signature".into(),
+                })?;
         let signature = Signature::from_bytes(&sig_bytes);
         Ok(vk.verify(message, &signature).is_ok())
     }

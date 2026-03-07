@@ -8,8 +8,14 @@ data_dir = "~/.servitor"
 [egregore]
 # Egregore API endpoint
 api_url = "http://127.0.0.1:7654"
+# Enable SSE subscription in daemon mode (real-time task feed)
+subscribe = false
+# Security: Only accept tasks from these authors (empty = accept all)
+# author_allowlist = [
+#     "@7JIN8TA3bZ1l786oQ6lPN3l94KEFFH0UlVz9lqTr5+E=.ed25519",
+# ]
 
-# Optional: Consumer group for load distribution
+# Optional: Consumer group for load distribution (deferred to v2)
 # [egregore.group]
 # name = "servitors"
 # heartbeat_interval_secs = 10
@@ -61,6 +67,8 @@ timeout_secs = 60
 # Scope enforcement
 scope.allow = ["execute:~/scripts/*", "read:*"]
 scope.block = ["execute:/etc/*", "execute:rm *", "execute:sudo *"]
+# Optional: Convert MCP notifications to tasks
+# on_notification = "Handle event: {{notification}}"
 
 [mcp.docker]
 transport = "stdio"
@@ -77,12 +85,34 @@ scope.block = ["container_lifecycle:traefik", "container_lifecycle:portainer"]
 # timeout_secs = 30
 # scope.allow = ["*"]
 
-# Scheduled tasks (cron-style)
+# Communication transports
+# Discord transport for direct messaging
+# [comms.discord]
+# token_env = "DISCORD_BOT_TOKEN"           # Bot token from environment
+# guild_allowlist = ["123456789"]           # Guilds to respond in (empty = all)
+# require_mention = true                     # Only respond to @mentions
+# user_allowlist = ["987654321"]            # Users allowed to interact (empty = all)
+# notification_channel = "channel-id"       # Where to send notifications
+
+# HTTP webhook transport
+# [comms.http]
+# bind = "127.0.0.1"
+# port = 8765
+# auth_token = "your-secret-token"
+
+# Scheduled tasks (cron-style, 6-field cron with seconds)
 # [[schedule]]
 # name = "daily-email-check"
-# cron = "0 9 * * *"
+# cron = "0 0 9 * * *"           # 9:00 AM daily (sec min hr day mon dow)
 # task = "Check my email and summarize anything important"
+# publish = true                  # Publish result to egregore
 # notify = "discord:channel:inbox-alerts"
+
+# [[schedule]]
+# name = "hourly-backup-check"
+# cron = "0 0 * * * *"           # Every hour at :00
+# task = "Verify backup status and report any failures"
+# publish = false
 
 # Event watchers
 # [[watch]]

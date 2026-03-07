@@ -35,6 +35,18 @@ pub enum ServitorError {
     #[error("Timeout after {seconds}s")]
     Timeout { seconds: u64 },
 
+    #[error("Cron expression error: {reason}")]
+    Cron { reason: String },
+
+    #[error("SSE connection error: {reason}")]
+    Sse { reason: String },
+
+    #[error("Communication transport error: {reason}")]
+    Comms { reason: String },
+
+    #[error("Authorization denied: {reason}")]
+    Unauthorized { reason: String },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

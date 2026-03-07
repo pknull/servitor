@@ -6,9 +6,15 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use servitor::agent::{create_provider, AgentExecutor};
+use servitor::authority::{Authority, AuthRequest, PersonId};
+use servitor::comms::discord::DiscordTransport;
+use servitor::comms::{CommsResponse, CommsTransport};
 use servitor::config::Config;
-use servitor::egregore::{EgregoreClient, ServitorProfile, ScopeConstraints, TaskClaim};
+use servitor::egregore::{EgregoreClient, ScopeConstraints, ServitorProfile, Task, TaskClaim};
 use servitor::error::Result;
+use servitor::events::cron::CronSource;
+use servitor::events::sse::SseSource;
+use servitor::events::EventRouter;
 use servitor::identity::Identity;
 use servitor::mcp::McpPool;
 use servitor::scope::ScopeEnforcer;
@@ -61,8 +67,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -107,6 +113,15 @@ async fn run_hook_mode(config: &Config) -> Result<()> {
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
 
+    // Load authority
+    let authority_path = identity_dir.join("authority.toml");
+    let authority = Authority::load(&authority_path)?;
+    if authority.is_open_mode() {
+        tracing::debug!("authority: open mode (no restrictions)");
+    } else {
+        tracing::debug!("authority: loaded from {}", authority_path.display());
+    }
+
     tracing::info!(id = %identity.public_id(), "starting hook mode");
 
     // Parse incoming message from stdin
@@ -118,10 +133,33 @@ async fn run_hook_mode(config: &Config) -> Result<()> {
         }
     };
 
+    // Check authority (replaces author_allowlist check)
+    let person = PersonId::from_egregore(&message.author.0);
+    let auth_result = authority.authorize(&AuthRequest {
+        person,
+        place: "egregore:local".to_string(),
+        skill: "*".to_string(), // Task intake doesn't specify skill yet
+    });
+
+    if !auth_result.allowed {
+        tracing::info!(
+            author = %message.author.0,
+            reason = %auth_result.reason,
+            "ignoring unauthorized message"
+        );
+        return Ok(());
+    }
+
+    if let Some(ref keeper_name) = auth_result.keeper {
+        tracing::debug!(keeper = %keeper_name, "authorized as keeper");
+    }
+
     // Extract task from message
-    let task = message.as_task().ok_or_else(|| servitor::ServitorError::Egregore {
-        reason: "message is not a task".into(),
-    })?;
+    let task = message
+        .as_task()
+        .ok_or_else(|| servitor::ServitorError::Egregore {
+            reason: "message is not a task".into(),
+        })?;
 
     tracing::info!(hash = %task.hash, prompt = %task.prompt, "received task");
 
@@ -143,14 +181,16 @@ async fn run_hook_mode(config: &Config) -> Result<()> {
         // Continue anyway — claim is advisory
     }
 
-    // Execute task
+    // Execute task with context fetching and authority
     let executor = AgentExecutor::new(
         provider.as_ref(),
         &mcp_pool,
         &scope_enforcer,
         &identity,
         &config.agent,
-    );
+    )
+    .with_egregore(&egregore)
+    .with_authority(&authority, auth_result.keeper.clone());
 
     let result = executor.execute(&task).await?;
 
@@ -169,15 +209,25 @@ async fn run_hook_mode(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Run as a long-lived daemon.
+/// Run as a long-lived daemon with event router.
 async fn run_daemon_mode(config: &Config) -> Result<()> {
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
 
+    // Load authority
+    let authority_path = identity_dir.join("authority.toml");
+    let authority = Authority::load(&authority_path)?;
+    if authority.is_open_mode() {
+        tracing::debug!("authority: open mode (no restrictions)");
+    } else {
+        tracing::debug!("authority: loaded from {}", authority_path.display());
+    }
+
     tracing::info!(id = %identity.public_id(), "starting daemon mode");
 
     // Initialize components
+    let provider = create_provider(&config.llm)?;
     let mut mcp_pool = McpPool::from_config(config)?;
     mcp_pool.initialize_all().await?;
 
@@ -188,25 +238,314 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
 
     let egregore = EgregoreClient::new(&config.egregore.api_url);
 
+    // Build event router for non-comms sources
+    let mut event_router = EventRouter::new();
+
+    // Add cron source if we have scheduled tasks
+    if !config.schedule.is_empty() {
+        let cron_source = CronSource::new(&config.schedule)?;
+        event_router.add_source(Box::new(cron_source));
+        tracing::info!(
+            tasks = config.schedule.len(),
+            "cron source enabled"
+        );
+    }
+
+    // Add SSE source if subscribe is enabled
+    if config.egregore.subscribe {
+        let capabilities = mcp_pool.capabilities();
+        let author_allowlist = config.egregore.author_allowlist.clone();
+        let sse_source = SseSource::new(&config.egregore.api_url, capabilities, author_allowlist);
+        event_router.add_source(Box::new(sse_source));
+        if !config.egregore.author_allowlist.is_empty() {
+            tracing::info!(
+                authors = config.egregore.author_allowlist.len(),
+                "SSE subscription enabled with author filtering"
+            );
+        } else {
+            tracing::info!("SSE subscription enabled (accepting all authors)");
+        }
+    }
+
+    // Initialize comms transports
+    let mut discord_transport: Option<DiscordTransport> = None;
+    if let Some(ref discord_config) = config.comms.discord {
+        match DiscordTransport::new(discord_config) {
+            Ok(mut transport) => {
+                if let Err(e) = transport.connect().await {
+                    tracing::error!(error = %e, "failed to connect Discord transport");
+                } else {
+                    discord_transport = Some(transport);
+                    tracing::info!("Discord transport connected");
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create Discord transport");
+            }
+        }
+    }
+
     // Publish initial profile
     let profile = build_profile(&identity, &mcp_pool, config);
     if let Err(e) = egregore.publish_profile(&profile).await {
         tracing::warn!(error = %e, "failed to publish profile (egregore may be offline)");
     }
 
-    // Heartbeat loop
+    // Main event loop
     let heartbeat_interval = std::time::Duration::from_secs(config.heartbeat.interval_secs);
+    let poll_interval = std::time::Duration::from_millis(100);
+    let mut last_heartbeat = std::time::Instant::now();
+
+    tracing::info!(
+        sources = event_router.source_count(),
+        discord = discord_transport.is_some(),
+        "entering event loop"
+    );
 
     loop {
-        tokio::time::sleep(heartbeat_interval).await;
+        tokio::select! {
+            // Handle Discord messages
+            Some((comms_msg, responder)) = async {
+                if let Some(ref mut transport) = discord_transport {
+                    transport.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                tracing::info!(
+                    source = %comms_msg.source.name(),
+                    user = %comms_msg.user_name,
+                    "received comms message"
+                );
 
-        // Publish heartbeat
-        let profile = build_profile(&identity, &mcp_pool, config);
-        if let Err(e) = egregore.publish_profile(&profile).await {
-            tracing::debug!(error = %e, "heartbeat failed");
-        } else {
-            tracing::debug!("heartbeat published");
+                // Authorize the Discord user
+                let person = PersonId::from_discord(&comms_msg.user_id);
+                let guild_id = match &comms_msg.source {
+                    servitor::comms::CommsSource::Discord { guild_id, .. } => guild_id.clone(),
+                    _ => "dm".to_string(),
+                };
+                let place = format!("discord:{}:{}", guild_id, comms_msg.channel_id);
+                let auth_result = authority.authorize(&AuthRequest {
+                    person,
+                    place,
+                    skill: "*".to_string(),
+                });
+
+                if !auth_result.allowed {
+                    tracing::info!(
+                        user = %comms_msg.user_id,
+                        reason = %auth_result.reason,
+                        "ignoring unauthorized Discord message"
+                    );
+                    // Send rejection message
+                    let comms_response = CommsResponse {
+                        channel_id: comms_msg.channel_id.clone(),
+                        reply_to: Some(comms_msg.message_id.clone()),
+                        content: "You are not authorized to use this Servitor.".to_string(),
+                    };
+                    let _ = responder.send(comms_response).await;
+                    continue;
+                }
+
+                let keeper_name = auth_result.keeper.clone();
+                if let Some(ref name) = keeper_name {
+                    tracing::debug!(keeper = %name, "authorized as keeper");
+                }
+
+                // Build task from comms message
+                let mut task = task_from_comms(&comms_msg);
+                task.keeper = keeper_name.clone();
+
+                // Execute
+                let executor = AgentExecutor::new(
+                    provider.as_ref(),
+                    &mcp_pool,
+                    &scope_enforcer,
+                    &identity,
+                    &config.agent,
+                )
+                .with_egregore(&egregore)
+                .with_authority(&authority, keeper_name);
+
+                match executor.execute(&task).await {
+                    Ok(result) => {
+                        // Extract text response
+                        let response_text = result
+                            .result
+                            .as_ref()
+                            .and_then(|v| v.get("text"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| result.result.as_ref().map(|v| v.to_string()))
+                            .unwrap_or_else(|| "Task completed.".to_string());
+
+                        // Send response back to comms
+                        let comms_response = CommsResponse {
+                            channel_id: comms_msg.channel_id.clone(),
+                            reply_to: Some(comms_msg.message_id.clone()),
+                            content: response_text,
+                        };
+
+                        if let Err(e) = responder.send(comms_response).await {
+                            tracing::error!(error = %e, "failed to send comms response");
+                        }
+
+                        // Also publish to egregore
+                        if let Err(e) = egregore.publish_result(&result).await {
+                            tracing::debug!(error = %e, "failed to publish result to egregore");
+                        }
+
+                        tracing::info!(status = ?result.status, "comms task complete");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "comms task execution failed");
+
+                        // Send error back to user
+                        let comms_response = CommsResponse {
+                            channel_id: comms_msg.channel_id.clone(),
+                            reply_to: Some(comms_msg.message_id.clone()),
+                            content: format!("Error: {}", e),
+                        };
+                        let _ = responder.send(comms_response).await;
+                    }
+                }
+            }
+
+            // Poll other event sources
+            _ = tokio::time::sleep(poll_interval) => {
+                if let Some((source_idx, mut task)) = event_router.poll().await {
+                    tracing::info!(
+                        source = source_idx,
+                        hash = %task.hash,
+                        prompt = %task.prompt,
+                        "processing task from event source"
+                    );
+
+                    // Authorize task if it has an author (from SSE)
+                    let keeper_name = if let Some(ref author) = task.author {
+                        let person = PersonId::from_egregore(author);
+                        let auth_result = authority.authorize(&AuthRequest {
+                            person,
+                            place: "egregore:local".to_string(),
+                            skill: "*".to_string(),
+                        });
+
+                        if !auth_result.allowed {
+                            tracing::info!(
+                                author = %author,
+                                reason = %auth_result.reason,
+                                "skipping unauthorized task"
+                            );
+                            continue;
+                        }
+
+                        if let Some(ref name) = auth_result.keeper {
+                            tracing::debug!(keeper = %name, "authorized as keeper");
+                        }
+                        auth_result.keeper
+                    } else {
+                        // No author (e.g., cron task) - no keeper restriction
+                        None
+                    };
+
+                    // Set keeper on task for downstream use
+                    task.keeper = keeper_name.clone();
+
+                    // Claim and execute
+                    let claim = TaskClaim::new(task.hash.clone(), identity.public_id(), 180);
+                    let _ = egregore.publish_claim(&claim).await;
+
+                    let executor = AgentExecutor::new(
+                        provider.as_ref(),
+                        &mcp_pool,
+                        &scope_enforcer,
+                        &identity,
+                        &config.agent,
+                    )
+                    .with_egregore(&egregore)
+                    .with_authority(&authority, keeper_name);
+
+                    match executor.execute(&task).await {
+                        Ok(result) => {
+                            let should_publish = task
+                                .context
+                                .get("publish")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
+
+                            if should_publish {
+                                if let Err(e) = egregore.publish_result(&result).await {
+                                    tracing::warn!(error = %e, "failed to publish result");
+                                }
+                            }
+
+                            tracing::info!(
+                                status = ?result.status,
+                                hash = %result.result_hash,
+                                "task complete"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "task execution failed");
+                        }
+                    }
+                }
+
+                // Check heartbeat
+                if last_heartbeat.elapsed() >= heartbeat_interval {
+                    let profile = build_profile(&identity, &mcp_pool, config);
+                    if let Err(e) = egregore.publish_profile(&profile).await {
+                        tracing::debug!(error = %e, "heartbeat failed");
+                    } else {
+                        tracing::debug!("heartbeat published");
+                    }
+                    last_heartbeat = std::time::Instant::now();
+                }
+            }
         }
+    }
+}
+
+/// Build a Task from a CommsMessage.
+fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
+    use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
+
+    let mut hasher = Sha256::new();
+    hasher.update(msg.user_id.as_bytes());
+    hasher.update(msg.content.as_bytes());
+    hasher.update(msg.timestamp.timestamp().to_le_bytes());
+    let hash = hasher.finalize();
+    let hash_str: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+
+    let mut context = HashMap::new();
+    context.insert(
+        "source".to_string(),
+        serde_json::json!(msg.source.name()),
+    );
+    context.insert(
+        "user".to_string(),
+        serde_json::json!({
+            "id": msg.user_id,
+            "name": msg.user_name,
+        }),
+    );
+    context.insert(
+        "channel".to_string(),
+        serde_json::json!(msg.channel_id),
+    );
+
+    Task {
+        msg_type: "task".to_string(),
+        hash: hash_str,
+        prompt: msg.content.clone(),
+        required_caps: vec![],
+        parent_id: msg.reply_to.clone(),
+        context,
+        priority: 0,
+        timeout_secs: None,
+        author: None,
+        keeper: None,
     }
 }
 
@@ -238,9 +577,11 @@ async fn run_exec(config: &Config, prompt: &str) -> Result<()> {
         context: std::collections::HashMap::new(),
         priority: 0,
         timeout_secs: Some(config.agent.timeout_secs),
+        author: None,
+        keeper: None,
     };
 
-    // Execute
+    // Execute (no egregore context for direct exec)
     let executor = AgentExecutor::new(
         provider.as_ref(),
         &mcp_pool,
@@ -254,7 +595,10 @@ async fn run_exec(config: &Config, prompt: &str) -> Result<()> {
     // Print result
     println!("Status: {:?}", result.status);
     if let Some(ref r) = result.result {
-        println!("Result: {}", serde_json::to_string_pretty(r).unwrap_or_default());
+        println!(
+            "Result: {}",
+            serde_json::to_string_pretty(r).unwrap_or_default()
+        );
     }
     if let Some(ref e) = result.error {
         println!("Error: {}", e);
@@ -271,9 +615,25 @@ async fn run_info(config: &Config) -> Result<()> {
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
 
+    // Load authority
+    let authority_path = identity_dir.join("authority.toml");
+    let authority = Authority::load(&authority_path)?;
+
     println!("Identity: {}", identity.public_id());
     println!("Data dir: {}", config.identity.data_dir);
     println!();
+
+    // Show authority status
+    if authority.is_open_mode() {
+        println!("Authority: OPEN MODE (no restrictions)");
+        println!("  No authority.toml found at {}", authority_path.display());
+        println!("  Copy authority.example.toml to enable access control.");
+    } else {
+        println!("Authority: RESTRICTED");
+        println!("  File: {}", authority_path.display());
+    }
+    println!();
+
     println!("LLM Provider: {}", config.llm.provider);
     println!("LLM Model: {}", config.llm.model);
     println!();
@@ -286,9 +646,25 @@ async fn run_info(config: &Config) -> Result<()> {
         if !mcp.scope.block.is_empty() {
             println!("    block: {:?}", mcp.scope.block);
         }
+        if let Some(ref template) = mcp.on_notification {
+            println!("    on_notification: {}", template);
+        }
     }
     println!();
     println!("Egregore API: {}", config.egregore.api_url);
+    println!("SSE Subscribe: {}", config.egregore.subscribe);
+    println!();
+
+    if !config.schedule.is_empty() {
+        println!("Scheduled Tasks:");
+        for task in &config.schedule {
+            println!("  - {} ({})", task.name, task.cron);
+            println!("    task: {}", task.task);
+            if task.publish {
+                println!("    publish: true");
+            }
+        }
+    }
 
     Ok(())
 }
@@ -321,10 +697,8 @@ async fn run_init(config: &Config, force: bool) -> Result<()> {
 
 /// Build a ServitorProfile for publishing.
 fn build_profile(identity: &Identity, mcp_pool: &McpPool, config: &Config) -> ServitorProfile {
-    let mut profile = ServitorProfile::new(
-        identity.public_id(),
-        config.heartbeat.interval_secs * 1000,
-    );
+    let mut profile =
+        ServitorProfile::new(identity.public_id(), config.heartbeat.interval_secs * 1000);
 
     // Add capabilities from MCP servers
     profile.capabilities = mcp_pool.capabilities();
@@ -358,6 +732,7 @@ data_dir = "~/.servitor"
 
 [egregore]
 api_url = "http://127.0.0.1:7654"
+subscribe = false
 
 [llm]
 provider = "anthropic"
@@ -376,8 +751,8 @@ interval_secs = 10
 
 /// Simple hash for task ID generation in exec mode.
 fn md5_hash(s: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
