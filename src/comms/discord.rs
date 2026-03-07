@@ -143,13 +143,7 @@ impl EventHandler for DiscordHandler {
             }
         }
 
-        // Check user allowlist
-        if !self.config.user_allowlist.is_empty()
-            && !self.config.user_allowlist.contains(&msg.author.id.to_string())
-        {
-            debug!("Ignoring message from non-allowlisted user: {}", msg.author.id);
-            return;
-        }
+        // User authorization is handled by Authority in main.rs
 
         // Get bot ID
         let bot_id = {
