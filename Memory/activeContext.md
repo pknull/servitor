@@ -1,6 +1,6 @@
 ---
-version: "1.2"
-lastUpdated: "2026-03-06"
+version: "1.3"
+lastUpdated: "2026-03-07"
 lifecycle: "active"
 stakeholder: "all"
 changeTrigger: "Session activity"
@@ -11,20 +11,24 @@ dependencies: ["projectbrief.md"]
 
 ## Current Status
 
-**Phase**: Person/Place/Skill authorization complete
+**Phase**: Deployed to production
 
 **Recent Activity**:
 
+- 2026-03-07: Production deployment and cleanup
+  - Deployed to .14 (x86_64) and .16 (aarch64) with new authority system
+  - Configured keeper identity (pknull) on both machines
+  - Removed legacy allowlist code (author_allowlist, user_allowlist)
+  - Single source of truth: `~/.servitor/authority.toml`
+  - Created GitHub repo: https://github.com/pknull/servitor (private)
+  - 69 tests passing (61 unit + 8 integration)
 - 2026-03-06: Person/Place/Skill authorization implemented
   - New `authority` module with Keeper, Permission, pattern matching
   - Authorization integrated into hook mode, daemon mode (SSE + Discord)
   - Skill permission checks in AgentExecutor before tool execution
-  - 70 tests passing (62 unit + 8 integration)
-  - Example config: `authority.example.toml`
 - 2026-03-05: v1 clean-room rebuild complete
   - All core modules reimplemented with tighter code
   - New features: context fetching, cron scheduler, SSE subscription
-  - CLI working: `servitor init`, `servitor info`, `servitor exec`, `servitor run`
 
 ## Implementation Status
 
@@ -50,12 +54,14 @@ Person/Place/Skill authorization via `~/.servitor/authority.toml`:
 
 No authority.toml = open mode (accept all). Useful for development.
 
-## New in v1.2
+## Deployment
 
-- **Authority module**: `src/authority/` with keeper, permission, pattern matching
-- **Task metadata**: `author` and `keeper` fields on Task for tracking
-- **Skill enforcement**: AgentExecutor checks skill permissions before tool calls
-- **Info command**: Shows authority status (open mode vs restricted)
+| Host | Arch | LLM Provider | Status |
+|------|------|--------------|--------|
+| 172.16.0.14 (homebox2) | x86_64 | claude-code | Running |
+| 172.16.0.16 (openclaw) | aarch64 | codex | Running |
+
+Both configured with keeper "pknull" having full access.
 
 ## Deferred (v2)
 
@@ -69,10 +75,9 @@ None currently.
 
 ## Next Steps
 
-- Integration test with real MCP server (mcp-server-shell)
-- Test SSE subscription with running egregore daemon
-- Test cron task execution in daemon mode
-- Test Discord with authority restrictions
+- Add MCP servers to deployed Servitors (shell, docker, etc.)
+- Test end-to-end task flow via Discord
+- Consider adding more keepers for automation use cases
 
 ## Quick Reference
 
