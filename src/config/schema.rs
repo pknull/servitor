@@ -73,11 +73,6 @@ pub struct EgregoreConfig {
     #[serde(default)]
     pub subscribe: bool,
 
-    /// Author allowlist — only accept tasks from these public IDs.
-    /// Empty list = accept from all authors.
-    #[serde(default)]
-    pub author_allowlist: Vec<String>,
-
     /// Consumer group configuration.
     #[serde(default)]
     pub group: Option<ConsumerGroupConfig>,
@@ -88,7 +83,6 @@ impl Default for EgregoreConfig {
         Self {
             api_url: default_egregore_url(),
             subscribe: false,
-            author_allowlist: vec![],
             group: None,
         }
     }
@@ -323,10 +317,6 @@ pub struct DiscordConfig {
     /// Require @mention to respond.
     #[serde(default = "default_true")]
     pub require_mention: bool,
-
-    /// User IDs allowed to interact (empty = all users).
-    #[serde(default)]
-    pub user_allowlist: Vec<String>,
 
     /// Channel for sending notifications.
     #[serde(default)]

@@ -1,4 +1,7 @@
 //! SSE event source — egregore feed subscription.
+//!
+//! Authorization is handled by the Authority system in the main event loop,
+//! not here. This source just delivers tasks with author info attached.
 
 use std::collections::HashSet;
 
@@ -14,7 +17,6 @@ use crate::events::EventSource;
 pub struct SseSource {
     api_url: String,
     capabilities: HashSet<String>,
-    author_allowlist: HashSet<String>,
     event_source: Option<ReqwestEventSource>,
     pending_task: Option<Task>,
     connected: bool,
@@ -22,24 +24,14 @@ pub struct SseSource {
 
 impl SseSource {
     /// Create a new SSE source.
-    pub fn new(api_url: &str, capabilities: Vec<String>, author_allowlist: Vec<String>) -> Self {
+    pub fn new(api_url: &str, capabilities: Vec<String>) -> Self {
         Self {
             api_url: api_url.trim_end_matches('/').to_string(),
             capabilities: capabilities.into_iter().collect(),
-            author_allowlist: author_allowlist.into_iter().collect(),
             event_source: None,
             pending_task: None,
             connected: false,
         }
-    }
-
-    /// Check if an author is allowed.
-    fn is_author_allowed(&self, author: &str) -> bool {
-        // Empty allowlist = accept all
-        if self.author_allowlist.is_empty() {
-            return true;
-        }
-        self.author_allowlist.contains(author)
     }
 
     /// Connect to the SSE endpoint.
@@ -83,16 +75,7 @@ impl SseSource {
                 // Try to parse as egregore message
                 match serde_json::from_str::<EgregoreMessage>(&msg.data) {
                     Ok(message) => {
-                        // Check author allowlist first
-                        if !self.is_author_allowed(&message.author.0) {
-                            tracing::trace!(
-                                author = %message.author.0,
-                                "skipping message (author not in allowlist)"
-                            );
-                            return None;
-                        }
-
-                        // Check if it's a task
+                        // Check if it's a task (authorization handled by Authority in main loop)
                         if let Some(mut task) = message.as_task() {
                             if self.matches_capabilities(&task) {
                                 // Attach author for authorization check in main loop
@@ -183,7 +166,7 @@ mod tests {
 
     #[test]
     fn capability_matching() {
-        let source = SseSource::new("http://localhost:7654", vec!["shell".to_string()], vec![]);
+        let source = SseSource::new("http://localhost:7654", vec!["shell".to_string()]);
 
         // Task with no required caps matches
         let task1 = Task {
@@ -229,21 +212,5 @@ mod tests {
             keeper: None,
         };
         assert!(!source.matches_capabilities(&task3));
-    }
-
-    #[test]
-    fn author_filtering() {
-        // Empty allowlist accepts all
-        let source1 = SseSource::new("http://localhost:7654", vec![], vec![]);
-        assert!(source1.is_author_allowed("@anyone.ed25519"));
-
-        // Non-empty allowlist filters
-        let source2 = SseSource::new(
-            "http://localhost:7654",
-            vec![],
-            vec!["@allowed.ed25519".to_string()],
-        );
-        assert!(source2.is_author_allowed("@allowed.ed25519"));
-        assert!(!source2.is_author_allowed("@denied.ed25519"));
     }
 }

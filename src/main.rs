@@ -254,17 +254,9 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
     // Add SSE source if subscribe is enabled
     if config.egregore.subscribe {
         let capabilities = mcp_pool.capabilities();
-        let author_allowlist = config.egregore.author_allowlist.clone();
-        let sse_source = SseSource::new(&config.egregore.api_url, capabilities, author_allowlist);
+        let sse_source = SseSource::new(&config.egregore.api_url, capabilities);
         event_router.add_source(Box::new(sse_source));
-        if !config.egregore.author_allowlist.is_empty() {
-            tracing::info!(
-                authors = config.egregore.author_allowlist.len(),
-                "SSE subscription enabled with author filtering"
-            );
-        } else {
-            tracing::info!("SSE subscription enabled (accepting all authors)");
-        }
+        tracing::info!("SSE subscription enabled");
     }
 
     // Initialize comms transports
