@@ -50,9 +50,13 @@ impl StdioMcpClient {
 
     /// Spawn the subprocess.
     async fn spawn(&self) -> Result<()> {
-        let command = self.config.command.as_ref().ok_or_else(|| ServitorError::Mcp {
-            reason: format!("no command specified for MCP server '{}'", self.name),
-        })?;
+        let command = self
+            .config
+            .command
+            .as_ref()
+            .ok_or_else(|| ServitorError::Mcp {
+                reason: format!("no command specified for MCP server '{}'", self.name),
+            })?;
 
         let mut cmd = Command::new(command);
         cmd.args(&self.config.args)
@@ -107,9 +111,12 @@ impl StdioMcpClient {
             reason: "MCP server not started".into(),
         })?;
 
-        stdin.write_all(json.as_bytes()).await.map_err(|e| ServitorError::Mcp {
-            reason: format!("failed to write to MCP server: {}", e),
-        })?;
+        stdin
+            .write_all(json.as_bytes())
+            .await
+            .map_err(|e| ServitorError::Mcp {
+                reason: format!("failed to write to MCP server: {}", e),
+            })?;
         stdin.flush().await.map_err(|e| ServitorError::Mcp {
             reason: format!("failed to flush MCP server stdin: {}", e),
         })?;
@@ -120,13 +127,17 @@ impl StdioMcpClient {
         })?;
 
         let mut line = String::new();
-        stdout.read_line(&mut line).await.map_err(|e| ServitorError::Mcp {
-            reason: format!("failed to read from MCP server: {}", e),
-        })?;
+        stdout
+            .read_line(&mut line)
+            .await
+            .map_err(|e| ServitorError::Mcp {
+                reason: format!("failed to read from MCP server: {}", e),
+            })?;
 
-        let response: JsonRpcResponse = serde_json::from_str(&line).map_err(|e| ServitorError::Mcp {
-            reason: format!("failed to parse MCP response: {} (line: {})", e, line.trim()),
-        })?;
+        let response: JsonRpcResponse =
+            serde_json::from_str(&line).map_err(|e| ServitorError::Mcp {
+                reason: format!("failed to parse MCP response: {} (line: {})", e, line.trim()),
+            })?;
 
         if response.id != id {
             return Err(ServitorError::Mcp {

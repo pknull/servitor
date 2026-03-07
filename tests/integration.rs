@@ -100,6 +100,8 @@ fn task_message_construction() {
         context: std::collections::HashMap::new(),
         priority: 0,
         timeout_secs: Some(60),
+        author: None,
+        keeper: None,
     };
 
     let json = serde_json::to_string(&task).unwrap();

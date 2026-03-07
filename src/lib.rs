@@ -28,15 +28,28 @@
 //! | Communication | Message transport | Egregore, Discord, TUI |
 //! | Tool | Execution capabilities | MCP servers (Docker, Shell) |
 //! | LLM | Inference/reasoning | Claude, Ollama, OpenAI |
+//!
+//! ## Event Sources
+//!
+//! Servitor can receive tasks from multiple sources:
+//! - **Cron**: Scheduled tasks via cron expressions
+//! - **SSE**: Egregore feed subscription (real-time)
+//! - **MCP Notifications**: Server-pushed events
+//! - **Hook**: Stdin JSON (for egregore hook mode)
+//! - **Direct**: CLI exec command
 
 pub mod agent;
+pub mod authority;
+pub mod comms;
 pub mod config;
 pub mod egregore;
 pub mod error;
+pub mod events;
 pub mod identity;
 pub mod mcp;
 pub mod scope;
 
+pub use authority::{Authority, AuthRequest, AuthResult, Keeper, PersonId};
 pub use config::Config;
 pub use error::{Result, ServitorError};
 pub use identity::{Identity, PublicId};

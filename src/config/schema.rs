@@ -29,6 +29,10 @@ pub struct Config {
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
 
+    /// Communication transports.
+    #[serde(default)]
+    pub comms: CommsConfig,
+
     /// Scheduled tasks.
     #[serde(default)]
     pub schedule: Vec<ScheduledTask>,
@@ -65,6 +69,15 @@ pub struct EgregoreConfig {
     #[serde(default = "default_egregore_url")]
     pub api_url: String,
 
+    /// Enable SSE subscription in daemon mode.
+    #[serde(default)]
+    pub subscribe: bool,
+
+    /// Author allowlist — only accept tasks from these public IDs.
+    /// Empty list = accept from all authors.
+    #[serde(default)]
+    pub author_allowlist: Vec<String>,
+
     /// Consumer group configuration.
     #[serde(default)]
     pub group: Option<ConsumerGroupConfig>,
@@ -74,6 +87,8 @@ impl Default for EgregoreConfig {
     fn default() -> Self {
         Self {
             api_url: default_egregore_url(),
+            subscribe: false,
+            author_allowlist: vec![],
             group: None,
         }
     }
@@ -101,7 +116,7 @@ fn default_group_heartbeat() -> u64 {
 /// LLM provider configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
-    /// Provider type: "anthropic", "openai", "ollama", "openai-compat".
+    /// Provider type: "anthropic", "openai", "ollama", "openai-compat", "codex".
     pub provider: String,
 
     /// Model identifier.
@@ -114,6 +129,15 @@ pub struct LlmConfig {
     /// Base URL for OpenAI-compatible providers.
     #[serde(default)]
     pub base_url: Option<String>,
+
+    /// Path to OAuth token file (for codex provider).
+    /// Supports OpenClaw's auth-profiles.json format.
+    #[serde(default)]
+    pub token_file: Option<String>,
+
+    /// OAuth profile name to use (default: "openai-codex:default").
+    #[serde(default)]
+    pub oauth_profile: Option<String>,
 
     /// Maximum tokens to generate.
     #[serde(default)]
@@ -153,6 +177,10 @@ pub struct McpServerConfig {
     /// Timeout for tool calls in seconds.
     #[serde(default = "default_mcp_timeout")]
     pub timeout_secs: u64,
+
+    /// Task template for notifications (supports {{notification}} interpolation).
+    #[serde(default)]
+    pub on_notification: Option<String>,
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -237,6 +265,10 @@ pub struct ScheduledTask {
     /// Task prompt.
     pub task: String,
 
+    /// Whether to publish result to egregore.
+    #[serde(default)]
+    pub publish: bool,
+
     /// Notification channel.
     #[serde(default)]
     pub notify: Option<String>,
@@ -264,4 +296,67 @@ pub struct WatchConfig {
     /// Notification channel.
     #[serde(default)]
     pub notify: Option<String>,
+}
+
+/// Communication transport configuration.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CommsConfig {
+    /// Discord transport.
+    #[serde(default)]
+    pub discord: Option<DiscordConfig>,
+
+    /// HTTP webhook transport.
+    #[serde(default)]
+    pub http: Option<HttpCommsConfig>,
+}
+
+/// Discord transport configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DiscordConfig {
+    /// Environment variable containing bot token.
+    pub token_env: String,
+
+    /// Guild IDs to allow (empty = all guilds).
+    #[serde(default)]
+    pub guild_allowlist: Vec<String>,
+
+    /// Require @mention to respond.
+    #[serde(default = "default_true")]
+    pub require_mention: bool,
+
+    /// User IDs allowed to interact (empty = all users).
+    #[serde(default)]
+    pub user_allowlist: Vec<String>,
+
+    /// Channel for sending notifications.
+    #[serde(default)]
+    pub notification_channel: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// HTTP webhook transport configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HttpCommsConfig {
+    /// Bind address.
+    #[serde(default = "default_http_bind")]
+    pub bind: String,
+
+    /// Port.
+    #[serde(default = "default_http_port")]
+    pub port: u16,
+
+    /// Authentication token (optional).
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+fn default_http_bind() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_http_port() -> u16 {
+    8765
 }

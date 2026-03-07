@@ -1,0 +1,249 @@
+//! SSE event source — egregore feed subscription.
+
+use std::collections::HashSet;
+
+use async_trait::async_trait;
+use futures::StreamExt;
+use reqwest_eventsource::{Event, EventSource as ReqwestEventSource};
+
+use crate::egregore::{EgregoreMessage, Task};
+use crate::error::{Result, ServitorError};
+use crate::events::EventSource;
+
+/// SSE-based event source for egregore feed subscription.
+pub struct SseSource {
+    api_url: String,
+    capabilities: HashSet<String>,
+    author_allowlist: HashSet<String>,
+    event_source: Option<ReqwestEventSource>,
+    pending_task: Option<Task>,
+    connected: bool,
+}
+
+impl SseSource {
+    /// Create a new SSE source.
+    pub fn new(api_url: &str, capabilities: Vec<String>, author_allowlist: Vec<String>) -> Self {
+        Self {
+            api_url: api_url.trim_end_matches('/').to_string(),
+            capabilities: capabilities.into_iter().collect(),
+            author_allowlist: author_allowlist.into_iter().collect(),
+            event_source: None,
+            pending_task: None,
+            connected: false,
+        }
+    }
+
+    /// Check if an author is allowed.
+    fn is_author_allowed(&self, author: &str) -> bool {
+        // Empty allowlist = accept all
+        if self.author_allowlist.is_empty() {
+            return true;
+        }
+        self.author_allowlist.contains(author)
+    }
+
+    /// Connect to the SSE endpoint.
+    pub fn connect(&mut self) -> Result<()> {
+        let url = format!("{}/v1/events", self.api_url);
+        tracing::info!(url = %url, "connecting to egregore SSE");
+
+        let client = reqwest::Client::new();
+        let request = client.get(&url);
+        let event_source = ReqwestEventSource::new(request).map_err(|e| ServitorError::Sse {
+            reason: format!("failed to create SSE connection: {}", e),
+        })?;
+
+        self.event_source = Some(event_source);
+        self.connected = true;
+        Ok(())
+    }
+
+    /// Check if a task matches our capabilities.
+    fn matches_capabilities(&self, task: &Task) -> bool {
+        // If task has no required caps, accept it
+        if task.required_caps.is_empty() {
+            return true;
+        }
+
+        // Check if we have all required capabilities
+        task.required_caps
+            .iter()
+            .all(|cap| self.capabilities.contains(cap))
+    }
+
+    /// Process an SSE event.
+    fn process_event(&mut self, event: &Event) -> Option<Task> {
+        match event {
+            Event::Open => {
+                tracing::info!("SSE connection established");
+                self.connected = true;
+                None
+            }
+            Event::Message(msg) => {
+                // Try to parse as egregore message
+                match serde_json::from_str::<EgregoreMessage>(&msg.data) {
+                    Ok(message) => {
+                        // Check author allowlist first
+                        if !self.is_author_allowed(&message.author.0) {
+                            tracing::trace!(
+                                author = %message.author.0,
+                                "skipping message (author not in allowlist)"
+                            );
+                            return None;
+                        }
+
+                        // Check if it's a task
+                        if let Some(mut task) = message.as_task() {
+                            if self.matches_capabilities(&task) {
+                                // Attach author for authorization check in main loop
+                                task.author = Some(message.author.0.clone());
+
+                                tracing::debug!(
+                                    hash = %task.hash,
+                                    author = %message.author.0,
+                                    prompt = %task.prompt,
+                                    "received matching task from SSE"
+                                );
+                                return Some(task);
+                            } else {
+                                tracing::trace!(
+                                    hash = %task.hash,
+                                    required_caps = ?task.required_caps,
+                                    "skipping task (capability mismatch)"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::trace!(error = %e, "failed to parse SSE message");
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl EventSource for SseSource {
+    async fn next(&mut self) -> Option<Task> {
+        // Return pending task if we have one
+        if let Some(task) = self.pending_task.take() {
+            return Some(task);
+        }
+
+        // Ensure we're connected
+        if self.event_source.is_none() {
+            if let Err(e) = self.connect() {
+                tracing::warn!(error = %e, "failed to connect to SSE");
+                return None;
+            }
+        }
+
+        // Poll the event source
+        if let Some(ref mut es) = self.event_source {
+            // Try to get one event without blocking too long
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                es.next(),
+            )
+            .await
+            {
+                Ok(Some(Ok(event))) => {
+                    return self.process_event(&event);
+                }
+                Ok(Some(Err(e))) => {
+                    tracing::warn!(error = %e, "SSE error, will reconnect");
+                    self.event_source = None;
+                    self.connected = false;
+                }
+                Ok(None) => {
+                    // Stream ended
+                    tracing::info!("SSE stream ended, will reconnect");
+                    self.event_source = None;
+                    self.connected = false;
+                }
+                Err(_) => {
+                    // Timeout, no events available
+                }
+            }
+        }
+
+        None
+    }
+
+    fn name(&self) -> &str {
+        "sse"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_matching() {
+        let source = SseSource::new("http://localhost:7654", vec!["shell".to_string()], vec![]);
+
+        // Task with no required caps matches
+        let task1 = Task {
+            msg_type: "task".to_string(),
+            hash: "abc".to_string(),
+            prompt: "test".to_string(),
+            required_caps: vec![],
+            parent_id: None,
+            context: Default::default(),
+            priority: 0,
+            timeout_secs: None,
+            author: None,
+            keeper: None,
+        };
+        assert!(source.matches_capabilities(&task1));
+
+        // Task requiring shell matches
+        let task2 = Task {
+            msg_type: "task".to_string(),
+            hash: "def".to_string(),
+            prompt: "test".to_string(),
+            required_caps: vec!["shell".to_string()],
+            parent_id: None,
+            context: Default::default(),
+            priority: 0,
+            timeout_secs: None,
+            author: None,
+            keeper: None,
+        };
+        assert!(source.matches_capabilities(&task2));
+
+        // Task requiring docker doesn't match
+        let task3 = Task {
+            msg_type: "task".to_string(),
+            hash: "ghi".to_string(),
+            prompt: "test".to_string(),
+            required_caps: vec!["docker".to_string()],
+            parent_id: None,
+            context: Default::default(),
+            priority: 0,
+            timeout_secs: None,
+            author: None,
+            keeper: None,
+        };
+        assert!(!source.matches_capabilities(&task3));
+    }
+
+    #[test]
+    fn author_filtering() {
+        // Empty allowlist accepts all
+        let source1 = SseSource::new("http://localhost:7654", vec![], vec![]);
+        assert!(source1.is_author_allowed("@anyone.ed25519"));
+
+        // Non-empty allowlist filters
+        let source2 = SseSource::new(
+            "http://localhost:7654",
+            vec![],
+            vec!["@allowed.ed25519".to_string()],
+        );
+        assert!(source2.is_author_allowed("@allowed.ed25519"));
+        assert!(!source2.is_author_allowed("@denied.ed25519"));
+    }
+}
