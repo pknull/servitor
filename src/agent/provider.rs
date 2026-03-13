@@ -1022,7 +1022,7 @@ impl Provider for CodexOAuthProvider {
         while let Some(event) = stream.next().await {
             match event {
                 Ok(evt) => {
-                    tracing::info!(event = %evt.event, data = %evt.data, "SSE event received");
+                    tracing::debug!(event = %evt.event, data_len = evt.data.len(), "SSE event received");
 
                     if evt.event == "error" {
                         return Err(ServitorError::Provider {
@@ -1047,7 +1047,7 @@ impl Provider for CodexOAuthProvider {
                     // ChatGPT backend may use different event format
                     // Check for direct "response" field first (simple response)
                     if let Some(response_text) = data.get("response").and_then(|v| v.as_str()) {
-                        tracing::info!(response = %response_text, "Got direct response");
+                        tracing::debug!(response_len = response_text.len(), "Got direct response");
                         accumulated_text.push_str(response_text);
                         continue;
                     }

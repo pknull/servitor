@@ -153,6 +153,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         let config = Config::from_str(toml).unwrap();
         assert_eq!(config.llm.provider, "anthropic");
         assert_eq!(config.llm.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.heartbeat.interval_secs, 300);
     }
 
     #[test]

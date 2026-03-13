@@ -190,9 +190,9 @@ impl EventHandler for DiscordHandler {
             return;
         }
 
-        tracing::info!(
+        tracing::debug!(
             user = %msg.author.name,
-            content = %content,
+            content_len = content.len(),
             "Discord message passed all filters"
         );
 

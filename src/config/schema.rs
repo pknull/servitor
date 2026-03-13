@@ -244,7 +244,7 @@ impl Default for HeartbeatConfig {
 }
 
 fn default_heartbeat_interval() -> u64 {
-    10
+    300
 }
 
 /// Scheduled task configuration.
