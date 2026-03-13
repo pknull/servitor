@@ -47,6 +47,15 @@ pub enum ServitorError {
     #[error("Authorization denied: {reason}")]
     Unauthorized { reason: String },
 
+    #[error("Memory store error: {reason}")]
+    Memory { reason: String },
+
+    #[error("Sync error: {reason}")]
+    Sync { reason: String },
+
+    #[error("Server unavailable: {service}")]
+    ServerUnavailable { service: String },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

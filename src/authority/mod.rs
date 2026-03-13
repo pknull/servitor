@@ -170,10 +170,7 @@ impl Authority {
         let keeper = match self.identify(&req.person) {
             Some(k) => k,
             None => {
-                return AuthResult::denied(format!(
-                    "unknown identity: {}",
-                    req.person.display()
-                ));
+                return AuthResult::denied(format!("unknown identity: {}", req.person.display()));
             }
         };
 
@@ -232,7 +229,10 @@ impl Authority {
             }
         }
 
-        AuthResult::denied_keeper(keeper_name, format!("no matching permission for skill={skill}"))
+        AuthResult::denied_keeper(
+            keeper_name,
+            format!("no matching permission for skill={skill}"),
+        )
     }
 }
 

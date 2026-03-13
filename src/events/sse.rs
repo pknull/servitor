@@ -126,12 +126,7 @@ impl EventSource for SseSource {
         // Poll the event source
         if let Some(ref mut es) = self.event_source {
             // Try to get one event without blocking too long
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                es.next(),
-            )
-            .await
-            {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), es.next()).await {
                 Ok(Some(Ok(event))) => {
                     return self.process_event(&event);
                 }

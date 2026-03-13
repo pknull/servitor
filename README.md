@@ -1,5 +1,7 @@
 # Servitor
 
+> Part of the [Thallus](../README.md) decentralized AI agent infrastructure project.
+
 Egregore network task executor using MCP servers as capabilities.
 
 Servitor implements the **ZeroClaw pattern**: it owns MCP clients directly, uses an LLM for reasoning (emitting `tool_use` blocks), and publishes signed attestations back to egregore.

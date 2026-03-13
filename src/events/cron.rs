@@ -85,18 +85,9 @@ impl CronSource {
                 tracing::info!(name = %entry.name, "scheduled task triggered");
 
                 let mut context = HashMap::new();
-                context.insert(
-                    "source".to_string(),
-                    serde_json::json!("scheduled"),
-                );
-                context.insert(
-                    "schedule_name".to_string(),
-                    serde_json::json!(entry.name),
-                );
-                context.insert(
-                    "publish".to_string(),
-                    serde_json::json!(entry.publish),
-                );
+                context.insert("source".to_string(), serde_json::json!("scheduled"));
+                context.insert("schedule_name".to_string(), serde_json::json!(entry.name));
+                context.insert("publish".to_string(), serde_json::json!(entry.publish));
                 if let Some(ref notify) = entry.notify {
                     context.insert("notify".to_string(), serde_json::json!(notify));
                 }
@@ -114,18 +105,14 @@ impl CronSource {
 
     /// Get the time until the next scheduled task.
     pub fn time_until_next(&self) -> Option<std::time::Duration> {
-        self.entries
-            .iter()
-            .map(|e| e.next_run)
-            .min()
-            .map(|next| {
-                let now = Utc::now();
-                if next > now {
-                    (next - now).to_std().unwrap_or(std::time::Duration::ZERO)
-                } else {
-                    std::time::Duration::ZERO
-                }
-            })
+        self.entries.iter().map(|e| e.next_run).min().map(|next| {
+            let now = Utc::now();
+            if next > now {
+                (next - now).to_std().unwrap_or(std::time::Duration::ZERO)
+            } else {
+                std::time::Duration::ZERO
+            }
+        })
     }
 }
 

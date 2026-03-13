@@ -31,7 +31,7 @@ max_turns = 10
 timeout_secs = 60
 "#;
 
-    let config = Config::from_str(toml).unwrap();
+    let config = Config::parse(toml).unwrap();
     assert_eq!(config.llm.provider, "anthropic");
     assert_eq!(config.mcp.len(), 1);
     assert!(config.mcp.contains_key("test"));
@@ -181,7 +181,11 @@ fn agent_context() {
     ctx.add_user_message("Hello, execute a task");
     ctx.add_assistant_message(vec![
         ContentBlock::text("I'll help with that."),
-        ContentBlock::tool_use("call_1", "shell_execute", serde_json::json!({"command": "ls"})),
+        ContentBlock::tool_use(
+            "call_1",
+            "shell_execute",
+            serde_json::json!({"command": "ls"}),
+        ),
     ]);
     ctx.add_tool_results(vec![ContentBlock::tool_result(
         "call_1",

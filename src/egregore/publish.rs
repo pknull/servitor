@@ -54,12 +54,9 @@ impl EgregoreClient {
         }
 
         let envelope: ApiResponse<PublishedMessage> =
-            response
-                .json()
-                .await
-                .map_err(|e| ServitorError::Egregore {
-                    reason: format!("failed to parse publish response: {}", e),
-                })?;
+            response.json().await.map_err(|e| ServitorError::Egregore {
+                reason: format!("failed to parse publish response: {}", e),
+            })?;
 
         envelope.data.ok_or_else(|| ServitorError::Egregore {
             reason: "publish response missing data field".into(),

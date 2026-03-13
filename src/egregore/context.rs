@@ -11,9 +11,11 @@ impl EgregoreClient {
     pub async fn fetch_message(&self, hash: &str) -> Result<Option<EgregoreMessage>> {
         let url = format!("{}/v1/messages/{}", self.api_url(), hash);
 
-        let response = reqwest::get(&url).await.map_err(|e| ServitorError::Egregore {
-            reason: format!("fetch message request failed: {}", e),
-        })?;
+        let response = reqwest::get(&url)
+            .await
+            .map_err(|e| ServitorError::Egregore {
+                reason: format!("fetch message request failed: {}", e),
+            })?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -28,12 +30,9 @@ impl EgregoreClient {
         }
 
         let wrapper: MessageWrapper =
-            response
-                .json()
-                .await
-                .map_err(|e| ServitorError::Egregore {
-                    reason: format!("failed to parse message response: {}", e),
-                })?;
+            response.json().await.map_err(|e| ServitorError::Egregore {
+                reason: format!("failed to parse message response: {}", e),
+            })?;
 
         Ok(Some(wrapper.message))
     }
@@ -44,9 +43,11 @@ impl EgregoreClient {
     pub async fn fetch_thread(&self, hash: &str) -> Result<Vec<EgregoreMessage>> {
         let url = format!("{}/v1/thread/{}", self.api_url(), hash);
 
-        let response = reqwest::get(&url).await.map_err(|e| ServitorError::Egregore {
-            reason: format!("fetch thread request failed: {}", e),
-        })?;
+        let response = reqwest::get(&url)
+            .await
+            .map_err(|e| ServitorError::Egregore {
+                reason: format!("fetch thread request failed: {}", e),
+            })?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             // No thread found, try fetching just the message
@@ -65,12 +66,9 @@ impl EgregoreClient {
         }
 
         let wrapper: ThreadWrapper =
-            response
-                .json()
-                .await
-                .map_err(|e| ServitorError::Egregore {
-                    reason: format!("failed to parse thread response: {}", e),
-                })?;
+            response.json().await.map_err(|e| ServitorError::Egregore {
+                reason: format!("failed to parse thread response: {}", e),
+            })?;
 
         Ok(wrapper.messages)
     }
@@ -78,10 +76,7 @@ impl EgregoreClient {
     /// Build conversation history from a thread.
     ///
     /// Extracts prompts and responses from messages, suitable for LLM context.
-    pub async fn fetch_conversation_history(
-        &self,
-        hash: &str,
-    ) -> Result<Vec<ConversationTurn>> {
+    pub async fn fetch_conversation_history(&self, hash: &str) -> Result<Vec<ConversationTurn>> {
         let messages = self.fetch_thread(hash).await?;
         let mut turns = Vec::new();
 

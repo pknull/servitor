@@ -47,9 +47,11 @@ pub mod error;
 pub mod events;
 pub mod identity;
 pub mod mcp;
+pub mod memory;
 pub mod scope;
 
-pub use authority::{Authority, AuthRequest, AuthResult, Keeper, PersonId};
-pub use config::Config;
+pub use authority::{AuthRequest, AuthResult, Authority, Keeper, PersonId};
+pub use config::{Config, DeploymentMode};
 pub use error::{Result, ServitorError};
 pub use identity::{Identity, PublicId};
+pub use memory::{HybridStore, MemoryStore, SqliteStore};

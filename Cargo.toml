@@ -64,6 +64,9 @@ uuid = { version = "1", features = ["v4"] }
 dirs = "5"
 shellexpand = "3"
 
+# SQLite for local memory storage (personal mode)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"

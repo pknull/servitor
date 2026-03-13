@@ -1,22 +1,25 @@
 //! Servitor — Egregore network task executor.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use servitor::agent::{create_provider, AgentExecutor};
-use servitor::authority::{Authority, AuthRequest, PersonId};
+use servitor::authority::{AuthRequest, Authority, PersonId};
 use servitor::comms::discord::DiscordTransport;
 use servitor::comms::{CommsResponse, CommsTransport};
-use servitor::config::Config;
+use servitor::config::{Config, DeploymentMode};
 use servitor::egregore::{EgregoreClient, ScopeConstraints, ServitorProfile, Task, TaskClaim};
 use servitor::error::Result;
 use servitor::events::cron::CronSource;
+use servitor::events::local::LocalSource;
 use servitor::events::sse::SseSource;
 use servitor::events::EventRouter;
 use servitor::identity::Identity;
 use servitor::mcp::McpPool;
+use servitor::memory::{HybridStore, MemoryStore, SqliteStore};
 use servitor::scope::ScopeEnforcer;
 
 #[derive(Parser)]
@@ -224,7 +227,12 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
         tracing::debug!("authority: loaded from {}", authority_path.display());
     }
 
-    tracing::info!(id = %identity.public_id(), "starting daemon mode");
+    let mode = config.deployment.mode;
+    tracing::info!(
+        id = %identity.public_id(),
+        mode = ?mode,
+        "starting daemon mode"
+    );
 
     // Initialize components
     let provider = create_provider(&config.llm)?;
@@ -238,21 +246,50 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
 
     let egregore = EgregoreClient::new(&config.egregore.api_url);
 
+    // Initialize memory store for personal/hybrid modes
+    let memory_store: Option<Arc<dyn MemoryStore>> = match mode {
+        DeploymentMode::Personal | DeploymentMode::Hybrid => {
+            let db_path = PathBuf::from(&config.memory.database);
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            let sqlite = SqliteStore::open(&db_path)?;
+            tracing::info!(path = %db_path.display(), "opened memory database");
+
+            let store = match mode {
+                DeploymentMode::Hybrid => {
+                    // Create a separate egregore client for the hybrid store
+                    let hybrid_egregore = EgregoreClient::new(&config.egregore.api_url);
+                    HybridStore::new(sqlite, Some(hybrid_egregore), config.memory.cache_ttl_hours)
+                }
+                _ => HybridStore::local_only(sqlite, config.memory.cache_ttl_hours),
+            };
+
+            Some(Arc::new(store))
+        }
+        DeploymentMode::Server => None,
+    };
+
     // Build event router for non-comms sources
     let mut event_router = EventRouter::new();
+
+    // Add local source for personal/hybrid modes
+    if let Some(ref store) = memory_store {
+        let local_source = LocalSource::new(store.clone());
+        event_router.add_source(Box::new(local_source));
+        tracing::info!("local task queue enabled");
+    }
 
     // Add cron source if we have scheduled tasks
     if !config.schedule.is_empty() {
         let cron_source = CronSource::new(&config.schedule)?;
         event_router.add_source(Box::new(cron_source));
-        tracing::info!(
-            tasks = config.schedule.len(),
-            "cron source enabled"
-        );
+        tracing::info!(tasks = config.schedule.len(), "cron source enabled");
     }
 
-    // Add SSE source if subscribe is enabled
-    if config.egregore.subscribe {
+    // Add SSE source if subscribe is enabled (server or hybrid mode)
+    if config.egregore.subscribe && mode != DeploymentMode::Personal {
         let capabilities = mcp_pool.capabilities();
         let sse_source = SseSource::new(&config.egregore.api_url, capabilities);
         event_router.add_source(Box::new(sse_source));
@@ -277,20 +314,25 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
         }
     }
 
-    // Publish initial profile
-    let profile = build_profile(&identity, &mcp_pool, config);
-    if let Err(e) = egregore.publish_profile(&profile).await {
-        tracing::warn!(error = %e, "failed to publish profile (egregore may be offline)");
+    // Publish initial profile (skip in personal mode)
+    if mode != DeploymentMode::Personal {
+        let profile = build_profile(&identity, &mcp_pool, config);
+        if let Err(e) = egregore.publish_profile(&profile).await {
+            tracing::warn!(error = %e, "failed to publish profile (egregore may be offline)");
+        }
     }
 
     // Main event loop
     let heartbeat_interval = std::time::Duration::from_secs(config.heartbeat.interval_secs);
+    let sync_interval = std::time::Duration::from_secs(config.sync.interval_secs);
     let poll_interval = std::time::Duration::from_millis(100);
     let mut last_heartbeat = std::time::Instant::now();
+    let mut last_sync = std::time::Instant::now();
 
     tracing::info!(
         sources = event_router.source_count(),
         discord = discord_transport.is_some(),
+        mode = ?mode,
         "entering event loop"
     );
 
@@ -483,8 +525,8 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
                     }
                 }
 
-                // Check heartbeat
-                if last_heartbeat.elapsed() >= heartbeat_interval {
+                // Check heartbeat (skip in personal mode)
+                if mode != DeploymentMode::Personal && last_heartbeat.elapsed() >= heartbeat_interval {
                     let profile = build_profile(&identity, &mcp_pool, config);
                     if let Err(e) = egregore.publish_profile(&profile).await {
                         tracing::debug!(error = %e, "heartbeat failed");
@@ -492,6 +534,36 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
                         tracing::debug!("heartbeat published");
                     }
                     last_heartbeat = std::time::Instant::now();
+                }
+
+                // Sync pending results (hybrid mode only)
+                if mode == DeploymentMode::Hybrid
+                    && config.sync.enabled
+                    && last_sync.elapsed() >= sync_interval
+                {
+                    if let Some(ref store) = memory_store {
+                        // Downcast to HybridStore for sync
+                        if let Some(hybrid) = store
+                            .as_ref()
+                            .as_any()
+                            .and_then(|any| any.downcast_ref::<HybridStore>())
+                        {
+                            match hybrid.sync_results(config.sync.batch_size).await {
+                                Ok(0) => {}
+                                Ok(n) => tracing::debug!(synced = n, "synced results to egregore"),
+                                Err(e) => tracing::warn!(error = %e, "sync failed"),
+                            }
+                        }
+                    }
+                    last_sync = std::time::Instant::now();
+                }
+
+                // Clear expired cache periodically
+                if mode != DeploymentMode::Server && last_heartbeat.elapsed() < std::time::Duration::from_millis(200) {
+                    // Piggyback on heartbeat timing to occasionally clear cache
+                    if let Some(ref store) = memory_store {
+                        let _ = store.clear_expired_cache().await;
+                    }
                 }
             }
         }
@@ -511,10 +583,7 @@ fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
     let hash_str: String = hash.iter().map(|b| format!("{b:02x}")).collect();
 
     let mut context = HashMap::new();
-    context.insert(
-        "source".to_string(),
-        serde_json::json!(msg.source.name()),
-    );
+    context.insert("source".to_string(), serde_json::json!(msg.source.name()));
     context.insert(
         "user".to_string(),
         serde_json::json!({
@@ -522,10 +591,7 @@ fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
             "name": msg.user_name,
         }),
     );
-    context.insert(
-        "channel".to_string(),
-        serde_json::json!(msg.channel_id),
-    );
+    context.insert("channel".to_string(), serde_json::json!(msg.channel_id));
 
     Task {
         msg_type: "task".to_string(),
@@ -613,6 +679,22 @@ async fn run_info(config: &Config) -> Result<()> {
 
     println!("Identity: {}", identity.public_id());
     println!("Data dir: {}", config.identity.data_dir);
+    println!();
+
+    // Show deployment mode
+    let mode_str = match config.deployment.mode {
+        DeploymentMode::Server => "SERVER (egregore-connected)",
+        DeploymentMode::Personal => "PERSONAL (local-first, offline-capable)",
+        DeploymentMode::Hybrid => "HYBRID (local storage + egregore sync)",
+    };
+    println!("Deployment Mode: {}", mode_str);
+    if config.deployment.mode != DeploymentMode::Server {
+        println!("  Memory DB: {}", config.memory.database);
+        if config.deployment.mode == DeploymentMode::Hybrid {
+            println!("  Sync interval: {}s", config.sync.interval_secs);
+            println!("  Sync enabled: {}", config.sync.enabled);
+        }
+    }
     println!();
 
     // Show authority status
@@ -722,6 +804,9 @@ fn create_default_config() -> Result<Config> {
 [identity]
 data_dir = "~/.servitor"
 
+[deployment]
+mode = "server"
+
 [egregore]
 api_url = "http://127.0.0.1:7654"
 subscribe = false
@@ -737,8 +822,17 @@ timeout_secs = 300
 
 [heartbeat]
 interval_secs = 10
+
+[memory]
+database = "~/.servitor/memory.db"
+cache_ttl_hours = 168
+
+[sync]
+interval_secs = 60
+batch_size = 10
+enabled = true
 "#;
-    Config::from_str(toml)
+    Config::parse(toml)
 }
 
 /// Simple hash for task ID generation in exec mode.

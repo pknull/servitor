@@ -13,11 +13,11 @@ impl Config {
         let content = std::fs::read_to_string(path).map_err(|e| ServitorError::Config {
             reason: format!("failed to read config file {}: {}", path.display(), e),
         })?;
-        Self::from_str(&content)
+        Self::parse(&content)
     }
 
     /// Parse configuration from a TOML string.
-    pub fn from_str(content: &str) -> Result<Self> {
+    pub fn parse(content: &str) -> Result<Self> {
         let config: Config = toml::from_str(content).map_err(|e| ServitorError::Config {
             reason: format!("failed to parse config: {}", e),
         })?;
@@ -119,6 +119,7 @@ impl Config {
     /// Expand shell paths in configuration (e.g., ~ to home directory).
     pub fn expand_paths(&mut self) {
         self.identity.data_dir = expand_path(&self.identity.data_dir);
+        self.memory.database = expand_path(&self.memory.database);
 
         for mcp in self.mcp.values_mut() {
             for pattern in &mut mcp.scope.allow {
@@ -150,7 +151,7 @@ provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 "#;
-        let config = Config::from_str(toml).unwrap();
+        let config = Config::parse(toml).unwrap();
         assert_eq!(config.llm.provider, "anthropic");
         assert_eq!(config.llm.model, "claude-sonnet-4-20250514");
     }
@@ -190,7 +191,7 @@ cron = "0 * * * * *"
 task = "Test task"
 publish = true
 "#;
-        let config = Config::from_str(toml).unwrap();
+        let config = Config::parse(toml).unwrap();
         assert_eq!(config.mcp.len(), 1);
         assert!(config.mcp.contains_key("shell"));
         assert!(config.egregore.subscribe);
@@ -204,7 +205,7 @@ publish = true
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 "#;
-        let result = Config::from_str(toml);
+        let result = Config::parse(toml);
         assert!(result.is_err());
     }
 
@@ -218,7 +219,7 @@ model = "llama3.3:70b"
 [mcp.shell]
 transport = "stdio"
 "#;
-        let result = Config::from_str(toml);
+        let result = Config::parse(toml);
         assert!(result.is_err());
     }
 
@@ -234,7 +235,7 @@ name = "bad-cron"
 cron = "not a cron expression"
 task = "Test"
 "#;
-        let result = Config::from_str(toml);
+        let result = Config::parse(toml);
         assert!(result.is_err());
     }
 }

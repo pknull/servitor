@@ -150,12 +150,7 @@ impl ScopeEnforcer {
     }
 
     /// Check if a tool call is allowed.
-    pub fn check(
-        &self,
-        mcp_name: &str,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> Result<()> {
+    pub fn check(&self, mcp_name: &str, tool_name: &str, args: &serde_json::Value) -> Result<()> {
         if let Some(policy) = self.policies.get(mcp_name) {
             policy.check(tool_name, args)
         } else {
@@ -171,14 +166,8 @@ mod tests {
 
     fn test_config() -> ScopeConfig {
         ScopeConfig {
-            allow: vec![
-                "execute:~/scripts/*".to_string(),
-                "*:*.txt".to_string(),
-            ],
-            block: vec![
-                "execute:/etc/*".to_string(),
-                "execute:rm *".to_string(),
-            ],
+            allow: vec!["execute:~/scripts/*".to_string(), "*:*.txt".to_string()],
+            block: vec!["execute:/etc/*".to_string(), "execute:rm *".to_string()],
         }
     }
 
@@ -240,6 +229,8 @@ mod tests {
 
         // Docker blocks traefik
         let args = serde_json::json!({ "container": "traefik" });
-        assert!(enforcer.check("docker", "container_lifecycle", &args).is_err());
+        assert!(enforcer
+            .check("docker", "container_lifecycle", &args)
+            .is_err());
     }
 }

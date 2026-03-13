@@ -4,12 +4,16 @@
 //! - Cron: scheduled tasks
 //! - SSE: egregore feed subscription
 //! - MCP notifications: server-pushed events
+//! - Local: SQLite queue (for personal/hybrid modes)
 //! - Hook: stdin (for egregore hook mode)
 //! - Direct: CLI exec command
 
 pub mod cron;
+pub mod local;
 pub mod mcp;
 pub mod sse;
+
+pub use local::LocalSource;
 
 use async_trait::async_trait;
 use std::collections::HashMap;

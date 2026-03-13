@@ -3,12 +3,29 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Deployment mode for Servitor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeploymentMode {
+    /// Server mode: egregore-connected, no local storage (current behavior).
+    #[default]
+    Server,
+    /// Personal mode: local storage, works offline, syncs when online.
+    Personal,
+    /// Hybrid mode: local storage + egregore, best of both.
+    Hybrid,
+}
+
 /// Root configuration structure.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     /// Identity configuration.
     #[serde(default)]
     pub identity: IdentityConfig,
+
+    /// Deployment mode.
+    #[serde(default)]
+    pub deployment: DeploymentConfig,
 
     /// Egregore network configuration.
     #[serde(default)]
@@ -29,6 +46,14 @@ pub struct Config {
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
 
+    /// Memory configuration (for personal/hybrid modes).
+    #[serde(default)]
+    pub memory: MemoryConfig,
+
+    /// Sync configuration (for personal/hybrid modes).
+    #[serde(default)]
+    pub sync: SyncConfig,
+
     /// Communication transports.
     #[serde(default)]
     pub comms: CommsConfig,
@@ -40,6 +65,22 @@ pub struct Config {
     /// Event watchers.
     #[serde(default)]
     pub watch: Vec<WatchConfig>,
+}
+
+/// Deployment configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeploymentConfig {
+    /// Deployment mode: server, personal, or hybrid.
+    #[serde(default)]
+    pub mode: DeploymentMode,
+}
+
+impl Default for DeploymentConfig {
+    fn default() -> Self {
+        Self {
+            mode: DeploymentMode::Server,
+        }
+    }
 }
 
 /// Identity storage configuration.
@@ -60,6 +101,69 @@ impl Default for IdentityConfig {
 
 fn default_data_dir() -> String {
     "~/.servitor".to_string()
+}
+
+/// Memory storage configuration (for personal/hybrid modes).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryConfig {
+    /// Path to SQLite database file.
+    #[serde(default = "default_database_path")]
+    pub database: String,
+
+    /// Cache TTL in hours for conversation history.
+    #[serde(default = "default_cache_ttl")]
+    pub cache_ttl_hours: u64,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            database: default_database_path(),
+            cache_ttl_hours: default_cache_ttl(),
+        }
+    }
+}
+
+fn default_database_path() -> String {
+    "~/.servitor/memory.db".to_string()
+}
+
+fn default_cache_ttl() -> u64 {
+    168 // 1 week
+}
+
+/// Sync configuration (for personal/hybrid modes).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SyncConfig {
+    /// Sync interval in seconds.
+    #[serde(default = "default_sync_interval")]
+    pub interval_secs: u64,
+
+    /// Maximum results to sync per batch.
+    #[serde(default = "default_sync_batch")]
+    pub batch_size: usize,
+
+    /// Enable automatic sync.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: default_sync_interval(),
+            batch_size: default_sync_batch(),
+            enabled: true,
+        }
+    }
+}
+
+fn default_sync_interval() -> u64 {
+    60
+}
+
+fn default_sync_batch() -> usize {
+    10
 }
 
 /// Egregore network configuration.

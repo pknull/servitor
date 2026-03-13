@@ -39,10 +39,7 @@ impl McpNotificationSource {
     pub fn register_handler(&mut self, server_name: &str, task_template: &str) {
         self.templates
             .insert(server_name.to_string(), task_template.to_string());
-        tracing::debug!(
-            server = server_name,
-            "registered MCP notification handler"
-        );
+        tracing::debug!(server = server_name, "registered MCP notification handler");
     }
 
     /// Queue a notification for processing.
@@ -86,10 +83,7 @@ impl McpNotificationSource {
             "mcp_server".to_string(),
             serde_json::json!(notification.server_name),
         );
-        context.insert(
-            "method".to_string(),
-            serde_json::json!(notification.method),
-        );
+        context.insert("method".to_string(), serde_json::json!(notification.method));
         context.insert("params".to_string(), notification.params.clone());
 
         task_from_schedule(&notification.server_name, &prompt, context)

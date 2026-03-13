@@ -275,19 +275,14 @@ pub struct Notification {
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NotificationPriority {
     Low,
+    #[default]
     Normal,
     High,
     Urgent,
-}
-
-impl Default for NotificationPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Generic egregore message envelope (for hook input and context fetching).

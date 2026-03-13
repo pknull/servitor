@@ -136,7 +136,11 @@ impl StdioMcpClient {
 
         let response: JsonRpcResponse =
             serde_json::from_str(&line).map_err(|e| ServitorError::Mcp {
-                reason: format!("failed to parse MCP response: {} (line: {})", e, line.trim()),
+                reason: format!(
+                    "failed to parse MCP response: {} (line: {})",
+                    e,
+                    line.trim()
+                ),
             })?;
 
         if response.id != id {
