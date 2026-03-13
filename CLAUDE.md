@@ -99,7 +99,7 @@ No authority.toml = open mode (accept all). See `authority.example.toml` for syn
 
 **Complete**: v1 rebuild (foundation, egregore, MCP, scope, agent, events, authority)
 
-**Deferred**: Consumer groups, capability challenges, reputation tracking
+**Deferred**: Reputation tracking
 
 ## Code Style
 

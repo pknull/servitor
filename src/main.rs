@@ -2,11 +2,12 @@
 
 use std::path::PathBuf;
 
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use servitor::agent::{create_provider, AgentExecutor};
-use servitor::authority::{Authority, AuthRequest, PersonId};
+use servitor::authority::{AuthRequest, Authority, PersonId};
 use servitor::comms::discord::DiscordTransport;
 use servitor::comms::{CommsResponse, CommsTransport};
 use servitor::config::Config;
@@ -15,6 +16,7 @@ use servitor::error::Result;
 use servitor::events::cron::CronSource;
 use servitor::events::sse::SseSource;
 use servitor::events::EventRouter;
+use servitor::group::ConsumerGroupCoordinator;
 use servitor::identity::Identity;
 use servitor::mcp::McpPool;
 use servitor::scope::ScopeEnforcer;
@@ -238,6 +240,9 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
 
     let egregore = EgregoreClient::new(&config.egregore.api_url);
 
+    let heartbeat_interval_secs = effective_heartbeat_interval_secs(config);
+    let heartbeat_interval = std::time::Duration::from_secs(heartbeat_interval_secs);
+
     // Build event router for non-comms sources
     let mut event_router = EventRouter::new();
 
@@ -245,16 +250,23 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
     if !config.schedule.is_empty() {
         let cron_source = CronSource::new(&config.schedule)?;
         event_router.add_source(Box::new(cron_source));
-        tracing::info!(
-            tasks = config.schedule.len(),
-            "cron source enabled"
-        );
+        tracing::info!(tasks = config.schedule.len(), "cron source enabled");
     }
 
     // Add SSE source if subscribe is enabled
     if config.egregore.subscribe {
         let capabilities = mcp_pool.capabilities();
-        let sse_source = SseSource::new(&config.egregore.api_url, capabilities);
+        let heartbeat_interval_ms = heartbeat_interval_secs.saturating_mul(1000);
+        let profile = build_profile(&identity, &mcp_pool, config, heartbeat_interval_ms);
+        let mut sse_source = SseSource::new(&config.egregore.api_url, capabilities);
+
+        if let Some(ref group_config) = config.egregore.group {
+            let mut consumer_group =
+                ConsumerGroupCoordinator::new(&group_config.name, identity.public_id());
+            consumer_group.observe_profile(&profile, Utc::now());
+            sse_source = sse_source.with_consumer_group(consumer_group);
+        }
+
         event_router.add_source(Box::new(sse_source));
         tracing::info!("SSE subscription enabled");
     }
@@ -278,13 +290,17 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
     }
 
     // Publish initial profile
-    let profile = build_profile(&identity, &mcp_pool, config);
+    let profile = build_profile(
+        &identity,
+        &mcp_pool,
+        config,
+        heartbeat_interval_secs.saturating_mul(1000),
+    );
     if let Err(e) = egregore.publish_profile(&profile).await {
         tracing::warn!(error = %e, "failed to publish profile (egregore may be offline)");
     }
 
     // Main event loop
-    let heartbeat_interval = std::time::Duration::from_secs(config.heartbeat.interval_secs);
     let poll_interval = std::time::Duration::from_millis(100);
     let mut last_heartbeat = std::time::Instant::now();
 
@@ -485,7 +501,12 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
 
                 // Check heartbeat
                 if last_heartbeat.elapsed() >= heartbeat_interval {
-                    let profile = build_profile(&identity, &mcp_pool, config);
+                    let profile = build_profile(
+                        &identity,
+                        &mcp_pool,
+                        config,
+                        heartbeat_interval_secs.saturating_mul(1000),
+                    );
                     if let Err(e) = egregore.publish_profile(&profile).await {
                         tracing::debug!(error = %e, "heartbeat failed");
                     } else {
@@ -511,10 +532,7 @@ fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
     let hash_str: String = hash.iter().map(|b| format!("{b:02x}")).collect();
 
     let mut context = HashMap::new();
-    context.insert(
-        "source".to_string(),
-        serde_json::json!(msg.source.name()),
-    );
+    context.insert("source".to_string(), serde_json::json!(msg.source.name()));
     context.insert(
         "user".to_string(),
         serde_json::json!({
@@ -522,10 +540,7 @@ fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
             "name": msg.user_name,
         }),
     );
-    context.insert(
-        "channel".to_string(),
-        serde_json::json!(msg.channel_id),
-    );
+    context.insert("channel".to_string(), serde_json::json!(msg.channel_id));
 
     Task {
         msg_type: "task".to_string(),
@@ -645,6 +660,12 @@ async fn run_info(config: &Config) -> Result<()> {
     println!();
     println!("Egregore API: {}", config.egregore.api_url);
     println!("SSE Subscribe: {}", config.egregore.subscribe);
+    if let Some(ref group_config) = config.egregore.group {
+        println!(
+            "Consumer Group: {} (heartbeat {}s)",
+            group_config.name, group_config.heartbeat_interval_secs
+        );
+    }
     println!();
 
     if !config.schedule.is_empty() {
@@ -688,9 +709,13 @@ async fn run_init(config: &Config, force: bool) -> Result<()> {
 }
 
 /// Build a ServitorProfile for publishing.
-fn build_profile(identity: &Identity, mcp_pool: &McpPool, config: &Config) -> ServitorProfile {
-    let mut profile =
-        ServitorProfile::new(identity.public_id(), config.heartbeat.interval_secs * 1000);
+fn build_profile(
+    identity: &Identity,
+    mcp_pool: &McpPool,
+    config: &Config,
+    heartbeat_interval_ms: u64,
+) -> ServitorProfile {
+    let mut profile = ServitorProfile::new(identity.public_id(), heartbeat_interval_ms);
 
     // Add capabilities from MCP servers
     profile.capabilities = mcp_pool.capabilities();
@@ -713,7 +738,21 @@ fn build_profile(identity: &Identity, mcp_pool: &McpPool, config: &Config) -> Se
         );
     }
 
+    if let Some(ref group_config) = config.egregore.group {
+        profile.groups.push(group_config.name.clone());
+    }
+
     profile
+}
+
+fn effective_heartbeat_interval_secs(config: &Config) -> u64 {
+    match config.egregore.group.as_ref() {
+        Some(group_config) => config
+            .heartbeat
+            .interval_secs
+            .min(group_config.heartbeat_interval_secs),
+        None => config.heartbeat.interval_secs,
+    }
 }
 
 /// Create a default configuration.
@@ -748,4 +787,60 @@ fn md5_hash(s: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consumer_group_uses_tighter_heartbeat() {
+        let config = Config::from_str(
+            r#"
+[egregore]
+subscribe = true
+
+[egregore.group]
+name = "workers"
+heartbeat_interval_secs = 5
+
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[heartbeat]
+interval_secs = 10
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(effective_heartbeat_interval_secs(&config), 5);
+    }
+
+    #[test]
+    fn build_profile_includes_consumer_group_membership() {
+        let config = Config::from_str(
+            r#"
+[egregore]
+subscribe = true
+
+[egregore.group]
+name = "workers"
+
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+"#,
+        )
+        .unwrap();
+        let identity = Identity::generate();
+        let pool = McpPool::new();
+
+        let profile = build_profile(&identity, &pool, &config, 5_000);
+
+        assert_eq!(profile.groups, vec!["workers".to_string()]);
+        assert_eq!(profile.heartbeat_interval_ms, 5_000);
+    }
 }

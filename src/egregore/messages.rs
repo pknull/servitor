@@ -31,6 +31,10 @@ pub struct ServitorProfile {
     #[serde(default)]
     pub resource_limits: ResourceLimits,
 
+    /// Consumer groups this servitor participates in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+
     /// Heartbeat interval in milliseconds.
     pub heartbeat_interval_ms: u64,
 
@@ -52,6 +56,7 @@ impl ServitorProfile {
             tools: vec![],
             scopes: HashMap::new(),
             resource_limits: ResourceLimits::default(),
+            groups: vec![],
             heartbeat_interval_ms,
             version: default_version(),
         }
@@ -327,6 +332,15 @@ impl EgregoreMessage {
         }
     }
 
+    /// Try to parse content as a ServitorProfile.
+    pub fn as_servitor_profile(&self) -> Option<ServitorProfile> {
+        if self.content_type() == Some("servitor_profile") {
+            serde_json::from_value(self.content.clone()).ok()
+        } else {
+            None
+        }
+    }
+
     /// Get the prompt if this is a task message.
     pub fn prompt(&self) -> Option<&str> {
         self.content.get("prompt").and_then(|v| v.as_str())
@@ -360,5 +374,24 @@ mod tests {
         let detected = ResourceLimits::detect();
         assert_eq!(defaults.cpu, detected.cpu);
         assert_eq!(defaults.memory_mb, detected.memory_mb);
+    }
+
+    #[test]
+    fn servitor_profile_roundtrip_includes_groups() {
+        let mut profile = ServitorProfile::new(PublicId("@test.ed25519".to_string()), 10_000);
+        profile.groups = vec!["workers".to_string()];
+
+        let envelope = EgregoreMessage {
+            author: PublicId("@test.ed25519".to_string()),
+            sequence: 1,
+            timestamp: Utc::now(),
+            content: serde_json::to_value(&profile).unwrap(),
+            hash: "hash".to_string(),
+            signature: "sig".to_string(),
+            tags: vec!["servitor_profile".to_string()],
+        };
+
+        let parsed = envelope.as_servitor_profile().unwrap();
+        assert_eq!(parsed.groups, vec!["workers".to_string()]);
     }
 }

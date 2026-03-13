@@ -165,6 +165,10 @@ data_dir = "~/.servitor"
 api_url = "http://127.0.0.1:7654"
 subscribe = true
 
+[egregore.group]
+name = "workers"
+heartbeat_interval_secs = 5
+
 [llm]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
@@ -194,6 +198,14 @@ publish = true
         assert_eq!(config.mcp.len(), 1);
         assert!(config.mcp.contains_key("shell"));
         assert!(config.egregore.subscribe);
+        assert_eq!(
+            config
+                .egregore
+                .group
+                .as_ref()
+                .map(|group| group.name.as_str()),
+            Some("workers")
+        );
         assert_eq!(config.schedule.len(), 1);
     }
 

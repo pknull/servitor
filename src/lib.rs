@@ -45,11 +45,12 @@ pub mod config;
 pub mod egregore;
 pub mod error;
 pub mod events;
+pub mod group;
 pub mod identity;
 pub mod mcp;
 pub mod scope;
 
-pub use authority::{Authority, AuthRequest, AuthResult, Keeper, PersonId};
+pub use authority::{AuthRequest, AuthResult, Authority, Keeper, PersonId};
 pub use config::Config;
 pub use error::{Result, ServitorError};
 pub use identity::{Identity, PublicId};
