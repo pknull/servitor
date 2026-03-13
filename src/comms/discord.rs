@@ -204,7 +204,10 @@ impl EventHandler for DiscordHandler {
         };
 
         let comms_msg = CommsMessage {
-            source: CommsSource::Discord { guild_id, guild_name },
+            source: CommsSource::Discord {
+                guild_id,
+                guild_name,
+            },
             channel_id: msg.channel_id.to_string(),
             user_id: msg.author.id.to_string(),
             user_name: msg.author.name.clone(),
@@ -240,9 +243,14 @@ impl CommsResponder for DiscordResponder {
         let channel_id = if response.channel_id.is_empty() {
             self.channel_id
         } else {
-            ChannelId::new(response.channel_id.parse().map_err(|_| ServitorError::Comms {
-                reason: format!("invalid channel ID: {}", response.channel_id),
-            })?)
+            ChannelId::new(
+                response
+                    .channel_id
+                    .parse()
+                    .map_err(|_| ServitorError::Comms {
+                        reason: format!("invalid channel ID: {}", response.channel_id),
+                    })?,
+            )
         };
 
         // Split long messages (Discord limit is 2000 chars)

@@ -181,9 +181,7 @@ pub trait Provider: Send + Sync {
 pub fn create_provider(config: &LlmConfig) -> Result<Box<dyn Provider>> {
     match config.provider.as_str() {
         "anthropic" => Ok(Box::new(AnthropicProvider::new(config)?)),
-        "openai" | "ollama" | "openai-compat" => {
-            Ok(Box::new(OpenAiCompatProvider::new(config)?))
-        }
+        "openai" | "ollama" | "openai-compat" => Ok(Box::new(OpenAiCompatProvider::new(config)?)),
         "codex" => Ok(Box::new(CodexOAuthProvider::new(config)?)),
         "claude-code" => Ok(Box::new(ClaudeCodeProvider::new(config)?)),
         other => Err(ServitorError::Provider {
@@ -301,9 +299,7 @@ impl Provider for AnthropicProvider {
         };
 
         let usage = Usage {
-            input_tokens: response_body["usage"]["input_tokens"]
-                .as_u64()
-                .unwrap_or(0) as u32,
+            input_tokens: response_body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
             output_tokens: response_body["usage"]["output_tokens"]
                 .as_u64()
                 .unwrap_or(0) as u32,
@@ -490,10 +486,7 @@ impl Provider for OpenAiCompatProvider {
         if let Some(tool_calls) = message["tool_calls"].as_array() {
             for call in tool_calls {
                 let id = call["id"].as_str().unwrap_or("").to_string();
-                let name = call["function"]["name"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
+                let name = call["function"]["name"].as_str().unwrap_or("").to_string();
                 let arguments: serde_json::Value = call["function"]["arguments"]
                     .as_str()
                     .and_then(|s| serde_json::from_str(s).ok())
@@ -601,11 +594,10 @@ impl CodexOAuthProvider {
         }
 
         // Load from file
-        let content = std::fs::read_to_string(&self.token_file).map_err(|e| {
-            ServitorError::Config {
+        let content =
+            std::fs::read_to_string(&self.token_file).map_err(|e| ServitorError::Config {
                 reason: format!("failed to read token file: {}", e),
-            }
-        })?;
+            })?;
 
         let json: serde_json::Value =
             serde_json::from_str(&content).map_err(|e| ServitorError::Config {
@@ -646,11 +638,12 @@ impl CodexOAuthProvider {
             (access, refresh, expires, account_id)
         } else if let Some(profiles) = json.get("profiles") {
             // OpenClaw auth-profiles.json format
-            let profile = profiles.get(&self.profile_name).ok_or_else(|| {
-                ServitorError::Config {
-                    reason: format!("profile '{}' not found in token file", self.profile_name),
-                }
-            })?;
+            let profile =
+                profiles
+                    .get(&self.profile_name)
+                    .ok_or_else(|| ServitorError::Config {
+                        reason: format!("profile '{}' not found in token file", self.profile_name),
+                    })?;
 
             let access = profile
                 .get("access")
@@ -816,11 +809,10 @@ impl CodexOAuthProvider {
     }
 
     fn save_token(&self, access: &str, refresh: &str, expires: i64) -> Result<()> {
-        let content = std::fs::read_to_string(&self.token_file).map_err(|e| {
-            ServitorError::Config {
+        let content =
+            std::fs::read_to_string(&self.token_file).map_err(|e| ServitorError::Config {
                 reason: format!("failed to read token file for update: {}", e),
-            }
-        })?;
+            })?;
 
         let mut profiles: serde_json::Value =
             serde_json::from_str(&content).map_err(|e| ServitorError::Config {
@@ -836,11 +828,10 @@ impl CodexOAuthProvider {
             profile["expires"] = serde_json::Value::Number(expires.into());
         }
 
-        let content = serde_json::to_string_pretty(&profiles).map_err(|e| {
-            ServitorError::Config {
+        let content =
+            serde_json::to_string_pretty(&profiles).map_err(|e| ServitorError::Config {
                 reason: format!("failed to serialize token file: {}", e),
-            }
-        })?;
+            })?;
 
         std::fs::write(&self.token_file, content).map_err(|e| ServitorError::Config {
             reason: format!("failed to write token file: {}", e),
@@ -907,7 +898,11 @@ impl Provider for CodexOAuthProvider {
                             "text": text
                         }));
                     }
-                    ContentBlock::ToolUse { id, name, input: args } => {
+                    ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input: args,
+                    } => {
                         // Tool use from assistant is a function_call in Responses API
                         input.push(serde_json::json!({
                             "type": "function_call",
@@ -1066,10 +1061,8 @@ impl Provider for CodexOAuthProvider {
                                     function_calls
                                         .entry(call_id.to_string())
                                         .or_insert_with(|| {
-                                            let name = data["name"]
-                                                .as_str()
-                                                .unwrap_or("")
-                                                .to_string();
+                                            let name =
+                                                data["name"].as_str().unwrap_or("").to_string();
                                             (name, String::new())
                                         })
                                         .1
@@ -1096,13 +1089,9 @@ impl Provider for CodexOAuthProvider {
                                 // Get usage
                                 if let Some(u) = response.get("usage") {
                                     usage = Usage {
-                                        input_tokens: u["input_tokens"]
-                                            .as_u64()
-                                            .unwrap_or(0)
+                                        input_tokens: u["input_tokens"].as_u64().unwrap_or(0)
                                             as u32,
-                                        output_tokens: u["output_tokens"]
-                                            .as_u64()
-                                            .unwrap_or(0)
+                                        output_tokens: u["output_tokens"].as_u64().unwrap_or(0)
                                             as u32,
                                     };
                                 }
@@ -1214,7 +1203,8 @@ impl Provider for ClaudeCodeProvider {
             }
             prompt.push_str("</available_tools>\n\n");
             prompt.push_str("To use a tool, respond with a JSON block:\n");
-            prompt.push_str("```tool_use\n{\"name\": \"tool_name\", \"arguments\": {...}}\n```\n\n");
+            prompt
+                .push_str("```tool_use\n{\"name\": \"tool_name\", \"arguments\": {...}}\n```\n\n");
         }
 
         // Convert message history to text
@@ -1283,9 +1273,13 @@ impl Provider for ClaudeCodeProvider {
         let mut content = Vec::new();
         let mut accumulated_text = String::new();
 
-        while let Some(line) = lines.next_line().await.map_err(|e| ServitorError::Provider {
-            reason: format!("Failed to read line: {}", e),
-        })? {
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|e| ServitorError::Provider {
+                reason: format!("Failed to read line: {}", e),
+            })?
+        {
             // Skip empty lines
             if line.trim().is_empty() {
                 continue;
@@ -1313,7 +1307,8 @@ impl Provider for ClaudeCodeProvider {
                                     block.get("type").and_then(|v| v.as_str()).unwrap_or("");
                                 match block_type {
                                     "text" => {
-                                        if let Some(text) = block.get("text").and_then(|v| v.as_str())
+                                        if let Some(text) =
+                                            block.get("text").and_then(|v| v.as_str())
                                         {
                                             accumulated_text.push_str(text);
                                         }
@@ -1387,7 +1382,10 @@ impl Provider for ClaudeCodeProvider {
         }
 
         // Determine stop reason
-        let stop_reason = if content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. })) {
+        let stop_reason = if content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+        {
             StopReason::ToolUse
         } else {
             StopReason::EndTurn

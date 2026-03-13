@@ -4,8 +4,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::egregore::messages::{
-    Notification, ServitorProfile, TaskClaim, TaskFailed, TaskOffer, TaskOfferWithdraw, TaskResult,
-    TaskStarted, TaskStatusMessage, TraceSpan,
+    AuthDenied, Notification, ServitorProfile, TaskClaim, TaskFailed, TaskOffer, TaskOfferWithdraw,
+    TaskResult, TaskStarted, TaskStatusMessage, TraceSpan,
 };
 use crate::error::{Result, ServitorError};
 
@@ -150,6 +150,25 @@ impl EgregoreClient {
             hash = %response.hash,
             task_id = %withdraw.task_id,
             "published task offer withdraw"
+        );
+        Ok(response.hash)
+    }
+
+    /// Publish an authorization denial event.
+    pub async fn publish_auth_denied(&self, denial: &AuthDenied) -> Result<String> {
+        let gate_tag = match denial.gate {
+            crate::egregore::messages::AuthGate::Offer => "offer",
+            crate::egregore::messages::AuthGate::Assignment => "assignment",
+        };
+        let response = self
+            .publish(denial, &["auth_denied", gate_tag], None, None)
+            .await?;
+        tracing::info!(
+            hash = %response.hash,
+            person_id = %denial.person_id,
+            place = %denial.place,
+            skill = %denial.skill,
+            "published auth denial"
         );
         Ok(response.hash)
     }

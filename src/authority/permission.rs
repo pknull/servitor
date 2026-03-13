@@ -21,10 +21,7 @@ impl Permission {
     /// Check if this permission matches the given place and skill.
     pub fn matches(&self, place: &str, skill: &str) -> bool {
         pattern_matches(&self.place, place)
-            && self
-                .skills
-                .iter()
-                .any(|s| skill_pattern_matches(s, skill))
+            && self.skills.iter().any(|s| skill_pattern_matches(s, skill))
     }
 }
 
@@ -173,9 +170,18 @@ mod tests {
         assert!(!pattern_matches("discord:*", "egregore:local"));
 
         // Trailing wildcard matches any depth
-        assert!(pattern_matches("discord:187489110150086656:*", "discord:187489110150086656:123"));
-        assert!(pattern_matches("discord:187489110150086656:*", "discord:187489110150086656:456"));
-        assert!(!pattern_matches("discord:187489110150086656:*", "discord:other:123"));
+        assert!(pattern_matches(
+            "discord:187489110150086656:*",
+            "discord:187489110150086656:123"
+        ));
+        assert!(pattern_matches(
+            "discord:187489110150086656:*",
+            "discord:187489110150086656:456"
+        ));
+        assert!(!pattern_matches(
+            "discord:187489110150086656:*",
+            "discord:other:123"
+        ));
     }
 
     #[test]
@@ -186,9 +192,18 @@ mod tests {
 
     #[test]
     fn test_skill_pattern_underscore() {
-        assert!(skill_pattern_matches("docker:container_*", "docker:container_list"));
-        assert!(skill_pattern_matches("docker:container_*", "docker:container_inspect"));
-        assert!(!skill_pattern_matches("docker:container_*", "docker:image_list"));
+        assert!(skill_pattern_matches(
+            "docker:container_*",
+            "docker:container_list"
+        ));
+        assert!(skill_pattern_matches(
+            "docker:container_*",
+            "docker:container_inspect"
+        ));
+        assert!(!skill_pattern_matches(
+            "docker:container_*",
+            "docker:image_list"
+        ));
     }
 
     #[test]
