@@ -155,7 +155,6 @@ fn attestation_signing() {
         result: Some(serde_json::json!({ "answer": 42 })),
         error: None,
         duration_seconds: Some(1),
-        duration_seconds: Some(1),
         plan_hash: Some("plan-123".to_string()),
         attestation,
         trace_id: None,
