@@ -62,6 +62,14 @@ enum Commands {
 
     /// Execute a task directly (for testing)
     Exec {
+        /// Plan the intended tool calls, validate them, and do not execute anything
+        #[arg(long, conflicts_with = "plan_first")]
+        dry_run: bool,
+
+        /// Plan and validate tool calls before starting execution
+        #[arg(long)]
+        plan_first: bool,
+
         /// Task prompt
         prompt: String,
     },
@@ -180,7 +188,11 @@ async fn main() -> Result<()> {
                 run_daemon_mode(&config, cli.insecure).await
             }
         }
-        Some(Commands::Exec { prompt }) => run_exec(&config, &prompt, cli.insecure).await,
+        Some(Commands::Exec {
+            dry_run,
+            plan_first,
+            prompt,
+        }) => run_exec(&config, &prompt, cli.insecure, dry_run, plan_first).await,
         Some(Commands::Info) => run_info(&config, cli.insecure).await,
         Some(Commands::Init { force }) => run_init(&config, force).await,
         None => {
@@ -1036,13 +1048,19 @@ async fn publish_auth_denied_event(
 }
 
 /// Execute a task directly (for testing).
-async fn run_exec(config: &Config, prompt: &str, insecure: bool) -> Result<()> {
+async fn run_exec(
+    config: &Config,
+    prompt: &str,
+    insecure: bool,
+    dry_run: bool,
+    plan_first: bool,
+) -> Result<()> {
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
     let authority = load_runtime_authority(&identity_dir, insecure)?;
-
     let keeper_name = authorize_local_exec(&authority, &identity)?;
+    let egregore = EgregoreClient::new(&config.egregore.api_url);
 
     tracing::info!(id = %identity.public_id(), "executing task");
 
@@ -1075,7 +1093,6 @@ async fn run_exec(config: &Config, prompt: &str, insecure: bool) -> Result<()> {
         keeper: None,
     };
 
-    // Execute (no egregore context for direct exec)
     let executor = AgentExecutor::new(
         provider.as_ref(),
         &mcp_pool,
@@ -1083,9 +1100,33 @@ async fn run_exec(config: &Config, prompt: &str, insecure: bool) -> Result<()> {
         &identity,
         &config.agent,
     )
+    .with_egregore(&egregore)
     .with_authority(&authority, keeper_name);
 
-    let result = executor.execute(&task).await?;
+    let mut published_plan_hash = None;
+
+    if dry_run || plan_first {
+        let plan = executor.plan(&task).await?;
+        println!(
+            "Plan: {}",
+            serde_json::to_string_pretty(&plan).unwrap_or_default()
+        );
+
+        if should_publish_plan(plan_first) {
+            let published_hash = egregore.publish_plan(&plan).await?;
+            println!("Plan published: {}", published_hash);
+            published_plan_hash = Some(plan.plan_hash.clone());
+        }
+
+        if dry_run {
+            mcp_pool.shutdown_all().await?;
+            return Ok(());
+        }
+    }
+
+    let result = executor
+        .execute_with_plan_hash(&task, published_plan_hash)
+        .await?;
 
     // Print result
     println!("Status: {:?}", result.status);
@@ -1098,11 +1139,18 @@ async fn run_exec(config: &Config, prompt: &str, insecure: bool) -> Result<()> {
     if let Some(ref e) = result.error {
         println!("Error: {}", e);
     }
+    if let Some(ref plan_hash) = result.plan_hash {
+        println!("Plan hash: {}", plan_hash);
+    }
 
     // Cleanup
     mcp_pool.shutdown_all().await?;
 
     Ok(())
+}
+
+fn should_publish_plan(plan_first: bool) -> bool {
+    plan_first
 }
 
 /// Show identity and capabilities.
@@ -1443,7 +1491,62 @@ skills = ["*"]
         let err = authorize_local_exec(&authority, &identity).unwrap_err();
         assert!(matches!(err, servitor::ServitorError::Unauthorized { .. }));
     }
+    #[test]
+    fn exec_dry_run_flag_parses() {
+        let cli = Cli::try_parse_from(["servitor", "exec", "--dry-run", "inspect files"]).unwrap();
+        match cli.command {
+            Some(Commands::Exec {
+                dry_run,
+                plan_first,
+                prompt,
+            }) => {
+                assert!(dry_run);
+                assert!(!plan_first);
+                assert_eq!(prompt, "inspect files");
+            }
+            _ => panic!("expected exec command"),
+        }
+    }
 
+    #[test]
+    fn exec_plan_first_flag_parses() {
+        let cli =
+            Cli::try_parse_from(["servitor", "exec", "--plan-first", "inspect files"]).unwrap();
+        match cli.command {
+            Some(Commands::Exec {
+                dry_run,
+                plan_first,
+                prompt,
+            }) => {
+                assert!(!dry_run);
+                assert!(plan_first);
+                assert_eq!(prompt, "inspect files");
+            }
+            _ => panic!("expected exec command"),
+        }
+    }
+
+    #[test]
+    fn exec_plan_flags_conflict() {
+        let result = Cli::try_parse_from([
+            "servitor",
+            "exec",
+            "--dry-run",
+            "--plan-first",
+            "inspect files",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dry_run_keeps_plan_local() {
+        assert!(!should_publish_plan(false));
+    }
+
+    #[test]
+    fn plan_first_publishes_plan() {
+        assert!(should_publish_plan(true));
+    }
     #[tokio::test]
     async fn build_profile_includes_runtime_monitoring_data() {
         let config = Config::from_str(
@@ -1472,7 +1575,6 @@ scope.allow = ["execute:/tmp/*"]
         runtime_stats.finish_task(true);
 
         let profile = build_profile(&identity, &mcp_pool, &config, &runtime_stats).await;
-
         assert_eq!(profile.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(profile.heartbeat_interval_ms, 15000);
         assert_eq!(profile.uptime_secs, 42);
@@ -1486,6 +1588,10 @@ scope.allow = ["execute:/tmp/*"]
         assert_eq!(profile.mcp_servers[0].name, "shell");
         assert_eq!(profile.mcp_servers[0].transport, "stdio");
         assert_eq!(profile.scopes["shell"].allow, vec!["execute:/tmp/*"]);
+        assert_eq!(
+            profile.mcp_servers[0].status,
+            servitor::egregore::McpServerHealth::Unavailable
+        );
     }
 
     #[tokio::test]
@@ -1496,26 +1602,26 @@ scope.allow = ["execute:/tmp/*"]
 provider = "ollama"
 model = "llama3.3:70b"
 
+[heartbeat]
+interval_secs = 15
+
 [mcp.shell]
 transport = "stdio"
 command = "nonexistent-mcp-server"
+scope.allow = ["execute:/tmp/*"]
 "#,
         )
         .unwrap();
         let identity = Identity::generate();
         let mcp_pool = McpPool::from_config(&config).unwrap();
-        let mut runtime_stats = RuntimeStats::new();
-        runtime_stats.record_task_offer();
-        runtime_stats.start_task();
-        runtime_stats.finish_task(true);
+        let runtime_stats = RuntimeStats::new();
 
         let profile = build_profile(&identity, &mcp_pool, &config, &runtime_stats).await;
-        let json = serde_json::to_value(&profile).unwrap();
-
-        assert!(json.get("uptime_secs").is_none());
-        assert!(json.get("mcp_servers").is_none());
-        assert!(json.get("load").is_none());
-        assert!(json.get("stats").is_none());
-        assert!(json.get("last_task_ts").is_none());
+        assert_eq!(profile.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(profile.uptime_secs, 0);
+        assert!(profile.mcp_servers.is_empty());
+        assert_eq!(profile.load, ServitorLoad::default());
+        assert_eq!(profile.stats, ServitorStats::default());
+        assert!(profile.last_task_ts.is_none());
     }
 }
