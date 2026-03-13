@@ -1,8 +1,8 @@
 //! Servitor — Egregore network task executor.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -40,6 +40,10 @@ struct Cli {
     /// Log level (trace, debug, info, warn, error)
     #[arg(short, long, default_value = "warn")]
     log_level: String,
+
+    /// Disable authority checks. Development-only.
+    #[arg(long, global = true)]
+    insecure: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -101,35 +105,29 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Run { hook }) => {
             if hook {
-                run_hook_mode(&config).await
+                run_hook_mode(&config, cli.insecure).await
             } else {
-                run_daemon_mode(&config).await
+                run_daemon_mode(&config, cli.insecure).await
             }
         }
-        Some(Commands::Exec { prompt }) => run_exec(&config, &prompt).await,
-        Some(Commands::Info) => run_info(&config).await,
+        Some(Commands::Exec { prompt }) => run_exec(&config, &prompt, cli.insecure).await,
+        Some(Commands::Info) => run_info(&config, cli.insecure).await,
         Some(Commands::Init { force }) => run_init(&config, force).await,
         None => {
             // Default to daemon mode
-            run_daemon_mode(&config).await
+            run_daemon_mode(&config, cli.insecure).await
         }
     }
 }
 
 /// Run in hook mode — receive task from stdin, execute, publish result.
-async fn run_hook_mode(config: &Config) -> Result<()> {
+async fn run_hook_mode(config: &Config, insecure: bool) -> Result<()> {
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
 
     // Load authority
-    let authority_path = identity_dir.join("authority.toml");
-    let authority = Authority::load(&authority_path)?;
-    if authority.is_open_mode() {
-        tracing::debug!("authority: open mode (no restrictions)");
-    } else {
-        tracing::debug!("authority: loaded from {}", authority_path.display());
-    }
+    let authority = load_runtime_authority(&identity_dir, insecure)?;
 
     tracing::info!(id = %identity.public_id(), "starting hook mode");
 
@@ -219,19 +217,13 @@ async fn run_hook_mode(config: &Config) -> Result<()> {
 }
 
 /// Run as a long-lived daemon with event router.
-async fn run_daemon_mode(config: &Config) -> Result<()> {
+async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
 
     // Load authority
-    let authority_path = identity_dir.join("authority.toml");
-    let authority = Authority::load(&authority_path)?;
-    if authority.is_open_mode() {
-        tracing::debug!("authority: open mode (no restrictions)");
-    } else {
-        tracing::debug!("authority: loaded from {}", authority_path.display());
-    }
+    let authority = load_runtime_authority(&identity_dir, insecure)?;
 
     tracing::info!(id = %identity.public_id(), "starting daemon mode");
 
@@ -879,11 +871,18 @@ fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
 }
 
 /// Execute a task directly (for testing).
-async fn run_exec(config: &Config, prompt: &str) -> Result<()> {
+async fn run_exec(config: &Config, prompt: &str, insecure: bool) -> Result<()> {
+    if !insecure {
+        return Err(servitor::ServitorError::Config {
+            reason: "direct exec bypasses keeper authorization; rerun with --insecure for development only".into(),
+        });
+    }
+
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
 
+    tracing::warn!("running direct exec with --insecure; authority checks are disabled");
     tracing::info!(id = %identity.public_id(), "executing task");
 
     // Initialize components
@@ -945,26 +944,39 @@ async fn run_exec(config: &Config, prompt: &str) -> Result<()> {
 }
 
 /// Show identity and capabilities.
-async fn run_info(config: &Config) -> Result<()> {
+async fn run_info(config: &Config, insecure: bool) -> Result<()> {
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
 
-    // Load authority
     let authority_path = identity_dir.join("authority.toml");
-    let authority = Authority::load(&authority_path)?;
+    let authority = if authority_path.exists() {
+        Some(Authority::load(&authority_path)?)
+    } else {
+        None
+    };
 
     println!("Identity: {}", identity.public_id());
     println!("Data dir: {}", config.identity.data_dir);
     println!();
 
     // Show authority status
-    if authority.is_open_mode() {
-        println!("Authority: OPEN MODE (no restrictions)");
-        println!("  No authority.toml found at {}", authority_path.display());
-        println!("  Copy authority.example.toml to enable access control.");
+    if insecure {
+        println!("Authority: INSECURE OPEN MODE");
+        println!("  --insecure disables keeper authorization and is development-only.");
+    } else if let Some(authority) = authority {
+        if authority.is_open_mode() {
+            println!("Authority: INSECURE OPEN MODE");
+            println!("  Explicit insecure override is active.");
+        } else {
+            println!("Authority: RESTRICTED");
+            println!("  File: {}", authority_path.display());
+        }
     } else {
-        println!("Authority: RESTRICTED");
-        println!("  File: {}", authority_path.display());
+        println!("Authority: BLOCKED");
+        println!("  No authority.toml found at {}", authority_path.display());
+        println!(
+            "  Copy authority.example.toml into place, or use --insecure for development only."
+        );
     }
     println!();
 
@@ -1091,6 +1103,35 @@ interval_secs = 300
     Config::from_str(toml)
 }
 
+fn load_runtime_authority(identity_dir: &Path, insecure: bool) -> Result<Authority> {
+    let authority_path = identity_dir.join("authority.toml");
+
+    if insecure {
+        tracing::warn!(
+            path = %authority_path.display(),
+            "running with --insecure; keeper authorization is disabled"
+        );
+        return Ok(Authority::insecure_open());
+    }
+
+    if !authority_path.exists() {
+        tracing::warn!(
+            path = %authority_path.display(),
+            "authority file missing; refusing to start without explicit access control"
+        );
+        return Err(servitor::ServitorError::Config {
+            reason: format!(
+                "authority file not found: {}. Copy authority.example.toml there, or use --insecure for development only",
+                authority_path.display()
+            ),
+        });
+    }
+
+    let authority = Authority::load(&authority_path)?;
+    tracing::debug!("authority: loaded from {}", authority_path.display());
+    Ok(authority)
+}
+
 /// Simple hash for task ID generation in exec mode.
 fn md5_hash(s: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -1098,4 +1139,47 @@ fn md5_hash(s: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn missing_authority_requires_explicit_insecure() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_runtime_authority(dir.path(), false).unwrap_err();
+        assert!(err.to_string().contains("authority file not found"));
+    }
+
+    #[test]
+    fn insecure_flag_restores_open_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = load_runtime_authority(dir.path(), true).unwrap();
+        assert!(authority.is_open_mode());
+    }
+
+    #[test]
+    fn existing_authority_loads_in_restricted_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority_path = dir.path().join("authority.toml");
+        fs::write(
+            &authority_path,
+            r#"
+[[keeper]]
+name = "dev"
+egregore = "@dev.ed25519"
+
+[[permission]]
+keeper = "dev"
+place = "*"
+skills = ["*"]
+"#,
+        )
+        .unwrap();
+
+        let authority = load_runtime_authority(dir.path(), false).unwrap();
+        assert!(!authority.is_open_mode());
+    }
 }
