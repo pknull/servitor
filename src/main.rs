@@ -29,7 +29,7 @@ struct Cli {
     config: PathBuf,
 
     /// Log level (trace, debug, info, warn, error)
-    #[arg(short, long, default_value = "info")]
+    #[arg(short, long, default_value = "warn")]
     log_level: String,
 
     #[command(subcommand)]
@@ -161,7 +161,7 @@ async fn run_hook_mode(config: &Config) -> Result<()> {
             reason: "message is not a task".into(),
         })?;
 
-    tracing::info!(hash = %task.hash, prompt = %task.prompt, "received task");
+    tracing::debug!(hash = %task.hash, prompt_len = task.prompt.len(), "received task");
 
     // Initialize components
     let provider = create_provider(&config.llm)?;
@@ -406,10 +406,10 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
             // Poll other event sources
             _ = tokio::time::sleep(poll_interval) => {
                 if let Some((source_idx, mut task)) = event_router.poll().await {
-                    tracing::info!(
+                    tracing::debug!(
                         source = source_idx,
                         hash = %task.hash,
-                        prompt = %task.prompt,
+                        prompt_len = task.prompt.len(),
                         "processing task from event source"
                     );
 
@@ -738,7 +738,7 @@ max_turns = 50
 timeout_secs = 300
 
 [heartbeat]
-interval_secs = 10
+interval_secs = 300
 "#;
     Config::from_str(toml)
 }
