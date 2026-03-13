@@ -307,12 +307,17 @@ pub struct HeartbeatConfig {
     /// Heartbeat interval in seconds.
     #[serde(default = "default_heartbeat_interval")]
     pub interval_secs: u64,
+
+    /// Include enhanced runtime monitoring fields in published profiles.
+    #[serde(default)]
+    pub include_runtime_monitoring: bool,
 }
 
 impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
             interval_secs: default_heartbeat_interval(),
+            include_runtime_monitoring: false,
         }
     }
 }
