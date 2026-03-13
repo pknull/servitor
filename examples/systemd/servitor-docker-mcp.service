@@ -1,0 +1,20 @@
+[Unit]
+Description=Servitor docker MCP sidecar
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mcp-docker
+ExecStart=/usr/local/bin/mcp-docker-server --bind 127.0.0.1:3002
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+BindPaths=/var/run/docker.sock
+
+[Install]
+WantedBy=multi-user.target
