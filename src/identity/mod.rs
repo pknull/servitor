@@ -83,9 +83,11 @@ impl Identity {
         let bytes = std::fs::read(path).map_err(|_| ServitorError::IdentityNotFound {
             path: path.display().to_string(),
         })?;
-        let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| ServitorError::InvalidKeypair {
-            reason: "expected 32 bytes".into(),
-        })?;
+        let key_bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| ServitorError::InvalidKeypair {
+                reason: "expected 32 bytes".into(),
+            })?;
         let signing_key = SigningKey::from_bytes(&key_bytes);
         Ok(Self { signing_key })
     }
@@ -133,12 +135,16 @@ impl PublicId {
             .ok_or_else(|| ServitorError::InvalidKeypair {
                 reason: format!("invalid public ID format: {}", self.0),
             })?;
-        let bytes = B64.decode(inner).map_err(|e| ServitorError::InvalidKeypair {
-            reason: format!("base64 decode failed: {e}"),
-        })?;
-        let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| ServitorError::InvalidKeypair {
-            reason: "expected 32 bytes after decode".into(),
-        })?;
+        let bytes = B64
+            .decode(inner)
+            .map_err(|e| ServitorError::InvalidKeypair {
+                reason: format!("base64 decode failed: {e}"),
+            })?;
+        let key_bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| ServitorError::InvalidKeypair {
+                reason: "expected 32 bytes after decode".into(),
+            })?;
         VerifyingKey::from_bytes(&key_bytes).map_err(|e| ServitorError::InvalidKeypair {
             reason: format!("invalid ed25519 public key: {e}"),
         })
@@ -147,9 +153,11 @@ impl PublicId {
     /// Verify a signature against this public key.
     pub fn verify(&self, message: &[u8], signature_b64: &str) -> Result<bool> {
         let vk = self.to_verifying_key()?;
-        let sig_bytes = B64.decode(signature_b64).map_err(|e| ServitorError::InvalidKeypair {
-            reason: format!("signature base64 decode failed: {e}"),
-        })?;
+        let sig_bytes = B64
+            .decode(signature_b64)
+            .map_err(|e| ServitorError::InvalidKeypair {
+                reason: format!("signature base64 decode failed: {e}"),
+            })?;
         let sig_bytes: [u8; 64] =
             sig_bytes
                 .try_into()

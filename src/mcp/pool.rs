@@ -171,19 +171,15 @@ impl McpPool {
             .ok_or_else(|| ServitorError::Mcp {
                 reason: format!("unknown tool: {}", prefixed_name),
             })?;
-        let tool_name = tool
-            .definition
-            .name
-            .as_str();
+        let tool_name = tool.definition.name.as_str();
 
         validate_arguments(prefixed_name, tool, &arguments)?;
 
-        let client =
-            self.clients
-                .get(&tool.server_name)
-                .ok_or_else(|| ServitorError::McpServerNotFound {
-                    name: tool.server_name.to_string(),
-                })?;
+        let client = self.clients.get(&tool.server_name).ok_or_else(|| {
+            ServitorError::McpServerNotFound {
+                name: tool.server_name.to_string(),
+            }
+        })?;
 
         let client = client.read().await;
         client.call_tool(tool_name, arguments).await
@@ -412,10 +408,7 @@ mod tests {
         let (pool, calls) = pool_with_tool(schema);
 
         let result = pool
-            .call_tool(
-                "shell_execute",
-                serde_json::json!({ "command": "ls /tmp" }),
-            )
+            .call_tool("shell_execute", serde_json::json!({ "command": "ls /tmp" }))
             .await
             .unwrap();
 

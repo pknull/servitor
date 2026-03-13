@@ -691,6 +691,64 @@ impl TraceSpan {
     }
 }
 
+/// Authorization gate where a denial occurred.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthGate {
+    Offer,
+    Assignment,
+}
+
+/// Authorization denial event published for audit/debug visibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthDenied {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+
+    /// Servitor that denied the request.
+    pub servitor_id: PublicId,
+
+    /// Denied person identity or redacted identity hint.
+    pub person_id: String,
+
+    /// Origin place that was checked.
+    pub place: String,
+
+    /// Requested skill or wildcard scope.
+    pub skill: String,
+
+    /// Authorization gate where the denial occurred.
+    pub gate: AuthGate,
+
+    /// Human-readable denial reason.
+    pub reason: String,
+
+    /// Timestamp.
+    pub timestamp: DateTime<Utc>,
+}
+
+impl AuthDenied {
+    pub fn new(
+        servitor_id: PublicId,
+        person_id: String,
+        place: String,
+        skill: String,
+        gate: AuthGate,
+        reason: String,
+    ) -> Self {
+        Self {
+            msg_type: "auth_denied".to_string(),
+            servitor_id,
+            person_id,
+            place,
+            skill,
+            gate,
+            reason,
+            timestamp: Utc::now(),
+        }
+    }
+}
+
 /// Execution outcome for a trace span.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -708,7 +766,6 @@ pub struct TraceEvent {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub attributes: HashMap<String, serde_json::Value>,
 }
-
 /// Generic egregore message envelope (for hook input and context fetching).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EgregoreMessage {
@@ -776,6 +833,7 @@ impl EgregoreMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::Identity;
 
     #[test]
     fn resource_detection_returns_nonzero() {
@@ -874,5 +932,24 @@ mod tests {
         assert_eq!(json["stats"]["tasks_executed"], 2);
         assert_eq!(json["stats"]["tasks_failed"], 1);
         assert!(json["last_task_ts"].is_string());
+    }
+
+    #[test]
+    fn auth_denied_roundtrip() {
+        let identity = Identity::generate();
+        let denial = AuthDenied::new(
+            identity.public_id(),
+            "discord:123".to_string(),
+            "discord:guild:channel".to_string(),
+            "shell:execute".to_string(),
+            AuthGate::Offer,
+            "no matching permission".to_string(),
+        );
+
+        let json = serde_json::to_string(&denial).unwrap();
+        let parsed: AuthDenied = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.msg_type, "auth_denied");
+        assert_eq!(parsed.gate, AuthGate::Offer);
+        assert_eq!(parsed.person_id, "discord:123");
     }
 }
