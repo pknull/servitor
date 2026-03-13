@@ -144,6 +144,8 @@ cp authority.example.toml ~/.servitor/authority.toml
 | `task_claim` | Out | Claim task before execution |
 | `task_result` | Out | Signed attestation of result |
 
+Detailed `trace_span` publishing is opt-in. Set `agent.publish_trace_spans = true` to emit root and MCP tool spans with shared trace IDs.
+
 ## LLM Providers
 
 All providers compiled in, runtime selection via config:

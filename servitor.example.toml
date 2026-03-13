@@ -49,6 +49,8 @@ max_turns = 50
 timeout_secs = 300
 # Optional: Custom system prompt prefix
 # system_prompt = "You are a helpful assistant."
+# Optional: publish trace_span messages for task and tool execution
+publish_trace_spans = false
 
 [heartbeat]
 # Heartbeat interval for capability advertisement
