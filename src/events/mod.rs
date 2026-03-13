@@ -85,7 +85,11 @@ pub fn task_from_schedule(
 
     Task {
         msg_type: "task".to_string(),
+        id: None,
         hash: hash_str,
+        task_type: None,
+        request: Some(prompt.to_string()),
+        requestor: None,
         prompt: prompt.to_string(),
         required_caps: vec![],
         parent_id: None,
