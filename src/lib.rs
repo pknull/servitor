@@ -9,9 +9,10 @@
 //! ┌─────────────────┐     ┌─────────────────────────────────────────────┐
 //! │    Egregore     │────▶│                  SERVITOR                    │
 //! │   (messages)    │◀────│  ┌─────────────┐  ┌─────────────────────┐  │
-//! │                 │     │  │ Agent Loop  │  │   MCP Client Pool   │  │
+//! │                 │     │  │ Task State  │  │   MCP Client Pool   │  │
 //! │  - task         │     │  │ (reasoning) │──│  ┌─────┐ ┌─────┐   │  │
-//! │  - task_claim   │     │  └─────────────┘  │  │stdio│ │http │   │  │
+//! │  - task_offer   │     │  └─────────────┘  │  │stdio│ │http │   │  │
+//! │  - task_assign  │     │                    │  └──┬──┘ └──┬──┘   │  │
 //! │  - task_result  │     │                    │  └──┬──┘ └──┬──┘   │  │
 //! │  - profile      │     │                    └─────┼───────┼──────┘  │
 //! └─────────────────┘     │   ┌──────────────────────┴───────┴──────┐  │
@@ -48,8 +49,9 @@ pub mod events;
 pub mod identity;
 pub mod mcp;
 pub mod scope;
+pub mod task;
 
-pub use authority::{Authority, AuthRequest, AuthResult, Keeper, PersonId};
+pub use authority::{AuthRequest, AuthResult, Authority, Keeper, PersonId};
 pub use config::Config;
 pub use error::{Result, ServitorError};
 pub use identity::{Identity, PublicId};

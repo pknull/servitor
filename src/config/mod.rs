@@ -182,6 +182,14 @@ on_notification = "Handle event: {{notification}}"
 max_turns = 50
 timeout_secs = 300
 
+[task]
+offer_ttl_secs = 300
+offer_timeout_secs = 60
+assign_timeout_secs = 300
+start_timeout_secs = 30
+eta_buffer_multiplier = 1.5
+ping_timeout_secs = 30
+
 [heartbeat]
 interval_secs = 10
 
@@ -196,6 +204,7 @@ publish = true
         assert!(config.mcp.contains_key("shell"));
         assert!(config.egregore.subscribe);
         assert_eq!(config.schedule.len(), 1);
+        assert_eq!(config.task.offer_ttl_secs, 300);
     }
 
     #[test]

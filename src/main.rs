@@ -1,16 +1,21 @@
 //! Servitor — Egregore network task executor.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use servitor::agent::{create_provider, AgentExecutor};
-use servitor::authority::{Authority, AuthRequest, PersonId};
+use servitor::authority::{AuthRequest, Authority, PersonId};
 use servitor::comms::discord::DiscordTransport;
 use servitor::comms::{CommsResponse, CommsTransport};
 use servitor::config::Config;
-use servitor::egregore::{EgregoreClient, ScopeConstraints, ServitorProfile, Task, TaskClaim};
+use servitor::egregore::{
+    EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorProfile, Task, TaskAssign,
+    TaskClaim, TaskFailed, TaskFailureReason, TaskPing, TaskStatusMessage,
+};
 use servitor::error::Result;
 use servitor::events::cron::CronSource;
 use servitor::events::sse::SseSource;
@@ -18,6 +23,10 @@ use servitor::events::EventRouter;
 use servitor::identity::Identity;
 use servitor::mcp::McpPool;
 use servitor::scope::ScopeEnforcer;
+use servitor::task::{
+    authorize_assignment, authorize_offer_request, AssignmentDecision, TaskCoordinator,
+    TaskLifecycleEvent,
+};
 
 #[derive(Parser)]
 #[command(name = "servitor")]
@@ -238,26 +247,27 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
 
     let egregore = EgregoreClient::new(&config.egregore.api_url);
 
-    // Build event router for non-comms sources
+    // Build event router for non-network sources
     let mut event_router = EventRouter::new();
 
     // Add cron source if we have scheduled tasks
     if !config.schedule.is_empty() {
         let cron_source = CronSource::new(&config.schedule)?;
         event_router.add_source(Box::new(cron_source));
-        tracing::info!(
-            tasks = config.schedule.len(),
-            "cron source enabled"
-        );
+        tracing::info!(tasks = config.schedule.len(), "cron source enabled");
     }
 
-    // Add SSE source if subscribe is enabled
-    if config.egregore.subscribe {
-        let capabilities = mcp_pool.capabilities();
-        let sse_source = SseSource::new(&config.egregore.api_url, capabilities);
-        event_router.add_source(Box::new(sse_source));
+    let capability_set: HashSet<String> = mcp_pool.capabilities().into_iter().collect();
+    let mut sse_source = if config.egregore.subscribe {
         tracing::info!("SSE subscription enabled");
-    }
+        Some(SseSource::new(
+            &config.egregore.api_url,
+            capability_set.iter().cloned().collect(),
+        ))
+    } else {
+        None
+    };
+    let mut task_coordinator = TaskCoordinator::new(identity.public_id(), config.task.clone());
 
     // Initialize comms transports
     let mut discord_transport: Option<DiscordTransport> = None;
@@ -291,6 +301,7 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
     tracing::info!(
         sources = event_router.source_count(),
         discord = discord_transport.is_some(),
+        sse = sse_source.is_some(),
         "entering event loop"
     );
 
@@ -405,6 +416,80 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
 
             // Poll other event sources
             _ = tokio::time::sleep(poll_interval) => {
+                if let Some(ref mut source) = sse_source {
+                    if let Some(message) = source.next_message().await {
+                        match process_sse_message(
+                            &message,
+                            &authority,
+                            &identity,
+                            &capability_set,
+                            &egregore,
+                            &mut task_coordinator,
+                            config,
+                        )
+                        .await {
+                            Ok(Some(assigned)) => {
+                                if let Err(e) = execute_assigned_task(
+                                    assigned,
+                                    provider.as_ref(),
+                                    &mcp_pool,
+                                    &scope_enforcer,
+                                    &identity,
+                                    &authority,
+                                    &egregore,
+                                    config,
+                                    sse_source.as_mut(),
+                                    &mut task_coordinator,
+                                    &capability_set,
+                                )
+                                .await
+                                {
+                                    tracing::error!(error = %e, "assigned task execution failed");
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to process SSE message");
+                            }
+                        }
+                    }
+                }
+
+                for event in task_coordinator.collect_timeouts(Instant::now()) {
+                    match event {
+                        TaskLifecycleEvent::Withdraw(withdraw) => {
+                            if let Err(e) = egregore.publish_offer_withdraw(&withdraw).await {
+                                tracing::debug!(error = %e, task_id = %withdraw.task_id, "failed to publish offer withdrawal");
+                            }
+                        }
+                        TaskLifecycleEvent::Failed(failed) => {
+                            if let Err(e) = egregore.publish_failed(&failed).await {
+                                tracing::debug!(error = %e, task_id = %failed.task_id, "failed to publish task failure");
+                            }
+                        }
+                    }
+                }
+
+                if let Some(assigned) = task_coordinator.take_next_assignment() {
+                    if let Err(e) = execute_assigned_task(
+                        assigned,
+                        provider.as_ref(),
+                        &mcp_pool,
+                        &scope_enforcer,
+                        &identity,
+                        &authority,
+                        &egregore,
+                        config,
+                        sse_source.as_mut(),
+                        &mut task_coordinator,
+                        &capability_set,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %e, "queued assigned task execution failed");
+                    }
+                }
+
                 if let Some((source_idx, mut task)) = event_router.poll().await {
                     tracing::debug!(
                         source = source_idx,
@@ -442,10 +527,6 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
 
                     // Set keeper on task for downstream use
                     task.keeper = keeper_name.clone();
-
-                    // Claim and execute
-                    let claim = TaskClaim::new(task.hash.clone(), identity.public_id(), 180);
-                    let _ = egregore.publish_claim(&claim).await;
 
                     let executor = AgentExecutor::new(
                         provider.as_ref(),
@@ -498,6 +579,263 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
     }
 }
 
+async fn process_sse_message(
+    message: &EgregoreMessage,
+    authority: &Authority,
+    identity: &Identity,
+    capability_set: &HashSet<String>,
+    egregore: &EgregoreClient,
+    task_coordinator: &mut TaskCoordinator,
+    config: &Config,
+) -> Result<Option<AssignmentDecision>> {
+    if let Some(mut task) = message.as_task() {
+        task.author = Some(message.author.0.clone());
+        task.normalize(Some(&message.author));
+
+        if !task_matches_capabilities(&task, capability_set) {
+            return Ok(None);
+        }
+
+        let Some(requestor) = task.requestor.clone() else {
+            tracing::warn!(task_id = %task.effective_id(), "ignoring task without requestor");
+            return Ok(None);
+        };
+
+        if requestor != message.author {
+            tracing::warn!(
+                task_id = %task.effective_id(),
+                author = %message.author,
+                "ignoring task with mismatched requestor and envelope author"
+            );
+            return Ok(None);
+        }
+
+        let auth_result = authorize_offer_request(authority, &requestor, &task);
+
+        if !auth_result.allowed {
+            tracing::info!(
+                author = %requestor,
+                task_type = %task.effective_task_type(),
+                reason = %auth_result.reason,
+                "skipping unauthorized task request"
+            );
+            return Ok(None);
+        }
+
+        task.keeper = auth_result.keeper;
+
+        let offer = task_coordinator
+            .register_offer(task, requestor, capability_set.iter().cloned().collect())
+            .offer;
+        egregore.publish_offer(&offer).await?;
+
+        return Ok(None);
+    }
+
+    if let Some(assign) = message.as_task_assign() {
+        return maybe_accept_assignment(
+            assign,
+            message,
+            authority,
+            identity,
+            task_coordinator,
+            config,
+        )
+        .await;
+    }
+
+    Ok(None)
+}
+
+async fn maybe_accept_assignment(
+    assign: TaskAssign,
+    message: &EgregoreMessage,
+    authority: &Authority,
+    identity: &Identity,
+    task_coordinator: &mut TaskCoordinator,
+    config: &Config,
+) -> Result<Option<AssignmentDecision>> {
+    if assign.servitor != identity.public_id() {
+        return Ok(None);
+    }
+
+    if let Some(content_assigner) = &assign.assigner {
+        if content_assigner != &message.author {
+            tracing::warn!(
+                task_id = %assign.task_id,
+                author = %message.author,
+                assigner = %content_assigner,
+                "ignoring task_assign with mismatched assigner"
+            );
+            return Ok(None);
+        }
+    }
+
+    let Some(requestor) = task_coordinator.pending_requestor(&assign.task_id).cloned() else {
+        return Ok(None);
+    };
+    let Some(task) = task_coordinator.pending_task(&assign.task_id).cloned() else {
+        return Ok(None);
+    };
+    let assigner = assign
+        .assigner
+        .clone()
+        .unwrap_or_else(|| message.author.clone());
+
+    if !authorize_assignment(authority, &assigner, &requestor, &task) {
+        tracing::info!(
+            task_id = %assign.task_id,
+            assigner = %assigner,
+            "ignoring unauthorized task assignment"
+        );
+        return Ok(None);
+    }
+
+    let eta_seconds = task.timeout_secs.unwrap_or(config.agent.timeout_secs);
+    let decision = task_coordinator.apply_assignment(&assign, Instant::now(), eta_seconds);
+    if let Some(decision) = decision {
+        if task_coordinator.active_execution_count() > 1 {
+            let _ = task_coordinator.finish_execution(&assign.task_id);
+            task_coordinator.enqueue_assignment(decision);
+            return Ok(None);
+        }
+
+        if task_coordinator.has_active_execution() {
+            return Ok(Some(decision));
+        }
+    }
+
+    Ok(None)
+}
+
+async fn execute_assigned_task(
+    assigned: AssignmentDecision,
+    provider: &dyn servitor::agent::provider::Provider,
+    mcp_pool: &McpPool,
+    scope_enforcer: &ScopeEnforcer,
+    identity: &Identity,
+    authority: &Authority,
+    egregore: &EgregoreClient,
+    config: &Config,
+    mut sse_source: Option<&mut SseSource>,
+    task_coordinator: &mut TaskCoordinator,
+    capability_set: &HashSet<String>,
+) -> Result<()> {
+    let task_id = assigned.task.effective_id().to_string();
+    let servitor_id = identity.public_id();
+    let eta_seconds = assigned.started.eta_seconds;
+
+    egregore.publish_started(&assigned.started).await?;
+
+    let mut interval = tokio::time::interval(Duration::from_millis(100));
+    let deadline = Instant::now() + Duration::from_secs(eta_seconds);
+    let executor = AgentExecutor::new(provider, mcp_pool, scope_enforcer, identity, &config.agent)
+        .with_egregore(egregore)
+        .with_authority(authority, assigned.task.keeper.clone());
+    let execution = executor.execute(&assigned.task);
+    tokio::pin!(execution);
+
+    loop {
+        tokio::select! {
+            result = &mut execution => {
+                match result {
+                    Ok(mut task_result) => {
+                        task_result.task_id = task_id.clone();
+                        task_result.servitor = servitor_id.clone();
+                        task_result.duration_seconds = task_coordinator
+                            .finish_execution(&task_id)
+                            .map(|active| active.started_at.elapsed().as_secs());
+                        egregore.publish_result(&task_result).await?;
+                    }
+                    Err(error) => {
+                        let _ = task_coordinator.finish_execution(&task_id);
+                        let failed = TaskFailed::new(
+                            task_id.clone(),
+                            servitor_id.clone(),
+                            TaskFailureReason::ExecutionError,
+                            Some(error.to_string()),
+                        );
+                        egregore.publish_failed(&failed).await?;
+                    }
+                }
+                return Ok(());
+            }
+            _ = interval.tick() => {
+                if Instant::now() >= deadline {
+                    let _ = task_coordinator.finish_execution(&task_id);
+                    let failed = TaskFailed::new(
+                        task_id.clone(),
+                        servitor_id.clone(),
+                        TaskFailureReason::Timeout,
+                        Some(format!("task exceeded {}s execution timeout", eta_seconds)),
+                    );
+                    egregore.publish_failed(&failed).await?;
+                    return Ok(());
+                }
+
+                if let Some(source) = sse_source.as_deref_mut() {
+                    if let Some(message) = source.next_message().await {
+                        if let Some(TaskPing { task_id: ping_task_id, .. }) = message.as_task_ping() {
+                            if ping_task_id == task_id {
+                                let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
+                                let status = TaskStatusMessage::new(
+                                    task_id.clone(),
+                                    servitor_id.clone(),
+                                    Some(remaining),
+                                    Some("Task is still running.".to_string()),
+                                );
+                                egregore.publish_status(&status).await?;
+                                continue;
+                            }
+                        }
+
+                        if message.as_task().is_some() || message.as_task_assign().is_some() {
+                            if let Some(assigned) = process_sse_message(
+                                &message,
+                                authority,
+                                identity,
+                                capability_set,
+                                egregore,
+                                task_coordinator,
+                                config,
+                            )
+                            .await? {
+                                tracing::info!(
+                                    current_task = %task_id,
+                                    queued_task = %assigned.task.effective_id(),
+                                    "queued assignment while another task is running"
+                                );
+                                task_coordinator.enqueue_assignment(assigned);
+                            }
+                        }
+                    }
+                }
+
+                for event in task_coordinator.collect_timeouts(Instant::now()) {
+                    match event {
+                        TaskLifecycleEvent::Withdraw(withdraw) => {
+                            let _ = egregore.publish_offer_withdraw(&withdraw).await;
+                        }
+                        TaskLifecycleEvent::Failed(failed) => {
+                            let _ = egregore.publish_failed(&failed).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn task_matches_capabilities(task: &Task, capability_set: &HashSet<String>) -> bool {
+    if task.required_caps.is_empty() {
+        return true;
+    }
+
+    task.required_caps
+        .iter()
+        .all(|capability| capability_set.contains(capability))
+}
+
 /// Build a Task from a CommsMessage.
 fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
     use sha2::{Digest, Sha256};
@@ -511,10 +849,7 @@ fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
     let hash_str: String = hash.iter().map(|b| format!("{b:02x}")).collect();
 
     let mut context = HashMap::new();
-    context.insert(
-        "source".to_string(),
-        serde_json::json!(msg.source.name()),
-    );
+    context.insert("source".to_string(), serde_json::json!(msg.source.name()));
     context.insert(
         "user".to_string(),
         serde_json::json!({
@@ -522,14 +857,15 @@ fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
             "name": msg.user_name,
         }),
     );
-    context.insert(
-        "channel".to_string(),
-        serde_json::json!(msg.channel_id),
-    );
+    context.insert("channel".to_string(), serde_json::json!(msg.channel_id));
 
     Task {
         msg_type: "task".to_string(),
+        id: None,
         hash: hash_str,
+        task_type: None,
+        request: Some(msg.content.clone()),
+        requestor: None,
         prompt: msg.content.clone(),
         required_caps: vec![],
         parent_id: msg.reply_to.clone(),
@@ -563,7 +899,11 @@ async fn run_exec(config: &Config, prompt: &str) -> Result<()> {
     // Build a task
     let task = servitor::egregore::Task {
         msg_type: "task".to_string(),
+        id: None,
         hash: format!("{:x}", md5_hash(prompt)),
+        task_type: None,
+        request: Some(prompt.to_string()),
+        requestor: None,
         prompt: prompt.to_string(),
         required_caps: vec![],
         parent_id: None,
@@ -736,6 +1076,14 @@ api_key_env = "ANTHROPIC_API_KEY"
 [agent]
 max_turns = 50
 timeout_secs = 300
+
+[task]
+offer_ttl_secs = 300
+offer_timeout_secs = 60
+assign_timeout_secs = 300
+start_timeout_secs = 30
+eta_buffer_multiplier = 1.5
+ping_timeout_secs = 30
 
 [heartbeat]
 interval_secs = 300

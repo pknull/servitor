@@ -25,6 +25,10 @@ pub struct Config {
     #[serde(default)]
     pub agent: AgentConfig,
 
+    /// Network task assignment flow configuration.
+    #[serde(default)]
+    pub task: TaskConfig,
+
     /// Heartbeat configuration.
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
@@ -225,6 +229,71 @@ fn default_max_turns() -> u32 {
 
 fn default_task_timeout() -> u64 {
     300
+}
+
+/// Task lifecycle configuration for offer/assign/execute flow.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TaskConfig {
+    /// Offer time-to-live in seconds before withdrawal.
+    #[serde(default = "default_offer_ttl_secs")]
+    pub offer_ttl_secs: u64,
+
+    /// How long a requestor has to see offers before the offer window is stale.
+    #[serde(default = "default_offer_timeout_secs")]
+    pub offer_timeout_secs: u64,
+
+    /// How long an assignment remains valid before it is considered stale.
+    #[serde(default = "default_assign_timeout_secs")]
+    pub assign_timeout_secs: u64,
+
+    /// How long the servitor has to acknowledge start.
+    #[serde(default = "default_start_timeout_secs")]
+    pub start_timeout_secs: u64,
+
+    /// Multiplier applied to ETA when deciding a task has overrun.
+    #[serde(default = "default_eta_buffer_multiplier")]
+    pub eta_buffer_multiplier: f64,
+
+    /// How long to wait after a ping before treating the task as unresponsive.
+    #[serde(default = "default_ping_timeout_secs")]
+    pub ping_timeout_secs: u64,
+}
+
+impl Default for TaskConfig {
+    fn default() -> Self {
+        Self {
+            offer_ttl_secs: default_offer_ttl_secs(),
+            offer_timeout_secs: default_offer_timeout_secs(),
+            assign_timeout_secs: default_assign_timeout_secs(),
+            start_timeout_secs: default_start_timeout_secs(),
+            eta_buffer_multiplier: default_eta_buffer_multiplier(),
+            ping_timeout_secs: default_ping_timeout_secs(),
+        }
+    }
+}
+
+fn default_offer_ttl_secs() -> u64 {
+    300
+}
+
+fn default_offer_timeout_secs() -> u64 {
+    60
+}
+
+fn default_assign_timeout_secs() -> u64 {
+    300
+}
+
+fn default_start_timeout_secs() -> u64 {
+    30
+}
+
+fn default_eta_buffer_multiplier() -> f64 {
+    1.5
+}
+
+fn default_ping_timeout_secs() -> u64 {
+    30
 }
 
 /// Heartbeat emission configuration.

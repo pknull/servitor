@@ -178,6 +178,12 @@ pub struct TaskResult {
     #[serde(rename = "type")]
     pub msg_type: String,
 
+    /// Stable task identifier for offer/assign lifecycle.
+    pub task_id: String,
+
+    /// Servitor that executed the task.
+    pub servitor: PublicId,
+
     /// Correlation ID matching the claim.
     pub correlation_id: String,
 
@@ -197,6 +203,10 @@ pub struct TaskResult {
     /// Error message (when failed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// Execution duration in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<u64>,
 
     /// Signed attestation.
     pub attestation: Attestation,
@@ -230,8 +240,24 @@ pub struct Task {
     #[serde(rename = "type")]
     pub msg_type: String,
 
+    /// Stable task identifier, distinct from message hash when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
     /// Task hash (computed by sender).
     pub hash: String,
+
+    /// Task class used for authorization and assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_type: Option<String>,
+
+    /// Original request text, if separately supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+
+    /// Requestor identity for assignment authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requestor: Option<PublicId>,
 
     /// Task prompt/instruction.
     pub prompt: String,
@@ -267,6 +293,212 @@ pub struct Task {
     /// Resolved keeper name (set after authorization).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keeper: Option<String>,
+}
+
+impl Task {
+    /// Normalize optional protocol fields so downstream code can rely on them.
+    pub fn normalize(&mut self, author: Option<&PublicId>) {
+        if self.id.is_none() {
+            self.id = Some(self.hash.clone());
+        }
+        if self.request.is_none() {
+            self.request = Some(self.prompt.clone());
+        }
+        if self.task_type.is_none() {
+            self.task_type = self.required_caps.first().cloned();
+        }
+        if self.requestor.is_none() {
+            self.requestor = author.cloned();
+        }
+    }
+
+    pub fn effective_id(&self) -> &str {
+        self.id.as_deref().unwrap_or(&self.hash)
+    }
+
+    pub fn effective_task_type(&self) -> &str {
+        self.task_type
+            .as_deref()
+            .or_else(|| self.required_caps.first().map(String::as_str))
+            .unwrap_or("general")
+    }
+
+    pub fn effective_request(&self) -> &str {
+        self.request.as_deref().unwrap_or(&self.prompt)
+    }
+}
+
+/// Servitor offering to execute a task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskOffer {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub task_id: String,
+    pub servitor: PublicId,
+    pub capabilities: Vec<String>,
+    pub ttl_seconds: u64,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl TaskOffer {
+    pub fn new(
+        task_id: impl Into<String>,
+        servitor: PublicId,
+        capabilities: Vec<String>,
+        ttl_seconds: u64,
+    ) -> Self {
+        Self {
+            msg_type: "task_offer".to_string(),
+            task_id: task_id.into(),
+            servitor,
+            capabilities,
+            ttl_seconds,
+            timestamp: Utc::now(),
+        }
+    }
+}
+
+/// Assignment selecting a specific servitor for a task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAssign {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub task_id: String,
+    pub servitor: PublicId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigner: Option<PublicId>,
+}
+
+/// Acknowledgment that execution has started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskStarted {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub task_id: String,
+    pub servitor: PublicId,
+    pub eta_seconds: u64,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl TaskStarted {
+    pub fn new(task_id: impl Into<String>, servitor: PublicId, eta_seconds: u64) -> Self {
+        Self {
+            msg_type: "task_started".to_string(),
+            task_id: task_id.into(),
+            servitor,
+            eta_seconds,
+            timestamp: Utc::now(),
+        }
+    }
+}
+
+/// Offer withdrawal before execution starts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskOfferWithdraw {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub task_id: String,
+    pub servitor: PublicId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl TaskOfferWithdraw {
+    pub fn new(task_id: impl Into<String>, servitor: PublicId, reason: Option<String>) -> Self {
+        Self {
+            msg_type: "task_offer_withdraw".to_string(),
+            task_id: task_id.into(),
+            servitor,
+            reason,
+            timestamp: Utc::now(),
+        }
+    }
+}
+
+/// Request a status update for an executing task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskPing {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requestor: Option<PublicId>,
+}
+
+/// Execution progress update.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskStatusMessage {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub task_id: String,
+    pub servitor: PublicId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_pct: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revised_eta_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl TaskStatusMessage {
+    pub fn new(
+        task_id: impl Into<String>,
+        servitor: PublicId,
+        revised_eta_seconds: Option<u64>,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            msg_type: "task_status".to_string(),
+            task_id: task_id.into(),
+            servitor,
+            progress_pct: None,
+            revised_eta_seconds,
+            message,
+            timestamp: Utc::now(),
+        }
+    }
+}
+
+/// Failure reasons for task lifecycle errors.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskFailureReason {
+    NoResponse,
+    ExecutionError,
+    Timeout,
+}
+
+/// Task failure message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskFailed {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub task_id: String,
+    pub servitor: PublicId,
+    pub reason: TaskFailureReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl TaskFailed {
+    pub fn new(
+        task_id: impl Into<String>,
+        servitor: PublicId,
+        reason: TaskFailureReason,
+        details: Option<String>,
+    ) -> Self {
+        Self {
+            msg_type: "task_failed".to_string(),
+            task_id: task_id.into(),
+            servitor,
+            reason,
+            details,
+            timestamp: Utc::now(),
+        }
+    }
 }
 
 /// Notification message for outbound communication.
@@ -343,6 +575,22 @@ impl EgregoreMessage {
     /// Try to parse content as a TaskResult.
     pub fn as_task_result(&self) -> Option<TaskResult> {
         if self.content_type() == Some("task_result") {
+            serde_json::from_value(self.content.clone()).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn as_task_assign(&self) -> Option<TaskAssign> {
+        if self.content_type() == Some("task_assign") {
+            serde_json::from_value(self.content.clone()).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn as_task_ping(&self) -> Option<TaskPing> {
+        if self.content_type() == Some("task_ping") {
             serde_json::from_value(self.content.clone()).ok()
         } else {
             None
