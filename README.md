@@ -146,6 +146,8 @@ cp authority.example.toml ~/.servitor/authority.toml
 
 Detailed `trace_span` publishing is opt-in. Set `agent.publish_trace_spans = true` to emit root and MCP tool spans with shared trace IDs.
 
+By default, `servitor_profile` messages only publish capability and scope data. Set `heartbeat.include_runtime_monitoring = true` to also include uptime, MCP server health, queue depth, and task counters in profile heartbeats.
+
 ## LLM Providers
 
 All providers compiled in, runtime selection via config:

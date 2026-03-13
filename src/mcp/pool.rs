@@ -7,6 +7,7 @@ use jsonschema::JSONSchema;
 use tokio::sync::RwLock;
 
 use crate::config::{Config, McpServerConfig};
+use crate::egregore::{McpServerHealth, McpServerStatus};
 use crate::error::{Result, ServitorError};
 use crate::mcp::client::{McpClient, ToolDefinition};
 use crate::mcp::http::HttpMcpClient;
@@ -15,6 +16,7 @@ use crate::mcp::stdio::StdioMcpClient;
 /// Pool of MCP clients with tool introspection.
 pub struct McpPool {
     clients: HashMap<String, Arc<RwLock<Box<dyn McpClient>>>>,
+    server_runtime: HashMap<String, McpServerRuntime>,
     /// All tools with prefixed names, mapped to their server.
     tools: HashMap<String, RegisteredTool>,
 }
@@ -25,11 +27,18 @@ struct RegisteredTool {
     validator: Option<JSONSchema>,
 }
 
+#[derive(Debug, Clone)]
+struct McpServerRuntime {
+    transport: String,
+    initialized: bool,
+}
+
 impl McpPool {
     /// Create a new empty pool.
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
+            server_runtime: HashMap::new(),
             tools: HashMap::new(),
         }
     }
@@ -59,12 +68,25 @@ impl McpPool {
 
         self.clients
             .insert(name.to_string(), Arc::new(RwLock::new(client)));
+        self.server_runtime.insert(
+            name.to_string(),
+            McpServerRuntime {
+                transport: config.transport.clone(),
+                initialized: false,
+            },
+        );
         Ok(())
     }
 
     /// Initialize all clients and introspect tools.
     pub async fn initialize_all(&mut self) -> Result<()> {
-        for (name, client) in &self.clients {
+        let clients: Vec<_> = self
+            .clients
+            .iter()
+            .map(|(name, client)| (name.clone(), Arc::clone(client)))
+            .collect();
+
+        for (name, client) in clients {
             let mut client = client.write().await;
 
             // Initialize the server
@@ -73,7 +95,7 @@ impl McpPool {
             // List and register tools
             let tools = client.list_tools().await?;
             for tool in tools {
-                let prefixed_name = tool.prefixed_name(name);
+                let prefixed_name = tool.prefixed_name(&name);
                 let validator = compile_validator(&tool)?;
                 self.tools.insert(
                     prefixed_name,
@@ -83,6 +105,10 @@ impl McpPool {
                         validator,
                     },
                 );
+            }
+
+            if let Some(runtime) = self.server_runtime.get_mut(&name) {
+                runtime.initialized = true;
             }
         }
 
@@ -166,6 +192,39 @@ impl McpPool {
     /// Get capability classes (server names).
     pub fn capabilities(&self) -> Vec<String> {
         self.clients.keys().cloned().collect()
+    }
+
+    /// Get a health snapshot for each configured MCP server.
+    pub async fn server_statuses(&self) -> Vec<McpServerStatus> {
+        let mut statuses = Vec::with_capacity(self.clients.len());
+
+        for (name, client) in &self.clients {
+            let Some(runtime) = self.server_runtime.get(name) else {
+                continue;
+            };
+
+            let status = if !runtime.initialized {
+                McpServerHealth::Unavailable
+            } else {
+                let client = client.read().await;
+                match client.ping().await {
+                    Ok(()) => McpServerHealth::Healthy,
+                    Err(error) => {
+                        tracing::debug!(name = %name, error = %error, "MCP server ping failed");
+                        McpServerHealth::Degraded
+                    }
+                }
+            };
+
+            statuses.push(McpServerStatus {
+                name: name.clone(),
+                transport: runtime.transport.clone(),
+                status,
+            });
+        }
+
+        statuses.sort_by(|left, right| left.name.cmp(&right.name));
+        statuses
     }
 
     /// Shutdown all clients.
@@ -362,5 +421,29 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(result.text_content(), "ok");
+    }
+
+    #[tokio::test]
+    async fn configured_servers_report_unavailable_before_initialization() {
+        let config = Config::from_str(
+            r#"
+[llm]
+provider = "ollama"
+model = "llama3.3:70b"
+
+[mcp.shell]
+transport = "stdio"
+command = "nonexistent-mcp-server"
+"#,
+        )
+        .unwrap();
+
+        let pool = McpPool::from_config(&config).unwrap();
+        let statuses = pool.server_statuses().await;
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].name, "shell");
+        assert_eq!(statuses[0].transport, "stdio");
+        assert_eq!(statuses[0].status, McpServerHealth::Unavailable);
     }
 }

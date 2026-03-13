@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -13,8 +14,9 @@ use servitor::comms::discord::DiscordTransport;
 use servitor::comms::{CommsResponse, CommsTransport};
 use servitor::config::Config;
 use servitor::egregore::{
-    EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorProfile, Task, TaskAssign,
-    TaskClaim, TaskFailed, TaskFailureReason, TaskPing, TaskStatusMessage,
+    EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorLoad, ServitorProfile,
+    ServitorStats, Task, TaskAssign, TaskClaim, TaskFailed, TaskFailureReason, TaskPing,
+    TaskStatus, TaskStatusMessage,
 };
 use servitor::error::Result;
 use servitor::events::cron::CronSource;
@@ -73,6 +75,74 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeStats {
+    started_at: Instant,
+    tasks_offered: u64,
+    tasks_executing: u64,
+    tasks_queued: u64,
+    tasks_executed: u64,
+    tasks_failed: u64,
+    last_task_ts: Option<DateTime<Utc>>,
+}
+
+impl RuntimeStats {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            tasks_offered: 0,
+            tasks_executing: 0,
+            tasks_queued: 0,
+            tasks_executed: 0,
+            tasks_failed: 0,
+            last_task_ts: None,
+        }
+    }
+
+    fn record_task_offer(&mut self) {
+        self.tasks_offered += 1;
+        self.tasks_queued += 1;
+    }
+
+    fn discard_task(&mut self) {
+        self.tasks_queued = self.tasks_queued.saturating_sub(1);
+    }
+
+    fn start_task(&mut self) {
+        self.tasks_queued = self.tasks_queued.saturating_sub(1);
+        self.tasks_executing += 1;
+    }
+
+    fn finish_task(&mut self, success: bool) {
+        self.tasks_executing = self.tasks_executing.saturating_sub(1);
+        if success {
+            self.tasks_executed += 1;
+        } else {
+            self.tasks_failed += 1;
+        }
+        self.last_task_ts = Some(Utc::now());
+    }
+
+    fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+
+    fn load(&self) -> ServitorLoad {
+        ServitorLoad {
+            tasks_executing: self.tasks_executing,
+            tasks_queued: self.tasks_queued,
+        }
+    }
+
+    fn stats(&self) -> ServitorStats {
+        ServitorStats {
+            tasks_offered: self.tasks_offered,
+            tasks_executed: self.tasks_executed,
+            tasks_failed: self.tasks_failed,
+        }
+    }
 }
 
 #[tokio::main]
@@ -280,7 +350,8 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
     }
 
     // Publish initial profile
-    let profile = build_profile(&identity, &mcp_pool, config);
+    let mut runtime_stats = RuntimeStats::new();
+    let profile = build_profile(&identity, &mcp_pool, config, &runtime_stats).await;
     if let Err(e) = egregore.publish_profile(&profile).await {
         tracing::warn!(error = %e, "failed to publish profile (egregore may be offline)");
     }
@@ -312,6 +383,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                     user = %comms_msg.user_name,
                     "received comms message"
                 );
+                runtime_stats.record_task_offer();
 
                 // Authorize the Discord user
                 let person = PersonId::from_discord(&comms_msg.user_id);
@@ -332,6 +404,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                         reason = %auth_result.reason,
                         "ignoring unauthorized Discord message"
                     );
+                    runtime_stats.discard_task();
                     // Send rejection message
                     let comms_response = CommsResponse {
                         channel_id: comms_msg.channel_id.clone(),
@@ -350,6 +423,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                 // Build task from comms message
                 let mut task = task_from_comms(&comms_msg);
                 task.keeper = keeper_name.clone();
+                runtime_stats.start_task();
 
                 // Execute
                 let executor = AgentExecutor::new(
@@ -390,9 +464,11 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                             tracing::debug!(error = %e, "failed to publish result to egregore");
                         }
 
+                        runtime_stats.finish_task(matches!(result.status, TaskStatus::Success));
                         tracing::info!(status = ?result.status, "comms task complete");
                     }
                     Err(e) => {
+                        runtime_stats.finish_task(false);
                         tracing::error!(error = %e, "comms task execution failed");
 
                         // Send error back to user
@@ -489,6 +565,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                         prompt_len = task.prompt.len(),
                         "processing task from event source"
                     );
+                    runtime_stats.record_task_offer();
 
                     // Authorize task if it has an author (from SSE)
                     let keeper_name = if let Some(ref author) = task.author {
@@ -505,6 +582,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                                 reason = %auth_result.reason,
                                 "skipping unauthorized task"
                             );
+                            runtime_stats.discard_task();
                             continue;
                         }
 
@@ -520,6 +598,10 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                     // Set keeper on task for downstream use
                     task.keeper = keeper_name.clone();
 
+                    // Claim and execute
+                    let claim = TaskClaim::new(task.hash.clone(), identity.public_id(), 180);
+                    let _ = egregore.publish_claim(&claim).await;
+                    runtime_stats.start_task();
                     let executor = AgentExecutor::new(
                         provider.as_ref(),
                         &mcp_pool,
@@ -544,6 +626,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                                 }
                             }
 
+                            runtime_stats.finish_task(matches!(result.status, TaskStatus::Success));
                             tracing::info!(
                                 status = ?result.status,
                                 hash = %result.result_hash,
@@ -551,6 +634,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                             );
                         }
                         Err(e) => {
+                            runtime_stats.finish_task(false);
                             tracing::error!(error = %e, "task execution failed");
                         }
                     }
@@ -558,7 +642,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
 
                 // Check heartbeat
                 if last_heartbeat.elapsed() >= heartbeat_interval {
-                    let profile = build_profile(&identity, &mcp_pool, config);
+                    let profile = build_profile(&identity, &mcp_pool, config, &runtime_stats).await;
                     if let Err(e) = egregore.publish_profile(&profile).await {
                         tracing::debug!(error = %e, "heartbeat failed");
                     } else {
@@ -1039,9 +1123,23 @@ async fn run_init(config: &Config, force: bool) -> Result<()> {
 }
 
 /// Build a ServitorProfile for publishing.
-fn build_profile(identity: &Identity, mcp_pool: &McpPool, config: &Config) -> ServitorProfile {
+async fn build_profile(
+    identity: &Identity,
+    mcp_pool: &McpPool,
+    config: &Config,
+    runtime_stats: &RuntimeStats,
+) -> ServitorProfile {
     let mut profile =
         ServitorProfile::new(identity.public_id(), config.heartbeat.interval_secs * 1000);
+
+    profile.version = env!("CARGO_PKG_VERSION").to_string();
+    if config.heartbeat.include_runtime_monitoring {
+        profile.uptime_secs = runtime_stats.uptime_secs();
+        profile.mcp_servers = mcp_pool.server_statuses().await;
+        profile.load = runtime_stats.load();
+        profile.stats = runtime_stats.stats();
+        profile.last_task_ts = runtime_stats.last_task_ts.clone();
+    }
 
     // Add capabilities from MCP servers
     profile.capabilities = mcp_pool.capabilities();
@@ -1096,6 +1194,7 @@ ping_timeout_secs = 30
 
 [heartbeat]
 interval_secs = 300
+include_runtime_monitoring = false
 "#;
     Config::from_str(toml)
 }
@@ -1162,6 +1261,7 @@ fn md5_hash(s: &str) -> u64 {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::Duration;
 
     #[test]
     fn missing_authority_requires_explicit_insecure() {
@@ -1255,5 +1355,80 @@ skills = ["*"]
 
         let err = authorize_local_exec(&authority, &identity).unwrap_err();
         assert!(matches!(err, servitor::ServitorError::Unauthorized { .. }));
+    }
+
+    #[tokio::test]
+    async fn build_profile_includes_runtime_monitoring_data() {
+        let config = Config::from_str(
+            r#"
+[llm]
+provider = "ollama"
+model = "llama3.3:70b"
+
+[heartbeat]
+interval_secs = 15
+include_runtime_monitoring = true
+
+[mcp.shell]
+transport = "stdio"
+command = "nonexistent-mcp-server"
+scope.allow = ["execute:/tmp/*"]
+"#,
+        )
+        .unwrap();
+        let identity = Identity::generate();
+        let mcp_pool = McpPool::from_config(&config).unwrap();
+        let mut runtime_stats = RuntimeStats::new();
+        runtime_stats.started_at = Instant::now() - Duration::from_secs(42);
+        runtime_stats.record_task_offer();
+        runtime_stats.start_task();
+        runtime_stats.finish_task(true);
+
+        let profile = build_profile(&identity, &mcp_pool, &config, &runtime_stats).await;
+
+        assert_eq!(profile.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(profile.heartbeat_interval_ms, 15000);
+        assert_eq!(profile.uptime_secs, 42);
+        assert_eq!(profile.load.tasks_executing, 0);
+        assert_eq!(profile.load.tasks_queued, 0);
+        assert_eq!(profile.stats.tasks_offered, 1);
+        assert_eq!(profile.stats.tasks_executed, 1);
+        assert_eq!(profile.stats.tasks_failed, 0);
+        assert!(profile.last_task_ts.is_some());
+        assert_eq!(profile.mcp_servers.len(), 1);
+        assert_eq!(profile.mcp_servers[0].name, "shell");
+        assert_eq!(profile.mcp_servers[0].transport, "stdio");
+        assert_eq!(profile.scopes["shell"].allow, vec!["execute:/tmp/*"]);
+    }
+
+    #[tokio::test]
+    async fn build_profile_omits_runtime_monitoring_data_by_default() {
+        let config = Config::from_str(
+            r#"
+[llm]
+provider = "ollama"
+model = "llama3.3:70b"
+
+[mcp.shell]
+transport = "stdio"
+command = "nonexistent-mcp-server"
+"#,
+        )
+        .unwrap();
+        let identity = Identity::generate();
+        let mcp_pool = McpPool::from_config(&config).unwrap();
+        let mut runtime_stats = RuntimeStats::new();
+        runtime_stats.record_task_offer();
+        runtime_stats.start_task();
+        runtime_stats.finish_task(true);
+
+        let profile = build_profile(&identity, &mcp_pool, &config, &runtime_stats).await;
+        let json = serde_json::to_value(&profile).unwrap();
+
+        assert!(json.get("uptime_secs").is_none());
+        assert!(json.get("mcp_servers").is_none());
+        assert!(json.get("load").is_none());
+        assert!(json.get("stats").is_none());
+        assert!(json.get("last_task_ts").is_none());
     }
 }

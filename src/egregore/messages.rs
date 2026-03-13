@@ -37,10 +37,34 @@ pub struct ServitorProfile {
     /// Profile version.
     #[serde(default = "default_version")]
     pub version: String,
+
+    /// Time since daemon start.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub uptime_secs: u64,
+
+    /// MCP server health snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerStatus>,
+
+    /// Current work queue and execution load.
+    #[serde(default, skip_serializing_if = "ServitorLoad::is_empty")]
+    pub load: ServitorLoad,
+
+    /// Cumulative task counters.
+    #[serde(default, skip_serializing_if = "ServitorStats::is_empty")]
+    pub stats: ServitorStats,
+
+    /// Timestamp when the last task finished execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_task_ts: Option<DateTime<Utc>>,
 }
 
 fn default_version() -> String {
-    "1.0".to_string()
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 impl ServitorProfile {
@@ -54,7 +78,58 @@ impl ServitorProfile {
             resource_limits: ResourceLimits::default(),
             heartbeat_interval_ms,
             version: default_version(),
+            uptime_secs: 0,
+            mcp_servers: vec![],
+            load: ServitorLoad::default(),
+            stats: ServitorStats::default(),
+            last_task_ts: None,
         }
+    }
+}
+
+/// MCP server health snapshot for profile publishing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub transport: String,
+    #[serde(default)]
+    pub status: McpServerHealth,
+}
+
+/// MCP server health state.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpServerHealth {
+    Healthy,
+    Degraded,
+    #[default]
+    Unavailable,
+}
+
+/// Current servitor work load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServitorLoad {
+    pub tasks_executing: u64,
+    pub tasks_queued: u64,
+}
+
+impl ServitorLoad {
+    pub fn is_empty(&self) -> bool {
+        self.tasks_executing == 0 && self.tasks_queued == 0
+    }
+}
+
+/// Cumulative runtime counters for monitoring.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServitorStats {
+    pub tasks_offered: u64,
+    pub tasks_executed: u64,
+    pub tasks_failed: u64,
+}
+
+impl ServitorStats {
+    pub fn is_empty(&self) -> bool {
+        self.tasks_offered == 0 && self.tasks_executed == 0 && self.tasks_failed == 0
     }
 }
 
@@ -754,5 +829,50 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn profile_defaults_include_operational_fields() {
+        let profile = ServitorProfile::new(PublicId("@test.ed25519".to_string()), 10000);
+
+        assert_eq!(profile.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(profile.uptime_secs, 0);
+        assert!(profile.mcp_servers.is_empty());
+        assert_eq!(profile.load, ServitorLoad::default());
+        assert_eq!(profile.stats, ServitorStats::default());
+        assert!(profile.last_task_ts.is_none());
+    }
+
+    #[test]
+    fn profile_serializes_enhanced_monitoring_fields() {
+        let mut profile = ServitorProfile::new(PublicId("@test.ed25519".to_string()), 10000);
+        profile.uptime_secs = 42;
+        profile.mcp_servers = vec![McpServerStatus {
+            name: "shell".to_string(),
+            transport: "stdio".to_string(),
+            status: McpServerHealth::Healthy,
+        }];
+        profile.load = ServitorLoad {
+            tasks_executing: 1,
+            tasks_queued: 2,
+        };
+        profile.stats = ServitorStats {
+            tasks_offered: 3,
+            tasks_executed: 2,
+            tasks_failed: 1,
+        };
+        profile.last_task_ts = Some(Utc::now());
+
+        let json = serde_json::to_value(&profile).unwrap();
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(json["uptime_secs"], 42);
+        assert_eq!(json["mcp_servers"][0]["name"], "shell");
+        assert_eq!(json["mcp_servers"][0]["status"], "healthy");
+        assert_eq!(json["load"]["tasks_executing"], 1);
+        assert_eq!(json["load"]["tasks_queued"], 2);
+        assert_eq!(json["stats"]["tasks_offered"], 3);
+        assert_eq!(json["stats"]["tasks_executed"], 2);
+        assert_eq!(json["stats"]["tasks_failed"], 1);
+        assert!(json["last_task_ts"].is_string());
     }
 }
