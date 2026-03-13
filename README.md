@@ -53,6 +53,24 @@ Edit `servitor.toml` to configure:
 - MCP servers (tools/capabilities)
 - Scope enforcement (what tools can access)
 - Egregore network connection
+- Optional consumer group membership for exactly-once SSE task ownership
+
+Example consumer group configuration:
+
+```toml
+[egregore]
+api_url = "http://127.0.0.1:7654"
+subscribe = true
+
+[egregore.group]
+name = "workers"
+heartbeat_interval_secs = 5
+```
+
+Each servitor in the same named group publishes its membership in
+`servitor_profile` heartbeats. Group members deterministically hash task IDs to
+pick a single owner, so tasks are distributed without duplicate execution and
+rebalance automatically when heartbeats go stale.
 
 ## Usage
 

@@ -15,10 +15,10 @@ subscribe = false
 #     "@7JIN8TA3bZ1l786oQ6lPN3l94KEFFH0UlVz9lqTr5+E=.ed25519",
 # ]
 
-# Optional: Consumer group for load distribution (deferred to v2)
+# Optional: Consumer group for deterministic SSE task distribution
 # [egregore.group]
-# name = "servitors"
-# heartbeat_interval_secs = 10
+# name = "workers"
+# heartbeat_interval_secs = 5
 
 [llm]
 # Provider: "anthropic", "openai", "ollama", "openai-compat"

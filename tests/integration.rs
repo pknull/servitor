@@ -16,6 +16,9 @@ data_dir = "/tmp/servitor-test"
 [egregore]
 api_url = "http://127.0.0.1:7654"
 
+[egregore.group]
+name = "workers"
+
 [llm]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
@@ -35,6 +38,14 @@ timeout_secs = 60
     assert_eq!(config.llm.provider, "anthropic");
     assert_eq!(config.mcp.len(), 1);
     assert!(config.mcp.contains_key("test"));
+    assert_eq!(
+        config
+            .egregore
+            .group
+            .as_ref()
+            .map(|group| group.name.as_str()),
+        Some("workers")
+    );
 }
 
 /// Test identity generation and signing.
@@ -181,7 +192,11 @@ fn agent_context() {
     ctx.add_user_message("Hello, execute a task");
     ctx.add_assistant_message(vec![
         ContentBlock::text("I'll help with that."),
-        ContentBlock::tool_use("call_1", "shell_execute", serde_json::json!({"command": "ls"})),
+        ContentBlock::tool_use(
+            "call_1",
+            "shell_execute",
+            serde_json::json!({"command": "ls"}),
+        ),
     ]);
     ctx.add_tool_results(vec![ContentBlock::tool_result(
         "call_1",
