@@ -1,7 +1,10 @@
 //! Integration tests for Servitor.
 
+use chrono::Utc;
 use servitor::config::Config;
-use servitor::egregore::messages::{Task, TaskScopeOverride, TaskStatus};
+use servitor::egregore::messages::{
+    Attestation, PlannedToolCall, Task, TaskPlan, TaskScopeOverride, TaskStatus,
+};
 use servitor::identity::Identity;
 use servitor::mcp::McpPool;
 use servitor::scope::ScopeEnforcer;
@@ -129,7 +132,6 @@ fn task_message_construction() {
 /// Test attestation signing in task results.
 #[test]
 fn attestation_signing() {
-    use chrono::Utc;
     use servitor::egregore::messages::{Attestation, TaskResult};
 
     let identity = Identity::generate();
@@ -153,6 +155,7 @@ fn attestation_signing() {
         result: Some(serde_json::json!({ "answer": 42 })),
         error: None,
         duration_seconds: Some(1),
+        plan_hash: Some("plan-123".to_string()),
         attestation,
         trace_id: None,
     };
@@ -170,6 +173,46 @@ fn attestation_signing() {
     assert!(json.contains("task_result"));
     assert!(json.contains("attestation"));
     assert!(json.contains("signature"));
+    assert!(json.contains("plan-123"));
+}
+
+/// Test task plan signing in plan-first/dry-run flows.
+#[test]
+fn task_plan_signing() {
+    let identity = Identity::generate();
+    let plan_hash = "cafebabe123456";
+    let signature = identity.sign_hash(plan_hash);
+
+    let plan = TaskPlan {
+        msg_type: "task_plan".to_string(),
+        correlation_id: "corr-plan-1".to_string(),
+        task_hash: "task-xyz".to_string(),
+        plan_hash: plan_hash.to_string(),
+        summary: "Read the directory, then answer.".to_string(),
+        stop_reason: "tool_use".to_string(),
+        tool_calls: vec![PlannedToolCall {
+            id: "toolu_plan_1".to_string(),
+            name: "shell_execute".to_string(),
+            arguments: serde_json::json!({ "command": "pwd" }),
+        }],
+        attestation: Attestation {
+            servitor_id: identity.public_id(),
+            signature: signature.clone(),
+            timestamp: Utc::now(),
+        },
+    };
+
+    let valid = plan
+        .attestation
+        .servitor_id
+        .verify(plan_hash.as_bytes(), &signature)
+        .unwrap();
+    assert!(valid);
+
+    let json = serde_json::to_string_pretty(&plan).unwrap();
+    assert!(json.contains("task_plan"));
+    assert!(json.contains("tool_calls"));
+    assert!(json.contains("shell_execute"));
 }
 
 /// Test trace linkage on task results.
@@ -191,6 +234,7 @@ fn task_result_trace_id_roundtrip() {
         result: Some(serde_json::json!({ "text": "ok" })),
         error: None,
         duration_seconds: Some(1),
+        plan_hash: None,
         attestation: Attestation {
             servitor_id: identity.public_id(),
             signature,
