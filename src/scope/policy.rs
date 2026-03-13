@@ -17,23 +17,10 @@ pub struct ScopePolicy {
 impl ScopePolicy {
     /// Compile a scope policy from configuration.
     pub fn from_config(server_name: &str, config: &ScopeConfig) -> Result<Self> {
-        let mut allow = Vec::new();
-        let mut block = Vec::new();
-
-        for pattern in &config.allow {
-            let (scope, pat) = parse_scoped_pattern(pattern);
-            allow.push((scope.to_string(), ScopeMatcher::new(pat)?));
-        }
-
-        for pattern in &config.block {
-            let (scope, pat) = parse_scoped_pattern(pattern);
-            block.push((scope.to_string(), ScopeMatcher::new(pat)?));
-        }
-
         Ok(Self {
             server_name: server_name.to_string(),
-            allow,
-            block,
+            allow: compile_patterns(&config.allow)?,
+            block: compile_patterns(&config.block)?,
         })
     }
 
@@ -64,9 +51,7 @@ impl ScopePolicy {
         }
 
         // If no allow patterns, permit by default
-        if !self.allow.is_empty()
-            && !matches_allow_patterns(&self.allow, tool_name, &targets)
-        {
+        if !self.allow.is_empty() && !matches_allow_patterns(&self.allow, tool_name, &targets) {
             return Err(ServitorError::ScopeViolation {
                 reason: format!(
                     "not allowed: tool '{}' with targets {:?} not permitted by any allow pattern",
@@ -85,9 +70,12 @@ impl ScopePolicy {
 
         let override_block = compile_task_override_patterns(&scope_override.block)?;
         let full_scope = format!("{}:{}", self.server_name, tool_name);
-        if let Err(reason) =
-            check_override_block_patterns(&override_block, &full_scope, &targets, "task scope override")
-        {
+        if let Err(reason) = check_override_block_patterns(
+            &override_block,
+            &full_scope,
+            &targets,
+            "task scope override",
+        ) {
             return Err(ServitorError::ScopeViolation { reason });
         }
 
@@ -434,6 +422,29 @@ mod tests {
         assert!(policy
             .check_with_override("execute", &args, Some(&scope_override))
             .is_err());
+    }
+
+    #[test]
+    fn invalid_task_scope_override_pattern_is_rejected() {
+        let policy = ScopePolicy::from_config(
+            "shell",
+            &ScopeConfig {
+                allow: vec!["*".to_string()],
+                block: vec![],
+            },
+        )
+        .unwrap();
+
+        let scope_override = TaskScopeOverride {
+            allow: vec!["shell".to_string()],
+            block: vec![],
+        };
+
+        let args = serde_json::json!({ "command": "ls" });
+        let error = policy
+            .check_with_override("execute", &args, Some(&scope_override))
+            .unwrap_err();
+        assert!(matches!(error, ServitorError::Config { .. }));
     }
 
     #[test]
