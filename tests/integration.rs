@@ -179,6 +179,45 @@ fn provider_capabilities() {
     assert_eq!(caps.max_tokens, Some(4096));
 }
 
+#[test]
+fn capability_challenge_roundtrip() {
+    use chrono::Utc;
+    use servitor::egregore::messages::{CapabilityChallenge, CapabilityProof};
+
+    let challenge = CapabilityChallenge {
+        msg_type: "capability_challenge".to_string(),
+        challenge_id: "challenge-1".to_string(),
+        task_id: "task-1".to_string(),
+        servitor: Identity::generate().public_id(),
+        capability: "shell:execute".to_string(),
+        challenger: None,
+        ttl_seconds: 30,
+        timestamp: Utc::now(),
+    };
+
+    let json = serde_json::to_value(&challenge).unwrap();
+    let parsed: CapabilityChallenge = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed.capability, "shell:execute");
+
+    let proof_json = serde_json::json!({
+        "type": "capability_proof",
+        "challenge_id": "challenge-1",
+        "task_id": "task-1",
+        "servitor": challenge.servitor,
+        "capability": "shell:execute",
+        "verified": true,
+        "matched_tools": ["shell_execute"],
+        "attestation": {
+            "servitor_id": Identity::generate().public_id(),
+            "signature": "sig",
+            "timestamp": Utc::now()
+        },
+        "timestamp": Utc::now()
+    });
+    let parsed: CapabilityProof = serde_json::from_value(proof_json).unwrap();
+    assert!(parsed.verified);
+}
+
 /// Test message construction for agent context.
 #[test]
 fn agent_context() {

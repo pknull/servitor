@@ -479,6 +479,84 @@ impl TaskFailed {
     }
 }
 
+/// Challenge a servitor to prove a claimed capability before assignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityChallenge {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub challenge_id: String,
+    pub task_id: String,
+    pub servitor: PublicId,
+    pub capability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenger: Option<PublicId>,
+    #[serde(default)]
+    pub ttl_seconds: u64,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl CapabilityChallenge {
+    pub fn new(
+        task_id: impl Into<String>,
+        servitor: PublicId,
+        capability: impl Into<String>,
+        challenger: Option<PublicId>,
+        ttl_seconds: u64,
+    ) -> Self {
+        Self {
+            msg_type: "capability_challenge".to_string(),
+            challenge_id: uuid::Uuid::new_v4().to_string(),
+            task_id: task_id.into(),
+            servitor,
+            capability: capability.into(),
+            challenger,
+            ttl_seconds,
+            timestamp: Utc::now(),
+        }
+    }
+}
+
+/// Signed proof describing the servitor's current local capability view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityProof {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub challenge_id: String,
+    pub task_id: String,
+    pub servitor: PublicId,
+    pub capability: String,
+    pub verified: bool,
+    #[serde(default)]
+    pub matched_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+    pub attestation: Attestation,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl CapabilityProof {
+    pub fn signing_payload(&self) -> String {
+        serde_json::json!({
+            "challenge_id": self.challenge_id,
+            "task_id": self.task_id,
+            "servitor": self.servitor,
+            "capability": self.capability,
+            "verified": self.verified,
+            "matched_tools": self.matched_tools,
+            "details": self.details,
+            "timestamp": self.timestamp,
+        })
+        .to_string()
+    }
+
+    pub fn verify(&self) -> crate::error::Result<bool> {
+        self.attestation.servitor_id.verify(
+            self.signing_payload().as_bytes(),
+            &self.attestation.signature,
+        )
+    }
+}
+
 /// Notification message for outbound communication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
@@ -575,6 +653,22 @@ impl EgregoreMessage {
         }
     }
 
+    pub fn as_capability_challenge(&self) -> Option<CapabilityChallenge> {
+        if self.content_type() == Some("capability_challenge") {
+            serde_json::from_value(self.content.clone()).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn as_capability_proof(&self) -> Option<CapabilityProof> {
+        if self.content_type() == Some("capability_proof") {
+            serde_json::from_value(self.content.clone()).ok()
+        } else {
+            None
+        }
+    }
+
     /// Get the prompt if this is a task message.
     pub fn prompt(&self) -> Option<&str> {
         self.content.get("prompt").and_then(|v| v.as_str())
@@ -608,5 +702,31 @@ mod tests {
         let detected = ResourceLimits::detect();
         assert_eq!(defaults.cpu, detected.cpu);
         assert_eq!(defaults.memory_mb, detected.memory_mb);
+    }
+
+    #[test]
+    fn capability_proof_signature_roundtrip() {
+        let identity = crate::identity::Identity::generate();
+        let timestamp = Utc::now();
+        let mut proof = CapabilityProof {
+            msg_type: "capability_proof".to_string(),
+            challenge_id: "challenge-1".to_string(),
+            task_id: "task-1".to_string(),
+            servitor: identity.public_id(),
+            capability: "shell:execute".to_string(),
+            verified: true,
+            matched_tools: vec!["shell_execute".to_string()],
+            details: Some("matched local tool inventory".to_string()),
+            attestation: Attestation {
+                servitor_id: identity.public_id(),
+                signature: String::new(),
+                timestamp,
+            },
+            timestamp,
+        };
+        let signature = identity.sign(proof.signing_payload().as_bytes());
+        proof.attestation.signature = signature;
+
+        assert!(proof.verify().unwrap());
     }
 }
