@@ -114,7 +114,8 @@ mod tests {
 
     #[test]
     fn test_person_id_display() {
-        let egregore = PersonId::Egregore("@7JIN8TA3bZ1l786oQ6lPN3l94KEFFH0UlVz9lqTr5+E=.ed25519".to_string());
+        let egregore =
+            PersonId::Egregore("@7JIN8TA3bZ1l786oQ6lPN3l94KEFFH0UlVz9lqTr5+E=.ed25519".to_string());
         // Truncates to first 12 chars: "@7JIN8TA3bZ1"
         assert!(egregore.display().starts_with("egregore:@7JIN8TA3bZ1"));
 

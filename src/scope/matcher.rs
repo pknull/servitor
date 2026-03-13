@@ -74,8 +74,14 @@ mod tests {
 
     #[test]
     fn parse_scoped() {
-        assert_eq!(parse_scoped_pattern("execute:/etc/*"), ("execute", "/etc/*"));
+        assert_eq!(
+            parse_scoped_pattern("execute:/etc/*"),
+            ("execute", "/etc/*")
+        );
         assert_eq!(parse_scoped_pattern("read:*.txt"), ("read", "*.txt"));
-        assert_eq!(parse_scoped_pattern("plain-pattern"), ("*", "plain-pattern"));
+        assert_eq!(
+            parse_scoped_pattern("plain-pattern"),
+            ("*", "plain-pattern")
+        );
     }
 }
