@@ -263,12 +263,15 @@ impl<'a> AgentExecutor<'a> {
 
         Ok(TaskResult {
             msg_type: "task_result".to_string(),
+            task_id: task.effective_id().to_string(),
+            servitor: self.identity.public_id(),
             correlation_id: uuid::Uuid::new_v4().to_string(),
             task_hash: task.hash.clone(),
             result_hash,
             status,
             result,
             error,
+            duration_seconds: None,
             attestation,
         })
     }
