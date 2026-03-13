@@ -234,6 +234,7 @@ fn task_result_trace_id_roundtrip() {
         result: Some(serde_json::json!({ "text": "ok" })),
         error: None,
         duration_seconds: Some(1),
+        plan_hash: None,
         attestation: Attestation {
             servitor_id: identity.public_id(),
             signature,
