@@ -1390,6 +1390,10 @@ fn md5_hash(s: &str) -> u64 {
     hasher.finish()
 }
 
+fn should_publish_plan(plan_first: bool) -> bool {
+    plan_first
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
