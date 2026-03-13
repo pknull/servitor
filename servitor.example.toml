@@ -55,6 +55,8 @@ publish_trace_spans = false
 [heartbeat]
 # Heartbeat interval for capability advertisement
 interval_secs = 10
+# Optional: include runtime monitoring fields like uptime, MCP health, and task counters
+include_runtime_monitoring = false
 
 # MCP Servers
 # Each server provides tool capabilities to the Servitor.
