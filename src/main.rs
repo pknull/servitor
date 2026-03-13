@@ -872,17 +872,13 @@ fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
 
 /// Execute a task directly (for testing).
 async fn run_exec(config: &Config, prompt: &str, insecure: bool) -> Result<()> {
-    if !insecure {
-        return Err(servitor::ServitorError::Config {
-            reason: "direct exec bypasses keeper authorization; rerun with --insecure for development only".into(),
-        });
-    }
-
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
+    let authority = load_runtime_authority(&identity_dir, insecure)?;
 
-    tracing::warn!("running direct exec with --insecure; authority checks are disabled");
+    let keeper_name = authorize_local_exec(&authority, &identity)?;
+
     tracing::info!(id = %identity.public_id(), "executing task");
 
     // Initialize components
@@ -921,7 +917,8 @@ async fn run_exec(config: &Config, prompt: &str, insecure: bool) -> Result<()> {
         &scope_enforcer,
         &identity,
         &config.agent,
-    );
+    )
+    .with_authority(&authority, keeper_name);
 
     let result = executor.execute(&task).await?;
 
@@ -1132,6 +1129,26 @@ fn load_runtime_authority(identity_dir: &Path, insecure: bool) -> Result<Authori
     Ok(authority)
 }
 
+fn authorize_local_exec(authority: &Authority, identity: &Identity) -> Result<Option<String>> {
+    if authority.is_open_mode() {
+        return Ok(None);
+    }
+
+    let auth_result = authority.authorize(&AuthRequest {
+        person: PersonId::from_egregore(identity.public_id().0.clone()),
+        place: "egregore:local".to_string(),
+        skill: "*".to_string(),
+    });
+
+    if !auth_result.allowed {
+        return Err(servitor::ServitorError::Unauthorized {
+            reason: format!("local exec not authorized for {}: {}", identity.public_id(), auth_result.reason),
+        });
+    }
+
+    Ok(auth_result.keeper)
+}
+
 /// Simple hash for task ID generation in exec mode.
 fn md5_hash(s: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -1181,5 +1198,62 @@ skills = ["*"]
 
         let authority = load_runtime_authority(dir.path(), false).unwrap();
         assert!(!authority.is_open_mode());
+    }
+
+    #[test]
+    fn local_exec_authorizes_as_servitor_identity() {
+        let authority = Authority::from_config(
+            servitor::authority::AuthorityConfig::from_toml(
+                r#"
+[[keeper]]
+name = "servitor"
+egregore = "@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519"
+
+[[permission]]
+keeper = "servitor"
+place = "*"
+skills = ["*"]
+"#,
+            )
+            .unwrap(),
+        );
+        let identity = Identity::generate();
+        let matching = Authority::from_config(
+            servitor::authority::AuthorityConfig {
+                keepers: vec![servitor::authority::Keeper {
+                    name: "servitor".to_string(),
+                    egregore: Some(identity.public_id().0.clone()),
+                    discord: None,
+                    http_token: None,
+                }],
+                permissions: authority.permissions_for("servitor").into_iter().cloned().collect(),
+            },
+        );
+
+        let keeper = authorize_local_exec(&matching, &identity).unwrap();
+        assert_eq!(keeper.as_deref(), Some("servitor"));
+    }
+
+    #[test]
+    fn local_exec_denies_unknown_servitor_identity() {
+        let authority = Authority::from_config(
+            servitor::authority::AuthorityConfig::from_toml(
+                r#"
+[[keeper]]
+name = "other"
+egregore = "@BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=.ed25519"
+
+[[permission]]
+keeper = "other"
+place = "*"
+skills = ["*"]
+"#,
+            )
+            .unwrap(),
+        );
+        let identity = Identity::generate();
+
+        let err = authorize_local_exec(&authority, &identity).unwrap_err();
+        assert!(matches!(err, servitor::ServitorError::Unauthorized { .. }));
     }
 }
