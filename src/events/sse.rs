@@ -18,7 +18,6 @@ pub struct SseSource {
     api_url: String,
     capabilities: HashSet<String>,
     event_source: Option<ReqwestEventSource>,
-    pending_task: Option<Task>,
     connected: bool,
 }
 
@@ -29,7 +28,6 @@ impl SseSource {
             api_url: api_url.trim_end_matches('/').to_string(),
             capabilities: capabilities.into_iter().collect(),
             event_source: None,
-            pending_task: None,
             connected: false,
         }
     }
@@ -64,7 +62,7 @@ impl SseSource {
     }
 
     /// Process an SSE event.
-    fn process_event(&mut self, event: &Event) -> Option<Task> {
+    fn process_event(&mut self, event: &Event) -> Option<EgregoreMessage> {
         match event {
             Event::Open => {
                 tracing::info!("SSE connection established");
@@ -72,29 +70,23 @@ impl SseSource {
                 None
             }
             Event::Message(msg) => {
-                // Try to parse as egregore message
                 match serde_json::from_str::<EgregoreMessage>(&msg.data) {
                     Ok(message) => {
-                        // Check if it's a task (authorization handled by Authority in main loop)
-                        if let Some(mut task) = message.as_task() {
+                        if let Some(task) = message.as_task() {
                             if self.matches_capabilities(&task) {
-                                // Attach author for authorization check in main loop
-                                task.author = Some(message.author.0.clone());
-
-                                tracing::debug!(
-                                    hash = %task.hash,
-                                    author = %message.author.0,
-                                    prompt = %task.prompt,
-                                    "received matching task from SSE"
-                                );
-                                return Some(task);
-                            } else {
-                                tracing::trace!(
-                                    hash = %task.hash,
-                                    required_caps = ?task.required_caps,
-                                    "skipping task (capability mismatch)"
-                                );
+                                return Some(message);
                             }
+
+                            tracing::trace!(
+                                hash = %task.hash,
+                                required_caps = ?task.required_caps,
+                                "skipping task (capability mismatch)"
+                            );
+                            return None;
+                        }
+
+                        if matches!(message.content_type(), Some("task_assign" | "task_ping")) {
+                            return Some(message);
                         }
                     }
                     Err(e) => {
@@ -110,12 +102,32 @@ impl SseSource {
 #[async_trait]
 impl EventSource for SseSource {
     async fn next(&mut self) -> Option<Task> {
-        // Return pending task if we have one
-        if let Some(task) = self.pending_task.take() {
-            return Some(task);
+        while let Some(message) = self.next_message().await {
+            if let Some(mut task) = message.as_task() {
+                task.author = Some(message.author.0.clone());
+                task.normalize(Some(&message.author));
+
+                tracing::debug!(
+                    hash = %task.hash,
+                    author = %message.author.0,
+                    prompt = %task.prompt,
+                    "received matching task from SSE"
+                );
+                return Some(task);
+            }
         }
 
-        // Ensure we're connected
+        None
+    }
+
+    fn name(&self) -> &str {
+        "sse"
+    }
+}
+
+impl SseSource {
+    /// Poll one raw egregore message from SSE.
+    pub async fn next_message(&mut self) -> Option<EgregoreMessage> {
         if self.event_source.is_none() {
             if let Err(e) = self.connect() {
                 tracing::warn!(error = %e, "failed to connect to SSE");
@@ -123,15 +135,8 @@ impl EventSource for SseSource {
             }
         }
 
-        // Poll the event source
         if let Some(ref mut es) = self.event_source {
-            // Try to get one event without blocking too long
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                es.next(),
-            )
-            .await
-            {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), es.next()).await {
                 Ok(Some(Ok(event))) => {
                     return self.process_event(&event);
                 }
@@ -141,22 +146,15 @@ impl EventSource for SseSource {
                     self.connected = false;
                 }
                 Ok(None) => {
-                    // Stream ended
                     tracing::info!("SSE stream ended, will reconnect");
                     self.event_source = None;
                     self.connected = false;
                 }
-                Err(_) => {
-                    // Timeout, no events available
-                }
+                Err(_) => {}
             }
         }
 
         None
-    }
-
-    fn name(&self) -> &str {
-        "sse"
     }
 }
 
@@ -171,7 +169,11 @@ mod tests {
         // Task with no required caps matches
         let task1 = Task {
             msg_type: "task".to_string(),
+            id: None,
             hash: "abc".to_string(),
+            task_type: None,
+            request: None,
+            requestor: None,
             prompt: "test".to_string(),
             required_caps: vec![],
             parent_id: None,
@@ -186,7 +188,11 @@ mod tests {
         // Task requiring shell matches
         let task2 = Task {
             msg_type: "task".to_string(),
+            id: None,
             hash: "def".to_string(),
+            task_type: None,
+            request: None,
+            requestor: None,
             prompt: "test".to_string(),
             required_caps: vec!["shell".to_string()],
             parent_id: None,
@@ -201,7 +207,11 @@ mod tests {
         // Task requiring docker doesn't match
         let task3 = Task {
             msg_type: "task".to_string(),
+            id: None,
             hash: "ghi".to_string(),
+            task_type: None,
+            request: None,
+            requestor: None,
             prompt: "test".to_string(),
             required_caps: vec!["docker".to_string()],
             parent_id: None,

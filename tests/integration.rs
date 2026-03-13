@@ -35,6 +35,7 @@ timeout_secs = 60
     assert_eq!(config.llm.provider, "anthropic");
     assert_eq!(config.mcp.len(), 1);
     assert!(config.mcp.contains_key("test"));
+    assert_eq!(config.task.offer_ttl_secs, 300);
 }
 
 /// Test identity generation and signing.
@@ -93,7 +94,11 @@ fn mcp_pool_creation() {
 fn task_message_construction() {
     let task = Task {
         msg_type: "task".to_string(),
+        id: Some("task-abc".to_string()),
         hash: "abc123".to_string(),
+        task_type: Some("inventory:count".to_string()),
+        request: Some("Count items in the pantry".to_string()),
+        requestor: None,
         prompt: "Count items in the pantry".to_string(),
         required_caps: vec!["inventory".to_string()],
         parent_id: None,
@@ -131,12 +136,15 @@ fn attestation_signing() {
 
     let task_result = TaskResult {
         msg_type: "task_result".to_string(),
+        task_id: "task-abc".to_string(),
+        servitor: identity.public_id(),
         correlation_id: "corr-123".to_string(),
         task_hash: "task-abc".to_string(),
         result_hash: result_hash.to_string(),
         status: TaskStatus::Success,
         result: Some(serde_json::json!({ "answer": 42 })),
         error: None,
+        duration_seconds: Some(1),
         attestation,
     };
 
@@ -181,7 +189,11 @@ fn agent_context() {
     ctx.add_user_message("Hello, execute a task");
     ctx.add_assistant_message(vec![
         ContentBlock::text("I'll help with that."),
-        ContentBlock::tool_use("call_1", "shell_execute", serde_json::json!({"command": "ls"})),
+        ContentBlock::tool_use(
+            "call_1",
+            "shell_execute",
+            serde_json::json!({"command": "ls"}),
+        ),
     ]);
     ctx.add_tool_results(vec![ContentBlock::tool_result(
         "call_1",
