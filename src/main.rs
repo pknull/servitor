@@ -639,6 +639,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
 
                     // Set keeper on task for downstream use
                     task.keeper = keeper_name.clone();
+                    runtime_stats.start_task();
 
                     // Claim and execute
                     let claim = TaskClaim::new(task.hash.clone(), identity.public_id(), 180);
@@ -1388,10 +1389,6 @@ fn md5_hash(s: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
-}
-
-fn should_publish_plan(plan_first: bool) -> bool {
-    plan_first
 }
 
 #[cfg(test)]
