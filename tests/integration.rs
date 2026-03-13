@@ -182,12 +182,15 @@ fn task_result_trace_id_roundtrip() {
     let signature = identity.sign_hash("trace-result-hash");
     let result = TaskResult {
         msg_type: "task_result".to_string(),
+        task_id: "task-trace".to_string(),
+        servitor: identity.public_id(),
         correlation_id: "corr-trace".to_string(),
         task_hash: "task-trace".to_string(),
         result_hash: "trace-result-hash".to_string(),
         status: TaskStatus::Success,
         result: Some(serde_json::json!({ "text": "ok" })),
         error: None,
+        duration_seconds: Some(1),
         attestation: Attestation {
             servitor_id: identity.public_id(),
             signature,
