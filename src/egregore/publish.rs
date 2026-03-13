@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::egregore::messages::{
     Notification, ServitorProfile, TaskClaim, TaskFailed, TaskOffer, TaskOfferWithdraw, TaskResult,
-    TaskStarted, TaskStatusMessage,
+    TaskStarted, TaskStatusMessage, TraceSpan,
 };
 use crate::error::{Result, ServitorError};
 
@@ -30,12 +30,20 @@ impl EgregoreClient {
     }
 
     /// Publish a message to egregore.
-    async fn publish<T: Serialize>(&self, content: &T, tags: &[&str]) -> Result<PublishedMessage> {
+    async fn publish<T: Serialize>(
+        &self,
+        content: &T,
+        tags: &[&str],
+        trace_id: Option<&str>,
+        span_id: Option<&str>,
+    ) -> Result<PublishedMessage> {
         let url = format!("{}/v1/publish", self.api_url);
 
         let request = PublishRequest {
             content: serde_json::to_value(content)?,
             tags: tags.iter().map(|s| s.to_string()).collect(),
+            trace_id: trace_id.map(str::to_string),
+            span_id: span_id.map(str::to_string),
         };
 
         let response = self
@@ -68,14 +76,16 @@ impl EgregoreClient {
 
     /// Publish a servitor profile (heartbeat/capability advertisement).
     pub async fn publish_profile(&self, profile: &ServitorProfile) -> Result<String> {
-        let response = self.publish(profile, &["servitor_profile"]).await?;
+        let response = self
+            .publish(profile, &["servitor_profile"], None, None)
+            .await?;
         tracing::debug!(hash = %response.hash, "published servitor profile");
         Ok(response.hash)
     }
 
     /// Publish a task claim.
     pub async fn publish_claim(&self, claim: &TaskClaim) -> Result<String> {
-        let response = self.publish(claim, &["task_claim"]).await?;
+        let response = self.publish(claim, &["task_claim"], None, None).await?;
         tracing::debug!(
             hash = %response.hash,
             task_hash = %claim.task_hash,
@@ -86,7 +96,7 @@ impl EgregoreClient {
 
     /// Publish a task offer.
     pub async fn publish_offer(&self, offer: &TaskOffer) -> Result<String> {
-        let response = self.publish(offer, &["task_offer"]).await?;
+        let response = self.publish(offer, &["task_offer"], None, None).await?;
         tracing::debug!(
             hash = %response.hash,
             task_id = %offer.task_id,
@@ -98,7 +108,7 @@ impl EgregoreClient {
 
     /// Publish a task start acknowledgment.
     pub async fn publish_started(&self, started: &TaskStarted) -> Result<String> {
-        let response = self.publish(started, &["task_started"]).await?;
+        let response = self.publish(started, &["task_started"], None, None).await?;
         tracing::debug!(
             hash = %response.hash,
             task_id = %started.task_id,
@@ -110,7 +120,7 @@ impl EgregoreClient {
 
     /// Publish a task status update.
     pub async fn publish_status(&self, status: &TaskStatusMessage) -> Result<String> {
-        let response = self.publish(status, &["task_status"]).await?;
+        let response = self.publish(status, &["task_status"], None, None).await?;
         tracing::debug!(
             hash = %response.hash,
             task_id = %status.task_id,
@@ -121,7 +131,7 @@ impl EgregoreClient {
 
     /// Publish a task failure.
     pub async fn publish_failed(&self, failed: &TaskFailed) -> Result<String> {
-        let response = self.publish(failed, &["task_failed"]).await?;
+        let response = self.publish(failed, &["task_failed"], None, None).await?;
         tracing::info!(
             hash = %response.hash,
             task_id = %failed.task_id,
@@ -133,7 +143,9 @@ impl EgregoreClient {
 
     /// Publish an offer withdrawal.
     pub async fn publish_offer_withdraw(&self, withdraw: &TaskOfferWithdraw) -> Result<String> {
-        let response = self.publish(withdraw, &["task_offer_withdraw"]).await?;
+        let response = self
+            .publish(withdraw, &["task_offer_withdraw"], None, None)
+            .await?;
         tracing::debug!(
             hash = %response.hash,
             task_id = %withdraw.task_id,
@@ -150,7 +162,9 @@ impl EgregoreClient {
             crate::egregore::messages::TaskStatus::Timeout => vec!["task_result", "timeout"],
         };
 
-        let response = self.publish(result, &tags).await?;
+        let response = self
+            .publish(result, &tags, result.trace_id.as_deref(), None)
+            .await?;
         tracing::info!(
             hash = %response.hash,
             task_hash = %result.task_hash,
@@ -162,11 +176,39 @@ impl EgregoreClient {
 
     /// Publish a notification.
     pub async fn publish_notification(&self, notification: &Notification) -> Result<String> {
-        let response = self.publish(notification, &["notification"]).await?;
+        let response = self
+            .publish(notification, &["notification"], None, None)
+            .await?;
         tracing::debug!(
             hash = %response.hash,
             channel = %notification.channel,
             "published notification"
+        );
+        Ok(response.hash)
+    }
+
+    /// Publish a trace span message.
+    pub async fn publish_trace_span(&self, span: &TraceSpan) -> Result<String> {
+        let status_tag = match span.status {
+            crate::egregore::messages::TraceSpanStatus::Ok => "ok",
+            crate::egregore::messages::TraceSpanStatus::Error => "error",
+            crate::egregore::messages::TraceSpanStatus::Timeout => "timeout",
+        };
+
+        let response = self
+            .publish(
+                span,
+                &["trace_span", status_tag],
+                Some(&span.trace_id),
+                Some(&span.span_id),
+            )
+            .await?;
+        tracing::debug!(
+            hash = %response.hash,
+            trace_id = %span.trace_id,
+            span_id = %span.span_id,
+            name = %span.name,
+            "published trace span"
         );
         Ok(response.hash)
     }
@@ -186,6 +228,10 @@ impl EgregoreClient {
 struct PublishRequest {
     content: serde_json::Value,
     tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    span_id: Option<String>,
 }
 
 /// Egregore API response envelope.
