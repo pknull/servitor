@@ -65,6 +65,24 @@ pub struct ScopeConstraints {
     pub block: Vec<String>,
 }
 
+/// Task-scoped credential override.
+///
+/// This can only further restrict what a task is allowed to do.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskScopeOverride {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub block: Vec<String>,
+}
+
+impl TaskScopeOverride {
+    pub fn is_empty(&self) -> bool {
+        self.allow.is_empty() && self.block.is_empty()
+    }
+}
+
 /// Resource limits for this Servitor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLimits {
@@ -230,6 +248,10 @@ pub struct Task {
     #[serde(default)]
     pub context: HashMap<String, serde_json::Value>,
 
+    /// Optional per-task scope restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_override: Option<TaskScopeOverride>,
+
     /// Task priority (higher = more urgent).
     #[serde(default)]
     pub priority: i32,
@@ -360,5 +382,39 @@ mod tests {
         let detected = ResourceLimits::detect();
         assert_eq!(defaults.cpu, detected.cpu);
         assert_eq!(defaults.memory_mb, detected.memory_mb);
+    }
+
+    #[test]
+    fn task_scope_override_roundtrips() {
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "type": "task",
+            "hash": "task-123",
+            "prompt": "inspect logs",
+            "scope_override": {
+                "allow": ["shell:read:*"],
+                "block": ["shell:execute:*"]
+            }
+        }))
+        .unwrap();
+
+        let scope_override = task.scope_override.unwrap();
+        assert_eq!(scope_override.allow, vec!["shell:read:*"]);
+        assert_eq!(scope_override.block, vec!["shell:execute:*"]);
+    }
+
+    #[test]
+    fn task_scope_override_rejects_unknown_fields() {
+        let error = serde_json::from_value::<Task>(serde_json::json!({
+            "type": "task",
+            "hash": "task-123",
+            "prompt": "inspect logs",
+            "scope_override": {
+                "allow": ["shell:read:*"],
+                "unknown": true
+            }
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field"));
     }
 }
