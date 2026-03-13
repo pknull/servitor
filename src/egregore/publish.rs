@@ -3,7 +3,10 @@
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::egregore::messages::{Notification, ServitorProfile, TaskClaim, TaskResult};
+use crate::egregore::messages::{
+    Notification, ServitorProfile, TaskClaim, TaskFailed, TaskOffer, TaskOfferWithdraw, TaskResult,
+    TaskStarted, TaskStatusMessage,
+};
 use crate::error::{Result, ServitorError};
 
 /// Client for publishing messages to egregore.
@@ -54,12 +57,9 @@ impl EgregoreClient {
         }
 
         let envelope: ApiResponse<PublishedMessage> =
-            response
-                .json()
-                .await
-                .map_err(|e| ServitorError::Egregore {
-                    reason: format!("failed to parse publish response: {}", e),
-                })?;
+            response.json().await.map_err(|e| ServitorError::Egregore {
+                reason: format!("failed to parse publish response: {}", e),
+            })?;
 
         envelope.data.ok_or_else(|| ServitorError::Egregore {
             reason: "publish response missing data field".into(),
@@ -80,6 +80,64 @@ impl EgregoreClient {
             hash = %response.hash,
             task_hash = %claim.task_hash,
             "published task claim"
+        );
+        Ok(response.hash)
+    }
+
+    /// Publish a task offer.
+    pub async fn publish_offer(&self, offer: &TaskOffer) -> Result<String> {
+        let response = self.publish(offer, &["task_offer"]).await?;
+        tracing::debug!(
+            hash = %response.hash,
+            task_id = %offer.task_id,
+            servitor = %offer.servitor,
+            "published task offer"
+        );
+        Ok(response.hash)
+    }
+
+    /// Publish a task start acknowledgment.
+    pub async fn publish_started(&self, started: &TaskStarted) -> Result<String> {
+        let response = self.publish(started, &["task_started"]).await?;
+        tracing::debug!(
+            hash = %response.hash,
+            task_id = %started.task_id,
+            eta_seconds = started.eta_seconds,
+            "published task started"
+        );
+        Ok(response.hash)
+    }
+
+    /// Publish a task status update.
+    pub async fn publish_status(&self, status: &TaskStatusMessage) -> Result<String> {
+        let response = self.publish(status, &["task_status"]).await?;
+        tracing::debug!(
+            hash = %response.hash,
+            task_id = %status.task_id,
+            "published task status"
+        );
+        Ok(response.hash)
+    }
+
+    /// Publish a task failure.
+    pub async fn publish_failed(&self, failed: &TaskFailed) -> Result<String> {
+        let response = self.publish(failed, &["task_failed"]).await?;
+        tracing::info!(
+            hash = %response.hash,
+            task_id = %failed.task_id,
+            reason = ?failed.reason,
+            "published task failed"
+        );
+        Ok(response.hash)
+    }
+
+    /// Publish an offer withdrawal.
+    pub async fn publish_offer_withdraw(&self, withdraw: &TaskOfferWithdraw) -> Result<String> {
+        let response = self.publish(withdraw, &["task_offer_withdraw"]).await?;
+        tracing::debug!(
+            hash = %response.hash,
+            task_id = %withdraw.task_id,
+            "published task offer withdraw"
         );
         Ok(response.hash)
     }
