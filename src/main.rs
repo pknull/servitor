@@ -1,8 +1,8 @@
 //! Servitor — Egregore network task executor.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
@@ -14,9 +14,9 @@ use servitor::comms::discord::DiscordTransport;
 use servitor::comms::{CommsResponse, CommsTransport};
 use servitor::config::Config;
 use servitor::egregore::{
-    EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorLoad, ServitorProfile,
-    ServitorStats, Task, TaskAssign, TaskClaim, TaskFailed, TaskFailureReason, TaskPing,
-    TaskStatus, TaskStatusMessage,
+    AuthDenied, AuthGate, EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorLoad,
+    ServitorProfile, ServitorStats, Task, TaskAssign, TaskClaim, TaskFailed, TaskFailureReason,
+    TaskPing, TaskStatus, TaskStatusMessage,
 };
 use servitor::error::Result;
 use servitor::events::cron::CronSource;
@@ -26,8 +26,8 @@ use servitor::identity::Identity;
 use servitor::mcp::McpPool;
 use servitor::scope::ScopeEnforcer;
 use servitor::task::{
-    authorize_assignment, authorize_offer_request, AssignmentDecision, TaskCoordinator,
-    TaskLifecycleEvent,
+    assign_skill, authorize_assignment, authorize_offer_request, request_skill, AssignmentDecision,
+    TaskCoordinator, TaskLifecycleEvent,
 };
 
 #[derive(Parser)]
@@ -195,6 +195,7 @@ async fn run_hook_mode(config: &Config, insecure: bool) -> Result<()> {
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
+    let egregore = EgregoreClient::new(&config.egregore.api_url);
 
     // Load authority
     let authority = load_runtime_authority(&identity_dir, insecure)?;
@@ -213,12 +214,22 @@ async fn run_hook_mode(config: &Config, insecure: bool) -> Result<()> {
     // Check authority (replaces author_allowlist check)
     let person = PersonId::from_egregore(&message.author.0);
     let auth_result = authority.authorize(&AuthRequest {
-        person,
+        person: person.clone(),
         place: "egregore:local".to_string(),
         skill: "*".to_string(), // Task intake doesn't specify skill yet
     });
 
     if !auth_result.allowed {
+        publish_auth_denied_event(
+            &egregore,
+            &identity,
+            &person,
+            "egregore:local",
+            "*",
+            AuthGate::Offer,
+            &auth_result.reason,
+        )
+        .await;
         tracing::info!(
             author = %message.author.0,
             reason = %auth_result.reason,
@@ -251,7 +262,6 @@ async fn run_hook_mode(config: &Config, insecure: bool) -> Result<()> {
     }
 
     // Publish claim
-    let egregore = EgregoreClient::new(&config.egregore.api_url);
     let claim = TaskClaim::new(task.hash.clone(), identity.public_id(), 180);
     if let Err(e) = egregore.publish_claim(&claim).await {
         tracing::warn!(error = %e, "failed to publish claim");
@@ -393,12 +403,22 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                 };
                 let place = format!("discord:{}:{}", guild_id, comms_msg.channel_id);
                 let auth_result = authority.authorize(&AuthRequest {
-                    person,
-                    place,
+                    person: person.clone(),
+                    place: place.clone(),
                     skill: "*".to_string(),
                 });
 
                 if !auth_result.allowed {
+                    publish_auth_denied_event(
+                        &egregore,
+                        &identity,
+                        &person,
+                        &place,
+                        "*",
+                        AuthGate::Offer,
+                        &auth_result.reason,
+                    )
+                    .await;
                     tracing::info!(
                         user = %comms_msg.user_id,
                         reason = %auth_result.reason,
@@ -571,12 +591,22 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                     let keeper_name = if let Some(ref author) = task.author {
                         let person = PersonId::from_egregore(author);
                         let auth_result = authority.authorize(&AuthRequest {
-                            person,
+                            person: person.clone(),
                             place: "egregore:local".to_string(),
                             skill: "*".to_string(),
                         });
 
                         if !auth_result.allowed {
+                            publish_auth_denied_event(
+                                &egregore,
+                                &identity,
+                                &person,
+                                "egregore:local",
+                                "*",
+                                AuthGate::Offer,
+                                &auth_result.reason,
+                            )
+                            .await;
                             tracing::info!(
                                 author = %author,
                                 reason = %auth_result.reason,
@@ -689,6 +719,16 @@ async fn process_sse_message(
         let auth_result = authorize_offer_request(authority, &requestor, &task);
 
         if !auth_result.allowed {
+            publish_auth_denied_event(
+                egregore,
+                identity,
+                &PersonId::from_egregore(requestor.0.clone()),
+                "egregore:local",
+                &request_skill(&task),
+                AuthGate::Offer,
+                &auth_result.reason,
+            )
+            .await;
             tracing::info!(
                 author = %requestor,
                 task_type = %task.effective_task_type(),
@@ -712,6 +752,7 @@ async fn process_sse_message(
         return maybe_accept_assignment(
             assign,
             message,
+            egregore,
             authority,
             identity,
             task_coordinator,
@@ -726,6 +767,7 @@ async fn process_sse_message(
 async fn maybe_accept_assignment(
     assign: TaskAssign,
     message: &EgregoreMessage,
+    egregore: &EgregoreClient,
     authority: &Authority,
     identity: &Identity,
     task_coordinator: &mut TaskCoordinator,
@@ -759,6 +801,16 @@ async fn maybe_accept_assignment(
         .unwrap_or_else(|| message.author.clone());
 
     if !authorize_assignment(authority, &assigner, &requestor, &task) {
+        publish_auth_denied_event(
+            egregore,
+            identity,
+            &PersonId::from_egregore(assigner.0.clone()),
+            "egregore:local",
+            &assign_skill(&task),
+            AuthGate::Assignment,
+            "assignment authorization denied",
+        )
+        .await;
         tracing::info!(
             task_id = %assign.task_id,
             assigner = %assigner,
@@ -951,6 +1003,35 @@ fn task_from_comms(msg: &servitor::comms::CommsMessage) -> Task {
         timeout_secs: None,
         author: None,
         keeper: None,
+    }
+}
+
+async fn publish_auth_denied_event(
+    egregore: &EgregoreClient,
+    identity: &Identity,
+    person: &PersonId,
+    place: &str,
+    skill: &str,
+    gate: AuthGate,
+    reason: &str,
+) {
+    let person_id = match person {
+        PersonId::Egregore(pubkey) => pubkey.clone(),
+        PersonId::Discord(user_id) => format!("discord:{user_id}"),
+        PersonId::Http(_) => "http:<redacted>".to_string(),
+    };
+
+    let denial = AuthDenied::new(
+        identity.public_id(),
+        person_id,
+        place.to_string(),
+        skill.to_string(),
+        gate,
+        reason.to_string(),
+    );
+
+    if let Err(error) = egregore.publish_auth_denied(&denial).await {
+        tracing::debug!(error = %error, place = %place, skill = %skill, "failed to publish auth denial");
     }
 }
 
@@ -1241,7 +1322,11 @@ fn authorize_local_exec(authority: &Authority, identity: &Identity) -> Result<Op
 
     if !auth_result.allowed {
         return Err(servitor::ServitorError::Unauthorized {
-            reason: format!("local exec not authorized for {}: {}", identity.public_id(), auth_result.reason),
+            reason: format!(
+                "local exec not authorized for {}: {}",
+                identity.public_id(),
+                auth_result.reason
+            ),
         });
     }
 
@@ -1318,17 +1403,19 @@ skills = ["*"]
             .unwrap(),
         );
         let identity = Identity::generate();
-        let matching = Authority::from_config(
-            servitor::authority::AuthorityConfig {
-                keepers: vec![servitor::authority::Keeper {
-                    name: "servitor".to_string(),
-                    egregore: Some(identity.public_id().0.clone()),
-                    discord: None,
-                    http_token: None,
-                }],
-                permissions: authority.permissions_for("servitor").into_iter().cloned().collect(),
-            },
-        );
+        let matching = Authority::from_config(servitor::authority::AuthorityConfig {
+            keepers: vec![servitor::authority::Keeper {
+                name: "servitor".to_string(),
+                egregore: Some(identity.public_id().0.clone()),
+                discord: None,
+                http_token: None,
+            }],
+            permissions: authority
+                .permissions_for("servitor")
+                .into_iter()
+                .cloned()
+                .collect(),
+        });
 
         let keeper = authorize_local_exec(&matching, &identity).unwrap();
         assert_eq!(keeper.as_deref(), Some("servitor"));

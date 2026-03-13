@@ -8,7 +8,8 @@ use crate::agent::provider::{ContentBlock, Provider, StopReason};
 use crate::authority::Authority;
 use crate::config::AgentConfig;
 use crate::egregore::messages::{
-    Attestation, Task, TaskResult, TaskStatus, TraceEvent, TraceSpan, TraceSpanStatus,
+    Attestation, AuthDenied, AuthGate, Task, TaskResult, TaskStatus, TraceEvent, TraceSpan,
+    TraceSpanStatus,
 };
 use crate::egregore::EgregoreClient;
 use crate::error::{Result, ServitorError};
@@ -259,6 +260,8 @@ impl<'a> AgentExecutor<'a> {
             let skill = format!("{}:{}", mcp_name, tool_name);
             let auth_result = authority.authorize_skill(keeper_name, &skill);
             if !auth_result.allowed {
+                self.publish_assignment_denial(task, &skill, &auth_result.reason)
+                    .await;
                 return Err(ServitorError::Unauthorized {
                     reason: format!(
                         "keeper '{}' not authorized for skill '{}': {}",
@@ -284,6 +287,25 @@ impl<'a> AgentExecutor<'a> {
         self.mcp_pool
             .call_tool(prefixed_name, arguments.clone())
             .await
+    }
+
+    async fn publish_assignment_denial(&self, task: &Task, skill: &str, reason: &str) {
+        let Some(egregore) = self.egregore else {
+            return;
+        };
+
+        let denial = AuthDenied::new(
+            self.identity.public_id(),
+            task_person_id(task),
+            task_place(task),
+            skill.to_string(),
+            AuthGate::Assignment,
+            reason.to_string(),
+        );
+
+        if let Err(error) = egregore.publish_auth_denied(&denial).await {
+            tracing::debug!(error = %error, skill = %skill, "failed to publish auth denial");
+        }
     }
 
     /// Build the system prompt for the task.
@@ -486,6 +508,47 @@ fn trace_error_event(message: String) -> TraceEvent {
         ts: Utc::now(),
         name: "error".to_string(),
         attributes,
+    }
+}
+
+fn task_person_id(task: &Task) -> String {
+    if let Some(author) = &task.author {
+        return author.clone();
+    }
+
+    if let Some(user_id) = task
+        .context
+        .get("user")
+        .and_then(|value| value.get("id"))
+        .and_then(|value| value.as_str())
+    {
+        return format!("discord:{user_id}");
+    }
+
+    if let Some(keeper) = &task.keeper {
+        return format!("keeper:{keeper}");
+    }
+
+    "unknown".to_string()
+}
+
+fn task_place(task: &Task) -> String {
+    let source = task
+        .context
+        .get("source")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let channel = task
+        .context
+        .get("channel")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    match (source, channel) {
+        (Some(source), Some(channel)) => format!("{source}:{channel}"),
+        (Some(source), None) => source,
+        (None, _) if task.author.is_some() => "egregore:task".to_string(),
+        _ => "direct:exec".to_string(),
     }
 }
 
