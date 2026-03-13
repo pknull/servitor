@@ -95,7 +95,7 @@ impl McpPool {
             // List and register tools
             let tools = client.list_tools().await?;
             for tool in tools {
-                let prefixed_name = tool.prefixed_name(name);
+                let prefixed_name = tool.prefixed_name(&name);
                 let validator = compile_validator(&tool)?;
                 self.tools.insert(
                     prefixed_name,
@@ -421,6 +421,8 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(result.text_content(), "ok");
+    }
+
     #[tokio::test]
     async fn configured_servers_report_unavailable_before_initialization() {
         let config = Config::from_str(
