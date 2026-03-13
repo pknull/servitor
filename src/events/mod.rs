@@ -90,6 +90,7 @@ pub fn task_from_schedule(
         required_caps: vec![],
         parent_id: None,
         context,
+        scope_override: None,
         priority: 0,
         timeout_secs: None,
         author: None,

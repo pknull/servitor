@@ -1,7 +1,7 @@
 //! Integration tests for Servitor.
 
 use servitor::config::Config;
-use servitor::egregore::messages::{Task, TaskStatus};
+use servitor::egregore::messages::{Task, TaskScopeOverride, TaskStatus};
 use servitor::identity::Identity;
 use servitor::mcp::McpPool;
 use servitor::scope::ScopeEnforcer;
@@ -69,15 +69,15 @@ fn scope_enforcement() {
 
     // Allowed command
     let args = serde_json::json!({ "command": "ls ~/Documents" });
-    assert!(enforcer.check("shell", "execute", &args).is_ok());
+    assert!(enforcer.check("shell", "execute", &args, None).is_ok());
 
     // Blocked command
     let args = serde_json::json!({ "command": "/etc/passwd" });
-    assert!(enforcer.check("shell", "execute", &args).is_err());
+    assert!(enforcer.check("shell", "execute", &args, None).is_err());
 
     // Blocked rm
     let args = serde_json::json!({ "command": "rm -rf /" });
-    assert!(enforcer.check("shell", "execute", &args).is_err());
+    assert!(enforcer.check("shell", "execute", &args, None).is_err());
 }
 
 /// Test MCP pool creation (without actual servers).
@@ -98,6 +98,10 @@ fn task_message_construction() {
         required_caps: vec!["inventory".to_string()],
         parent_id: None,
         context: std::collections::HashMap::new(),
+        scope_override: Some(TaskScopeOverride {
+            allow: vec!["inventory:read:*".to_string()],
+            block: vec!["inventory:write:*".to_string()],
+        }),
         priority: 0,
         timeout_secs: Some(60),
         author: None,
@@ -111,6 +115,10 @@ fn task_message_construction() {
     // Roundtrip
     let parsed: Task = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.prompt, task.prompt);
+    assert_eq!(
+        parsed.scope_override.unwrap().block,
+        vec!["inventory:write:*".to_string()]
+    );
 }
 
 /// Test attestation signing in task results.
