@@ -116,6 +116,17 @@ pub enum StopReason {
     StopSequence,
 }
 
+impl StopReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EndTurn => "end_turn",
+            Self::ToolUse => "tool_use",
+            Self::MaxTokens => "max_tokens",
+            Self::StopSequence => "stop_sequence",
+        }
+    }
+}
+
 /// Chat response from provider.
 #[derive(Debug, Clone)]
 pub struct ChatResponse {

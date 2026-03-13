@@ -8,13 +8,13 @@ use crate::agent::provider::{ContentBlock, Provider, StopReason};
 use crate::authority::Authority;
 use crate::config::AgentConfig;
 use crate::egregore::messages::{
-    Attestation, AuthDenied, AuthGate, Task, TaskResult, TaskStatus, TraceEvent, TraceSpan,
-    TraceSpanStatus,
+    Attestation, AuthDenied, AuthGate, PlannedToolCall, Task, TaskPlan, TaskResult, TaskStatus,
+    TraceEvent, TraceSpan, TraceSpanStatus,
 };
 use crate::egregore::EgregoreClient;
 use crate::error::{Result, ServitorError};
 use crate::identity::Identity;
-use crate::mcp::McpPool;
+use crate::mcp::{LlmTool, McpPool};
 use crate::scope::ScopeEnforcer;
 
 /// Agent executor — runs the tool_use loop for a task.
@@ -62,39 +62,53 @@ impl<'a> AgentExecutor<'a> {
         self
     }
 
+    /// Produce and validate a signed plan artifact without executing tools.
+    pub async fn plan(&self, task: &Task) -> Result<TaskPlan> {
+        let mut context = self.load_context(task).await?;
+        let tools = self.mcp_pool.tools_for_llm();
+
+        context.add_user_message(&task.prompt);
+
+        let response = self
+            .provider
+            .chat(&self.build_plan_prompt(task), context.messages(), &tools)
+            .await?;
+
+        let planned_calls = response
+            .tool_uses()
+            .into_iter()
+            .map(|(id, name, arguments)| PlannedToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        for planned_call in &planned_calls {
+            self.validate_tool_call(task, &planned_call.name, &planned_call.arguments, &tools)?;
+        }
+
+        self.build_plan(task, &response, planned_calls)
+    }
+
     /// Execute a task and return the signed result.
     pub async fn execute(&self, task: &Task) -> Result<TaskResult> {
+        self.execute_with_plan_hash(task, None).await
+    }
+
+    /// Execute a task and optionally bind the result attestation to a published plan.
+    pub async fn execute_with_plan_hash(
+        &self,
+        task: &Task,
+        plan_hash: Option<String>,
+    ) -> Result<TaskResult> {
         let trace_enabled = self.config.publish_trace_spans && self.egregore.is_some();
         let trace_id = trace_enabled.then(new_trace_id);
         let root_span_id = trace_enabled.then(new_span_id);
         let trace_service = "servitor";
         let trace_started_at = trace_enabled.then(Utc::now);
-        let mut context = ConversationContext::new();
+        let mut context = self.load_context(task).await?;
         let tools = self.mcp_pool.tools_for_llm();
-
-        // Fetch conversation history if task has parent_id and egregore is available
-        if let (Some(parent_id), Some(egregore)) = (&task.parent_id, self.egregore) {
-            match egregore.fetch_conversation_history(parent_id).await {
-                Ok(history) if !history.is_empty() => {
-                    tracing::debug!(
-                        parent_id = %parent_id,
-                        turns = history.len(),
-                        "loaded conversation history"
-                    );
-                    context.prepend_history(history);
-                }
-                Ok(_) => {
-                    tracing::debug!(parent_id = %parent_id, "no conversation history found");
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        parent_id = %parent_id,
-                        error = %e,
-                        "failed to fetch conversation history, proceeding without"
-                    );
-                }
-            }
-        }
 
         // Build system prompt
         let system = self.build_system_prompt(task);
@@ -114,6 +128,7 @@ impl<'a> AgentExecutor<'a> {
                     None,
                     Some(format!("max turns ({}) exceeded", max_turns)),
                     trace_id.clone(),
+                    plan_hash.as_deref(),
                 )?;
                 if let (Some(trace_id), Some(root_span_id), Some(trace_started_at)) =
                     (&trace_id, &root_span_id, trace_started_at)
@@ -157,6 +172,7 @@ impl<'a> AgentExecutor<'a> {
                     Some(serde_json::json!({ "text": result_text })),
                     None,
                     trace_id.clone(),
+                    plan_hash.as_deref(),
                 )?;
                 if let (Some(trace_id), Some(root_span_id), Some(trace_started_at)) =
                     (&trace_id, &root_span_id, trace_started_at)
@@ -185,6 +201,7 @@ impl<'a> AgentExecutor<'a> {
                     Some(serde_json::json!({ "text": result_text })),
                     None,
                     trace_id.clone(),
+                    plan_hash.as_deref(),
                 )?;
                 if let (Some(trace_id), Some(root_span_id), Some(trace_started_at)) =
                     (&trace_id, &root_span_id, trace_started_at)
@@ -247,39 +264,20 @@ impl<'a> AgentExecutor<'a> {
         prefixed_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<crate::mcp::ToolCallResult> {
-        // Parse the prefixed tool name
-        let (mcp_name, tool_name) =
-            self.mcp_pool
-                .parse_tool_name(prefixed_name)
-                .ok_or_else(|| ServitorError::Mcp {
-                    reason: format!("unknown tool: {}", prefixed_name),
-                })?;
+        let (mcp_name, tool_name) = parse_prefixed_tool_name(prefixed_name)?;
+        let skill = format!("{}:{}", mcp_name, tool_name);
 
-        // Check authority skill permission if configured
-        if let (Some(authority), Some(keeper_name)) = (self.authority, &self.keeper_name) {
-            let skill = format!("{}:{}", mcp_name, tool_name);
-            let auth_result = authority.authorize_skill(keeper_name, &skill);
-            if !auth_result.allowed {
-                self.publish_assignment_denial(task, &skill, &auth_result.reason)
-                    .await;
-                return Err(ServitorError::Unauthorized {
-                    reason: format!(
-                        "keeper '{}' not authorized for skill '{}': {}",
-                        keeper_name, skill, auth_result.reason
-                    ),
-                });
+        if let Err(error) = self.validate_tool_call(
+            task,
+            prefixed_name,
+            arguments,
+            &self.mcp_pool.tools_for_llm(),
+        ) {
+            if let ServitorError::Unauthorized { reason } = &error {
+                self.publish_assignment_denial(task, &skill, reason).await;
             }
+            return Err(error);
         }
-
-        // Check scope enforcement (existing allow/block patterns)
-        self.scope_enforcer
-            .check(mcp_name, tool_name, arguments, task.scope_override.as_ref())
-            .map_err(|error| match error {
-                ServitorError::ScopeViolation { reason } => ServitorError::ScopeViolation {
-                    reason: format!("task '{}' scope violation: {}", task.hash, reason),
-                },
-                other => other,
-            })?;
 
         tracing::debug!(mcp = mcp_name, tool = tool_name, "executing tool");
 
@@ -306,6 +304,35 @@ impl<'a> AgentExecutor<'a> {
         if let Err(error) = egregore.publish_auth_denied(&denial).await {
             tracing::debug!(error = %error, skill = %skill, "failed to publish auth denial");
         }
+    }
+
+    async fn load_context(&self, task: &Task) -> Result<ConversationContext> {
+        let mut context = ConversationContext::new();
+
+        if let (Some(parent_id), Some(egregore)) = (&task.parent_id, self.egregore) {
+            match egregore.fetch_conversation_history(parent_id).await {
+                Ok(history) if !history.is_empty() => {
+                    tracing::debug!(
+                        parent_id = %parent_id,
+                        turns = history.len(),
+                        "loaded conversation history"
+                    );
+                    context.prepend_history(history);
+                }
+                Ok(_) => {
+                    tracing::debug!(parent_id = %parent_id, "no conversation history found");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        parent_id = %parent_id,
+                        error = %e,
+                        "failed to fetch conversation history, proceeding without"
+                    );
+                }
+            }
+        }
+
+        Ok(context)
     }
 
     /// Build the system prompt for the task.
@@ -335,6 +362,85 @@ impl<'a> AgentExecutor<'a> {
         prompt
     }
 
+    fn build_plan_prompt(&self, task: &Task) -> String {
+        let mut prompt = self.build_system_prompt(task);
+        prompt.push_str(
+            "Planning mode: do not claim that the task has already been executed. \
+             Produce the tool calls you intend to make in order using tool_use blocks. \
+             If the task can be answered without tools, return a brief summary and no tool_use blocks.\n",
+        );
+        prompt
+    }
+
+    fn validate_tool_call(
+        &self,
+        task: &Task,
+        prefixed_name: &str,
+        arguments: &serde_json::Value,
+        tools: &[LlmTool],
+    ) -> Result<(String, String)> {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == prefixed_name)
+            .ok_or_else(|| ServitorError::PlanValidation {
+                reason: format!("unknown tool in plan: {}", prefixed_name),
+            })?;
+
+        let (mcp_name, tool_name) = parse_prefixed_tool_name(prefixed_name)?;
+
+        if let (Some(authority), Some(keeper_name)) = (self.authority, &self.keeper_name) {
+            let skill = format!("{}:{}", mcp_name, tool_name);
+            let auth_result = authority.authorize_skill(keeper_name, &skill);
+            if !auth_result.allowed {
+                return Err(ServitorError::Unauthorized {
+                    reason: format!(
+                        "keeper '{}' not authorized for skill '{}': {}",
+                        keeper_name, skill, auth_result.reason
+                    ),
+                });
+            }
+        }
+
+        self.scope_enforcer
+            .check(mcp_name, tool_name, arguments, task.scope_override.as_ref())
+            .map_err(|error| match error {
+                ServitorError::ScopeViolation { reason } => ServitorError::ScopeViolation {
+                    reason: format!("task '{}' scope violation: {}", task.hash, reason),
+                },
+                other => other,
+            })?;
+        validate_json_schema(prefixed_name, &tool.input_schema, arguments)?;
+
+        Ok((mcp_name.to_string(), tool_name.to_string()))
+    }
+
+    fn build_plan(
+        &self,
+        task: &Task,
+        response: &crate::agent::provider::ChatResponse,
+        tool_calls: Vec<PlannedToolCall>,
+    ) -> Result<TaskPlan> {
+        let summary = response.text();
+        let stop_reason = response.stop_reason.as_str().to_string();
+        let plan_hash = compute_plan_hash(task, &summary, &stop_reason, &tool_calls)?;
+        let signature = self.identity.sign_hash(&plan_hash);
+
+        Ok(TaskPlan {
+            msg_type: "task_plan".to_string(),
+            correlation_id: uuid::Uuid::new_v4().to_string(),
+            task_hash: task.hash.clone(),
+            plan_hash,
+            summary,
+            stop_reason,
+            tool_calls,
+            attestation: Attestation {
+                servitor_id: self.identity.public_id(),
+                signature,
+                timestamp: Utc::now(),
+            },
+        })
+    }
+
     /// Build a TaskResult with signed attestation.
     fn build_result(
         &self,
@@ -343,9 +449,10 @@ impl<'a> AgentExecutor<'a> {
         result: Option<serde_json::Value>,
         error: Option<String>,
         trace_id: Option<String>,
+        plan_hash: Option<&str>,
     ) -> Result<TaskResult> {
         // Compute result hash
-        let result_hash = compute_result_hash(&result, &error, trace_id.as_deref());
+        let result_hash = compute_result_hash(&result, &error, plan_hash, trace_id.as_deref());
 
         // Sign the result hash
         let signature = self.identity.sign_hash(&result_hash);
@@ -367,6 +474,7 @@ impl<'a> AgentExecutor<'a> {
             result,
             error,
             duration_seconds: None,
+            plan_hash: plan_hash.map(str::to_string),
             attestation,
             trace_id,
         })
@@ -475,6 +583,7 @@ impl<'a> AgentExecutor<'a> {
 fn compute_result_hash(
     result: &Option<serde_json::Value>,
     error: &Option<String>,
+    plan_hash: Option<&str>,
     trace_id: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
@@ -484,6 +593,9 @@ fn compute_result_hash(
     }
     if let Some(e) = error {
         hasher.update(e.as_bytes());
+    }
+    if let Some(plan_hash) = plan_hash {
+        hasher.update(plan_hash.as_bytes());
     }
     if let Some(trace_id) = trace_id {
         hasher.update(trace_id.as_bytes());
@@ -552,15 +664,172 @@ fn task_place(task: &Task) -> String {
     }
 }
 
+fn compute_plan_hash(
+    task: &Task,
+    summary: &str,
+    stop_reason: &str,
+    tool_calls: &[PlannedToolCall],
+) -> Result<String> {
+    let payload = serde_json::json!({
+        "task_hash": task.hash,
+        "summary": summary,
+        "stop_reason": stop_reason,
+        "tool_calls": tool_calls,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&payload)?);
+    let hash = hasher.finalize();
+    Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn parse_prefixed_tool_name(prefixed_name: &str) -> Result<(&str, &str)> {
+    prefixed_name
+        .split_once('_')
+        .ok_or_else(|| ServitorError::PlanValidation {
+            reason: format!("invalid prefixed tool name: {}", prefixed_name),
+        })
+}
+
+fn validate_json_schema(
+    tool_name: &str,
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> Result<()> {
+    validate_schema_node("$", schema, value).map_err(|reason| ServitorError::PlanValidation {
+        reason: format!(
+            "tool '{}' arguments failed schema validation: {}",
+            tool_name, reason
+        ),
+    })
+}
+
+fn validate_schema_node(
+    path: &str,
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    if let Some(options) = schema.get("anyOf").and_then(|v| v.as_array()) {
+        if options
+            .iter()
+            .any(|option| validate_schema_node(path, option, value).is_ok())
+        {
+            return Ok(());
+        }
+        return Err(format!("{} did not satisfy anyOf alternatives", path));
+    }
+
+    if let Some(options) = schema.get("oneOf").and_then(|v| v.as_array()) {
+        let matches = options
+            .iter()
+            .filter(|option| validate_schema_node(path, option, value).is_ok())
+            .count();
+        if matches == 1 {
+            return Ok(());
+        }
+        return Err(format!(
+            "{} matched {} oneOf alternatives, expected exactly 1",
+            path, matches
+        ));
+    }
+
+    if let Some(expected) = schema.get("type").and_then(|v| v.as_str()) {
+        match expected {
+            "object" if !value.is_object() => {
+                return Err(format!("{} expected object", path));
+            }
+            "array" if !value.is_array() => {
+                return Err(format!("{} expected array", path));
+            }
+            "string" if !value.is_string() => {
+                return Err(format!("{} expected string", path));
+            }
+            "number" if !value.is_number() => {
+                return Err(format!("{} expected number", path));
+            }
+            "integer" if value.as_i64().is_none() && value.as_u64().is_none() => {
+                return Err(format!("{} expected integer", path));
+            }
+            "boolean" if !value.is_boolean() => {
+                return Err(format!("{} expected boolean", path));
+            }
+            "null" if !value.is_null() => {
+                return Err(format!("{} expected null", path));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(expected) = schema.get("const") {
+        if value != expected {
+            return Err(format!("{} did not match const value", path));
+        }
+    }
+
+    if let Some(options) = schema.get("enum").and_then(|v| v.as_array()) {
+        if !options.iter().any(|option| option == value) {
+            return Err(format!("{} not in enum set", path));
+        }
+    }
+
+    if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("{} expected object for required fields", path))?;
+        for field in required.iter().filter_map(|field| field.as_str()) {
+            if !object.contains_key(field) {
+                return Err(format!("{} missing required field '{}'", path, field));
+            }
+        }
+    }
+
+    if let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) {
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("{} expected object for properties", path))?;
+
+        if matches!(
+            schema.get("additionalProperties"),
+            Some(serde_json::Value::Bool(false))
+        ) {
+            for key in object.keys() {
+                if !properties.contains_key(key) {
+                    return Err(format!("{} contains unexpected field '{}'", path, key));
+                }
+            }
+        }
+
+        for (key, child_schema) in properties {
+            if let Some(child_value) = object.get(key) {
+                let child_path = format!("{}.{}", path, key);
+                validate_schema_node(&child_path, child_schema, child_value)?;
+            }
+        }
+    }
+
+    if let Some(items) = schema.get("items") {
+        let values = value
+            .as_array()
+            .ok_or_else(|| format!("{} expected array for items", path))?;
+        for (idx, item) in values.iter().enumerate() {
+            let child_path = format!("{}[{}]", path, idx);
+            validate_schema_node(&child_path, items, item)?;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::egregore::messages::PlannedToolCall;
+    use crate::identity::Identity;
 
     #[test]
     fn result_hash_deterministic() {
         let result = Some(serde_json::json!({"foo": "bar"}));
-        let h1 = compute_result_hash(&result, &None, None);
-        let h2 = compute_result_hash(&result, &None, None);
+        let h1 = compute_result_hash(&result, &None, None, None);
+        let h2 = compute_result_hash(&result, &None, None, None);
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64); // SHA-256 hex
     }
@@ -569,16 +838,106 @@ mod tests {
     fn different_content_different_hash() {
         let r1 = Some(serde_json::json!({"foo": "bar"}));
         let r2 = Some(serde_json::json!({"foo": "baz"}));
-        let h1 = compute_result_hash(&r1, &None, None);
-        let h2 = compute_result_hash(&r2, &None, None);
+        let h1 = compute_result_hash(&r1, &None, None, None);
+        let h2 = compute_result_hash(&r2, &None, None, None);
         assert_ne!(h1, h2);
     }
 
     #[test]
     fn trace_id_changes_result_hash() {
         let result = Some(serde_json::json!({"foo": "bar"}));
-        let h1 = compute_result_hash(&result, &None, Some("trace-a"));
-        let h2 = compute_result_hash(&result, &None, Some("trace-b"));
+        let h1 = compute_result_hash(&result, &None, None, Some("trace-a"));
+        let h2 = compute_result_hash(&result, &None, None, Some("trace-b"));
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn result_hash_changes_when_plan_hash_changes() {
+        let result = Some(serde_json::json!({"foo": "bar"}));
+        let h1 = compute_result_hash(&result, &None, Some("plan-a"), None);
+        let h2 = compute_result_hash(&result, &None, Some("plan-b"), None);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn parse_prefixed_tool_name_splits_server_and_tool() {
+        let (server, tool) = parse_prefixed_tool_name("shell_execute").unwrap();
+        assert_eq!(server, "shell");
+        assert_eq!(tool, "execute");
+    }
+
+    #[test]
+    fn schema_validation_rejects_missing_required_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": { "type": "string" }
+            },
+            "additionalProperties": false
+        });
+
+        let error = validate_json_schema("shell_execute", &schema, &serde_json::json!({}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing required field 'command'"));
+    }
+
+    #[test]
+    fn schema_validation_accepts_valid_payload() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": { "type": "string" },
+                "timeout": { "type": "integer" }
+            },
+            "additionalProperties": false
+        });
+
+        validate_json_schema(
+            "shell_execute",
+            &schema,
+            &serde_json::json!({
+                "command": "pwd",
+                "timeout": 5
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn plan_hash_and_attestation_are_stable() {
+        let identity = Identity::generate();
+        let task = Task {
+            msg_type: "task".to_string(),
+            id: Some("task-123".to_string()),
+            hash: "task-123".to_string(),
+            task_type: None,
+            request: Some("List files".to_string()),
+            requestor: None,
+            prompt: "List files".to_string(),
+            required_caps: vec![],
+            parent_id: None,
+            context: std::collections::HashMap::new(),
+            scope_override: None,
+            priority: 0,
+            timeout_secs: None,
+            author: None,
+            keeper: None,
+        };
+        let tool_calls = vec![PlannedToolCall {
+            id: "toolu_1".to_string(),
+            name: "shell_execute".to_string(),
+            arguments: serde_json::json!({ "command": "pwd" }),
+        }];
+        let hash = compute_plan_hash(&task, "Run pwd", "tool_use", &tool_calls).unwrap();
+        let signature = identity.sign_hash(&hash);
+
+        assert_eq!(hash.len(), 64);
+        assert!(identity
+            .public_id()
+            .verify(hash.as_bytes(), &signature)
+            .unwrap());
     }
 }

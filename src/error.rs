@@ -50,6 +50,9 @@ pub enum ServitorError {
     #[error("Authorization denied: {reason}")]
     Unauthorized { reason: String },
 
+    #[error("Plan validation failed: {reason}")]
+    PlanValidation { reason: String },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

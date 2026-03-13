@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::egregore::messages::{
     AuthDenied, Notification, ServitorProfile, TaskClaim, TaskFailed, TaskOffer, TaskOfferWithdraw,
-    TaskResult, TaskStarted, TaskStatusMessage, TraceSpan,
+    TaskPlan, TaskResult, TaskStarted, TaskStatusMessage, TraceSpan,
 };
 use crate::error::{Result, ServitorError};
 
@@ -137,6 +137,18 @@ impl EgregoreClient {
             task_id = %failed.task_id,
             reason = ?failed.reason,
             "published task failed"
+        );
+        Ok(response.hash)
+    }
+
+    /// Publish a task plan attestation.
+    pub async fn publish_plan(&self, plan: &TaskPlan) -> Result<String> {
+        let response = self.publish(plan, &["task_plan"], None, None).await?;
+        tracing::info!(
+            hash = %response.hash,
+            task_hash = %plan.task_hash,
+            plan_hash = %plan.plan_hash,
+            "published task plan"
         );
         Ok(response.hash)
     }

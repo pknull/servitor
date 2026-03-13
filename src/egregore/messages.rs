@@ -283,6 +283,10 @@ pub struct TaskResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<u64>,
 
+    /// Referenced pre-execution plan hash, if execution was plan-first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
+
     /// Signed attestation.
     pub attestation: Attestation,
 
@@ -311,6 +315,49 @@ pub struct Attestation {
 
     /// Attestation timestamp.
     pub timestamp: DateTime<Utc>,
+}
+
+/// Planned tool call emitted during exec planning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlannedToolCall {
+    /// Provider-generated tool_use id.
+    pub id: String,
+
+    /// Prefixed MCP tool name.
+    pub name: String,
+
+    /// Proposed arguments for the call.
+    pub arguments: serde_json::Value,
+}
+
+/// Signed pre-execution plan artifact for direct exec mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskPlan {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+
+    /// Correlation ID for tracking.
+    pub correlation_id: String,
+
+    /// Hash of the task being planned.
+    pub task_hash: String,
+
+    /// Hash of the plan payload.
+    pub plan_hash: String,
+
+    /// Planner summary text, if any.
+    #[serde(default)]
+    pub summary: String,
+
+    /// Provider stop reason during planning.
+    pub stop_reason: String,
+
+    /// Planned tool calls in execution order.
+    #[serde(default)]
+    pub tool_calls: Vec<PlannedToolCall>,
+
+    /// Signed attestation over the plan hash.
+    pub attestation: Attestation,
 }
 
 /// Task message received from egregore.
@@ -951,5 +998,40 @@ mod tests {
         assert_eq!(parsed.msg_type, "auth_denied");
         assert_eq!(parsed.gate, AuthGate::Offer);
         assert_eq!(parsed.person_id, "discord:123");
+    }
+
+    #[test]
+    fn task_plan_roundtrip() {
+        let identity = crate::identity::Identity::generate();
+        let plan_hash = "abc123plan";
+        let signature = identity.sign_hash(plan_hash);
+
+        let plan = TaskPlan {
+            msg_type: "task_plan".to_string(),
+            correlation_id: "corr-123".to_string(),
+            task_hash: "task-123".to_string(),
+            plan_hash: plan_hash.to_string(),
+            summary: "Inspect files, then summarize.".to_string(),
+            stop_reason: "tool_use".to_string(),
+            tool_calls: vec![PlannedToolCall {
+                id: "toolu_1".to_string(),
+                name: "shell_execute".to_string(),
+                arguments: serde_json::json!({ "command": "pwd" }),
+            }],
+            attestation: Attestation {
+                servitor_id: identity.public_id(),
+                signature: signature.clone(),
+                timestamp: Utc::now(),
+            },
+        };
+
+        let json = serde_json::to_string(&plan).unwrap();
+        let parsed: TaskPlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert!(parsed
+            .attestation
+            .servitor_id
+            .verify(plan_hash.as_bytes(), &signature)
+            .unwrap());
     }
 }
