@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -13,8 +14,9 @@ use servitor::comms::discord::DiscordTransport;
 use servitor::comms::{CommsResponse, CommsTransport};
 use servitor::config::Config;
 use servitor::egregore::{
-    EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorProfile, Task, TaskAssign,
-    TaskClaim, TaskFailed, TaskFailureReason, TaskPing, TaskStatusMessage,
+    Attestation, CapabilityChallenge, CapabilityProof, EgregoreClient, EgregoreMessage,
+    ScopeConstraints, ServitorProfile, Task, TaskAssign, TaskClaim, TaskFailed, TaskFailureReason,
+    TaskPing, TaskStatusMessage,
 };
 use servitor::error::Result;
 use servitor::events::cron::CronSource;
@@ -258,6 +260,11 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
     }
 
     let capability_set: HashSet<String> = mcp_pool.capabilities().into_iter().collect();
+    let tool_set: HashSet<String> = mcp_pool
+        .all_tools()
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect();
     let mut sse_source = if config.egregore.subscribe {
         tracing::info!("SSE subscription enabled");
         Some(SseSource::new(
@@ -423,6 +430,7 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
                             &authority,
                             &identity,
                             &capability_set,
+                            &tool_set,
                             &egregore,
                             &mut task_coordinator,
                             config,
@@ -441,6 +449,7 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
                                     sse_source.as_mut(),
                                     &mut task_coordinator,
                                     &capability_set,
+                                    &tool_set,
                                 )
                                 .await
                                 {
@@ -483,6 +492,7 @@ async fn run_daemon_mode(config: &Config) -> Result<()> {
                         sse_source.as_mut(),
                         &mut task_coordinator,
                         &capability_set,
+                        &tool_set,
                     )
                     .await
                     {
@@ -584,6 +594,7 @@ async fn process_sse_message(
     authority: &Authority,
     identity: &Identity,
     capability_set: &HashSet<String>,
+    tool_set: &HashSet<String>,
     egregore: &EgregoreClient,
     task_coordinator: &mut TaskCoordinator,
     config: &Config,
@@ -642,6 +653,20 @@ async fn process_sse_message(
             config,
         )
         .await;
+    }
+
+    if let Some(challenge) = message.as_capability_challenge() {
+        handle_capability_challenge(
+            challenge,
+            message,
+            authority,
+            identity,
+            capability_set,
+            tool_set,
+            egregore,
+            task_coordinator,
+        )
+        .await?;
     }
 
     Ok(None)
@@ -720,6 +745,7 @@ async fn execute_assigned_task(
     mut sse_source: Option<&mut SseSource>,
     task_coordinator: &mut TaskCoordinator,
     capability_set: &HashSet<String>,
+    tool_set: &HashSet<String>,
 ) -> Result<()> {
     let task_id = assigned.task.effective_id().to_string();
     let servitor_id = identity.public_id();
@@ -789,12 +815,16 @@ async fn execute_assigned_task(
                             }
                         }
 
-                        if message.as_task().is_some() || message.as_task_assign().is_some() {
+                        if message.as_task().is_some()
+                            || message.as_task_assign().is_some()
+                            || message.as_capability_challenge().is_some()
+                        {
                             if let Some(assigned) = process_sse_message(
                                 &message,
                                 authority,
                                 identity,
                                 capability_set,
+                                tool_set,
                                 egregore,
                                 task_coordinator,
                                 config,
@@ -834,6 +864,165 @@ fn task_matches_capabilities(task: &Task, capability_set: &HashSet<String>) -> b
     task.required_caps
         .iter()
         .all(|capability| capability_set.contains(capability))
+}
+
+async fn handle_capability_challenge(
+    challenge: CapabilityChallenge,
+    message: &EgregoreMessage,
+    authority: &Authority,
+    identity: &Identity,
+    capability_set: &HashSet<String>,
+    tool_set: &HashSet<String>,
+    egregore: &EgregoreClient,
+    task_coordinator: &TaskCoordinator,
+) -> Result<()> {
+    if challenge.servitor != identity.public_id() {
+        return Ok(());
+    }
+
+    if !challenge_is_fresh(&challenge) {
+        tracing::debug!(
+            challenge_id = %challenge.challenge_id,
+            task_id = %challenge.task_id,
+            "ignoring expired capability challenge"
+        );
+        return Ok(());
+    }
+
+    if let Some(content_challenger) = &challenge.challenger {
+        if content_challenger != &message.author {
+            tracing::warn!(
+                challenge_id = %challenge.challenge_id,
+                author = %message.author,
+                challenger = %content_challenger,
+                "ignoring capability challenge with mismatched challenger"
+            );
+            return Ok(());
+        }
+    }
+
+    let Some(requestor) = task_coordinator.pending_requestor(&challenge.task_id) else {
+        tracing::debug!(
+            challenge_id = %challenge.challenge_id,
+            task_id = %challenge.task_id,
+            "ignoring capability challenge for unknown pending task"
+        );
+        return Ok(());
+    };
+    let Some(task) = task_coordinator.pending_task(&challenge.task_id) else {
+        return Ok(());
+    };
+    let challenger = challenge
+        .challenger
+        .clone()
+        .unwrap_or_else(|| message.author.clone());
+
+    if !authorize_assignment(authority, &challenger, requestor, task) {
+        tracing::info!(
+            challenge_id = %challenge.challenge_id,
+            task_id = %challenge.task_id,
+            challenger = %challenger,
+            "ignoring unauthorized capability challenge"
+        );
+        return Ok(());
+    }
+
+    let matched_tools =
+        matching_tools_for_capability(&challenge.capability, capability_set, tool_set);
+    let verified = !matched_tools.is_empty();
+    let details = if verified {
+        Some("matched current local tool inventory".to_string())
+    } else {
+        Some("no currently initialized tool matched the requested capability".to_string())
+    };
+    let proof = build_capability_proof(identity, &challenge, verified, matched_tools, details);
+
+    egregore.publish_capability_proof(&proof).await?;
+    Ok(())
+}
+
+fn build_capability_proof(
+    identity: &Identity,
+    challenge: &CapabilityChallenge,
+    verified: bool,
+    matched_tools: Vec<String>,
+    details: Option<String>,
+) -> CapabilityProof {
+    let timestamp = Utc::now();
+    let servitor = identity.public_id();
+    let mut proof = CapabilityProof {
+        msg_type: "capability_proof".to_string(),
+        challenge_id: challenge.challenge_id.clone(),
+        task_id: challenge.task_id.clone(),
+        servitor: servitor.clone(),
+        capability: challenge.capability.clone(),
+        verified,
+        matched_tools,
+        details,
+        attestation: Attestation {
+            servitor_id: servitor,
+            signature: String::new(),
+            timestamp,
+        },
+        timestamp,
+    };
+    proof.attestation.signature = identity.sign(proof.signing_payload().as_bytes());
+    proof
+}
+
+fn challenge_is_fresh(challenge: &CapabilityChallenge) -> bool {
+    let ttl_seconds = if challenge.ttl_seconds == 0 {
+        30
+    } else {
+        challenge.ttl_seconds
+    };
+    let expires_at = challenge.timestamp + chrono::Duration::seconds(ttl_seconds as i64);
+    Utc::now() <= expires_at
+}
+
+fn matching_tools_for_capability(
+    capability: &str,
+    capability_set: &HashSet<String>,
+    tool_set: &HashSet<String>,
+) -> Vec<String> {
+    let mut matches: Vec<String> = tool_set
+        .iter()
+        .filter(|tool| capability_matches(capability, tool))
+        .cloned()
+        .collect();
+
+    if matches.is_empty() {
+        matches.extend(
+            capability_set
+                .iter()
+                .filter(|candidate| capability_matches(capability, candidate))
+                .cloned(),
+        );
+    }
+
+    matches.sort();
+    matches.dedup();
+    matches
+}
+
+fn capability_matches(pattern: &str, candidate: &str) -> bool {
+    let normalized_pattern = pattern.replace(':', "_");
+    let normalized_candidate = candidate.replace(':', "_");
+
+    if normalized_pattern == normalized_candidate {
+        return true;
+    }
+
+    if let Some(prefix) = normalized_pattern.strip_suffix("_*") {
+        return normalized_candidate == prefix
+            || normalized_candidate.starts_with(&format!("{prefix}_"));
+    }
+
+    if let Some(prefix) = normalized_pattern.strip_suffix('*') {
+        return normalized_candidate.starts_with(prefix);
+    }
+
+    normalized_candidate.starts_with(&format!("{normalized_pattern}_"))
 }
 
 /// Build a Task from a CommsMessage.
@@ -1096,4 +1285,86 @@ fn md5_hash(s: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn challenge_freshness_respects_ttl() {
+        let fresh = CapabilityChallenge {
+            msg_type: "capability_challenge".to_string(),
+            challenge_id: "challenge-1".to_string(),
+            task_id: "task-1".to_string(),
+            servitor: servitor::PublicId(
+                "@SERVITORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519".to_string(),
+            ),
+            capability: "shell:execute".to_string(),
+            challenger: None,
+            ttl_seconds: 30,
+            timestamp: Utc::now(),
+        };
+        assert!(challenge_is_fresh(&fresh));
+
+        let stale = CapabilityChallenge {
+            timestamp: Utc::now() - chrono::Duration::seconds(61),
+            ttl_seconds: 30,
+            ..fresh
+        };
+        assert!(!challenge_is_fresh(&stale));
+    }
+
+    #[test]
+    fn capability_matching_finds_tools_and_server_caps() {
+        let capabilities = HashSet::from(["shell".to_string(), "docker".to_string()]);
+        let tools = HashSet::from([
+            "shell_execute".to_string(),
+            "docker_container_list".to_string(),
+        ]);
+
+        assert_eq!(
+            matching_tools_for_capability("shell:execute", &capabilities, &tools),
+            vec!["shell_execute".to_string()]
+        );
+        assert_eq!(
+            matching_tools_for_capability("docker:*", &capabilities, &tools),
+            vec!["docker_container_list".to_string()]
+        );
+    }
+
+    #[test]
+    fn capability_proof_verifies_known_tool() {
+        let identity = Identity::generate();
+        let challenge = CapabilityChallenge::new("task-1", identity.public_id(), "shell", None, 30);
+        let matched_tools = vec!["shell_execute".to_string(), "shell_read".to_string()];
+        let proof = build_capability_proof(
+            &identity,
+            &challenge,
+            true,
+            matched_tools,
+            Some("matched local tools".to_string()),
+        );
+
+        assert!(proof.verified);
+        assert_eq!(proof.matched_tools.len(), 2);
+        assert!(proof.verify().unwrap());
+    }
+
+    #[test]
+    fn capability_proof_marks_missing_capability_unverified() {
+        let identity = Identity::generate();
+        let challenge =
+            CapabilityChallenge::new("task-1", identity.public_id(), "browser", None, 30);
+        let proof = build_capability_proof(
+            &identity,
+            &challenge,
+            false,
+            Vec::new(),
+            Some("no match".to_string()),
+        );
+
+        assert!(!proof.verified);
+        assert!(proof.matched_tools.is_empty());
+    }
 }

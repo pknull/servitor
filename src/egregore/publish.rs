@@ -4,8 +4,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::egregore::messages::{
-    Notification, ServitorProfile, TaskClaim, TaskFailed, TaskOffer, TaskOfferWithdraw, TaskResult,
-    TaskStarted, TaskStatusMessage,
+    CapabilityProof, Notification, ServitorProfile, TaskClaim, TaskFailed, TaskOffer,
+    TaskOfferWithdraw, TaskResult, TaskStarted, TaskStatusMessage,
 };
 use crate::error::{Result, ServitorError};
 
@@ -138,6 +138,19 @@ impl EgregoreClient {
             hash = %response.hash,
             task_id = %withdraw.task_id,
             "published task offer withdraw"
+        );
+        Ok(response.hash)
+    }
+
+    /// Publish a capability proof response.
+    pub async fn publish_capability_proof(&self, proof: &CapabilityProof) -> Result<String> {
+        let response = self.publish(proof, &["capability_proof"]).await?;
+        tracing::debug!(
+            hash = %response.hash,
+            challenge_id = %proof.challenge_id,
+            capability = %proof.capability,
+            verified = proof.verified,
+            "published capability proof"
         );
         Ok(response.hash)
     }
