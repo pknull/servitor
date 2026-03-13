@@ -111,6 +111,12 @@ scope.block = ["execute:/etc/*", "execute:rm *"]
 - Patterns support glob syntax (`*`, `**`, `?`)
 - Scoped patterns: `execute:/etc/*` matches tool name + argument
 
+## Deployment
+
+- Sandboxed sidecar deployment guide: [docs/deployment/containerization.md](docs/deployment/containerization.md)
+- Example compose stack: [examples/containerized/docker-compose.yml](examples/containerized/docker-compose.yml)
+- Example systemd units: [examples/systemd/](examples/systemd/)
+
 ## Message Types
 
 | Type | Direction | Purpose |

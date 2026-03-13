@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  servitor:
+    image: ghcr.io/example/servitor:latest
+    command: ["servitor", "run"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - servitor-data:/var/lib/servitor
+      - ./servitor.toml:/app/servitor.toml:ro
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    depends_on:
+      - mcp-shell
+      - mcp-docker
+    networks:
+      - servitor
+
+  mcp-shell:
+    image: ghcr.io/example/mcp-shell:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - /srv/workspace:/workspace
+    networks:
+      - servitor
+
+  mcp-docker:
+    image: ghcr.io/example/mcp-docker:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - servitor
+
+networks:
+  servitor:
+    driver: bridge
+    internal: true
+
+volumes:
+  servitor-data:

@@ -1,0 +1,30 @@
+[Unit]
+Description=Servitor daemon
+After=network-online.target servitor-shell-mcp.service servitor-docker-mcp.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/servitor
+ExecStart=/usr/local/bin/servitor --config /etc/servitor/servitor.toml run
+Restart=on-failure
+RestartSec=5
+Environment=ANTHROPIC_API_KEY_FILE=/etc/servitor/anthropic_api_key
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/servitor
+StateDirectory=servitor
+
+[Install]
+WantedBy=multi-user.target
