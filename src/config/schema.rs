@@ -211,6 +211,10 @@ pub struct AgentConfig {
     /// System prompt prefix.
     #[serde(default)]
     pub system_prompt: Option<String>,
+
+    /// Publish detailed trace spans for task and tool execution.
+    #[serde(default)]
+    pub publish_trace_spans: bool,
 }
 
 impl Default for AgentConfig {
@@ -219,6 +223,7 @@ impl Default for AgentConfig {
             max_turns: default_max_turns(),
             timeout_secs: default_task_timeout(),
             system_prompt: None,
+            publish_trace_spans: false,
         }
     }
 }

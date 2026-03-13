@@ -154,6 +154,7 @@ fn attestation_signing() {
         error: None,
         duration_seconds: Some(1),
         attestation,
+        trace_id: None,
     };
 
     // Verify the signature
@@ -169,6 +170,72 @@ fn attestation_signing() {
     assert!(json.contains("task_result"));
     assert!(json.contains("attestation"));
     assert!(json.contains("signature"));
+}
+
+/// Test trace linkage on task results.
+#[test]
+fn task_result_trace_id_roundtrip() {
+    use chrono::Utc;
+    use servitor::egregore::messages::{Attestation, TaskResult};
+
+    let identity = Identity::generate();
+    let signature = identity.sign_hash("trace-result-hash");
+    let result = TaskResult {
+        msg_type: "task_result".to_string(),
+        correlation_id: "corr-trace".to_string(),
+        task_hash: "task-trace".to_string(),
+        result_hash: "trace-result-hash".to_string(),
+        status: TaskStatus::Success,
+        result: Some(serde_json::json!({ "text": "ok" })),
+        error: None,
+        attestation: Attestation {
+            servitor_id: identity.public_id(),
+            signature,
+            timestamp: Utc::now(),
+        },
+        trace_id: Some("trace-123".to_string()),
+    };
+
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["trace_id"], "trace-123");
+
+    let parsed: TaskResult = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed.trace_id.as_deref(), Some("trace-123"));
+}
+
+/// Test trace span serialization shape.
+#[test]
+fn trace_span_serialization() {
+    use chrono::Utc;
+    use servitor::egregore::messages::{TraceEvent, TraceSpan, TraceSpanStatus};
+    use std::collections::HashMap;
+
+    let mut span = TraceSpan::new(
+        "trace-123",
+        "span-abc",
+        Some("parent-xyz".to_string()),
+        "task_execution",
+        "@servitor.ed25519",
+        Utc::now(),
+        Utc::now(),
+        TraceSpanStatus::Ok,
+    );
+    span.attributes
+        .insert("task_id".to_string(), serde_json::json!("task-123"));
+    span.events.push(TraceEvent {
+        ts: Utc::now(),
+        name: "image_pulled".to_string(),
+        attributes: HashMap::new(),
+    });
+
+    let json = serde_json::to_value(&span).unwrap();
+    assert_eq!(json["type"], "trace_span");
+    assert_eq!(json["trace_id"], "trace-123");
+    assert_eq!(json["span_id"], "span-abc");
+    assert_eq!(json["parent_span_id"], "parent-xyz");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["attributes"]["task_id"], "task-123");
+    assert_eq!(json["events"][0]["name"], "image_pulled");
 }
 
 /// Test provider capabilities structure.

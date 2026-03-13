@@ -1,13 +1,15 @@
 //! Agent loop — tool_use → execute → feed_back cycle.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::agent::context::ConversationContext;
 use crate::agent::provider::{ContentBlock, Provider, StopReason};
 use crate::authority::Authority;
 use crate::config::AgentConfig;
-use crate::egregore::messages::{Attestation, Task, TaskResult, TaskStatus};
+use crate::egregore::messages::{
+    Attestation, Task, TaskResult, TaskStatus, TraceEvent, TraceSpan, TraceSpanStatus,
+};
 use crate::egregore::EgregoreClient;
 use crate::error::{Result, ServitorError};
 use crate::identity::Identity;
@@ -61,6 +63,11 @@ impl<'a> AgentExecutor<'a> {
 
     /// Execute a task and return the signed result.
     pub async fn execute(&self, task: &Task) -> Result<TaskResult> {
+        let trace_enabled = self.config.publish_trace_spans && self.egregore.is_some();
+        let trace_id = trace_enabled.then(new_trace_id);
+        let root_span_id = trace_enabled.then(new_span_id);
+        let trace_service = "servitor";
+        let trace_started_at = trace_enabled.then(Utc::now);
         let mut context = ConversationContext::new();
         let tools = self.mcp_pool.tools_for_llm();
 
@@ -100,12 +107,27 @@ impl<'a> AgentExecutor<'a> {
         loop {
             if turn >= max_turns {
                 tracing::warn!(turns = turn, "max turns reached");
-                return self.build_result(
+                let result = self.build_result(
                     task,
                     TaskStatus::Timeout,
                     None,
                     Some(format!("max turns ({}) exceeded", max_turns)),
-                );
+                    trace_id.clone(),
+                )?;
+                if let (Some(trace_id), Some(root_span_id), Some(trace_started_at)) =
+                    (&trace_id, &root_span_id, trace_started_at)
+                {
+                    self.publish_root_trace(
+                        task,
+                        trace_id,
+                        root_span_id,
+                        trace_service,
+                        trace_started_at,
+                        &result,
+                    )
+                    .await;
+                }
+                return Ok(result);
             }
 
             // Call LLM
@@ -128,12 +150,27 @@ impl<'a> AgentExecutor<'a> {
             if response.stop_reason == StopReason::EndTurn {
                 // Task complete
                 let result_text = response.text();
-                return self.build_result(
+                let result = self.build_result(
                     task,
                     TaskStatus::Success,
                     Some(serde_json::json!({ "text": result_text })),
                     None,
-                );
+                    trace_id.clone(),
+                )?;
+                if let (Some(trace_id), Some(root_span_id), Some(trace_started_at)) =
+                    (&trace_id, &root_span_id, trace_started_at)
+                {
+                    self.publish_root_trace(
+                        task,
+                        trace_id,
+                        root_span_id,
+                        trace_service,
+                        trace_started_at,
+                        &result,
+                    )
+                    .await;
+                }
+                return Ok(result);
             }
 
             // Extract and execute tool calls
@@ -141,18 +178,53 @@ impl<'a> AgentExecutor<'a> {
             if tool_uses.is_empty() {
                 // No tools to execute, treat as end
                 let result_text = response.text();
-                return self.build_result(
+                let result = self.build_result(
                     task,
                     TaskStatus::Success,
                     Some(serde_json::json!({ "text": result_text })),
                     None,
-                );
+                    trace_id.clone(),
+                )?;
+                if let (Some(trace_id), Some(root_span_id), Some(trace_started_at)) =
+                    (&trace_id, &root_span_id, trace_started_at)
+                {
+                    self.publish_root_trace(
+                        task,
+                        trace_id,
+                        root_span_id,
+                        trace_service,
+                        trace_started_at,
+                        &result,
+                    )
+                    .await;
+                }
+                return Ok(result);
             }
 
             // Execute each tool call
             let mut tool_results = Vec::new();
             for (tool_id, tool_name, arguments) in tool_uses {
                 let result = self.execute_tool(task, tool_name, arguments).await;
+                if let (Some(trace_id), Some(root_span_id)) = (&trace_id, &root_span_id) {
+                    let tool_span_started_at = Utc::now();
+                    let tool_span_id = new_span_id();
+                    let (mcp_name, bare_tool_name) = self
+                        .mcp_pool
+                        .parse_tool_name(tool_name)
+                        .map(|(mcp, tool)| (mcp.to_string(), tool.to_string()))
+                        .unwrap_or_else(|| ("unknown".to_string(), tool_name.to_string()));
+                    let tool_span = self.build_tool_trace_span(
+                        trace_id,
+                        root_span_id,
+                        trace_service,
+                        &tool_span_id,
+                        &mcp_name,
+                        &bare_tool_name,
+                        tool_span_started_at,
+                        &result,
+                    );
+                    self.publish_trace_span(&tool_span).await;
+                }
                 tool_results.push(match result {
                     Ok(output) => {
                         ContentBlock::tool_result(tool_id, output.text_content(), output.is_error)
@@ -248,9 +320,10 @@ impl<'a> AgentExecutor<'a> {
         status: TaskStatus,
         result: Option<serde_json::Value>,
         error: Option<String>,
+        trace_id: Option<String>,
     ) -> Result<TaskResult> {
         // Compute result hash
-        let result_hash = compute_result_hash(&result, &error);
+        let result_hash = compute_result_hash(&result, &error, trace_id.as_deref());
 
         // Sign the result hash
         let signature = self.identity.sign_hash(&result_hash);
@@ -273,12 +346,115 @@ impl<'a> AgentExecutor<'a> {
             error,
             duration_seconds: None,
             attestation,
+            trace_id,
         })
+    }
+
+    fn build_tool_trace_span(
+        &self,
+        trace_id: &str,
+        parent_span_id: &str,
+        service: &str,
+        span_id: &str,
+        mcp_name: &str,
+        tool_name: &str,
+        start_ts: DateTime<Utc>,
+        result: &Result<crate::mcp::ToolCallResult>,
+    ) -> TraceSpan {
+        let mut span = TraceSpan::new(
+            trace_id.to_string(),
+            span_id.to_string(),
+            Some(parent_span_id.to_string()),
+            format!("mcp:{mcp_name}:{tool_name}"),
+            service.to_string(),
+            start_ts,
+            Utc::now(),
+            match result {
+                Ok(output) if !output.is_error => TraceSpanStatus::Ok,
+                Ok(_) | Err(_) => TraceSpanStatus::Error,
+            },
+        );
+        span.attributes.insert(
+            "mcp_server".to_string(),
+            serde_json::Value::String(mcp_name.to_string()),
+        );
+        span.attributes.insert(
+            "tool_name".to_string(),
+            serde_json::Value::String(tool_name.to_string()),
+        );
+        match result {
+            Ok(output) => {
+                span.attributes.insert(
+                    "is_error".to_string(),
+                    serde_json::Value::Bool(output.is_error),
+                );
+            }
+            Err(error) => {
+                span.events.push(trace_error_event(error.to_string()));
+            }
+        }
+        span
+    }
+
+    async fn publish_trace_span(&self, span: &TraceSpan) {
+        if let Some(egregore) = self.egregore {
+            if let Err(error) = egregore.publish_trace_span(span).await {
+                tracing::debug!(
+                    error = %error,
+                    trace_id = %span.trace_id,
+                    span_id = %span.span_id,
+                    "failed to publish trace span"
+                );
+            }
+        }
+    }
+
+    async fn publish_root_trace(
+        &self,
+        task: &Task,
+        trace_id: &str,
+        root_span_id: &str,
+        service: &str,
+        start_ts: DateTime<Utc>,
+        result: &TaskResult,
+    ) {
+        let mut span = TraceSpan::new(
+            trace_id.to_string(),
+            root_span_id.to_string(),
+            None,
+            "task_execution".to_string(),
+            service.to_string(),
+            start_ts,
+            Utc::now(),
+            match result.status {
+                TaskStatus::Success => TraceSpanStatus::Ok,
+                TaskStatus::Error => TraceSpanStatus::Error,
+                TaskStatus::Timeout => TraceSpanStatus::Timeout,
+            },
+        );
+        span.attributes.insert(
+            "task_hash".to_string(),
+            serde_json::Value::String(task.hash.clone()),
+        );
+        if let Some(parent_id) = &task.parent_id {
+            span.attributes.insert(
+                "parent_message_id".to_string(),
+                serde_json::Value::String(parent_id.clone()),
+            );
+        }
+        if let Some(error) = &result.error {
+            span.events.push(trace_error_event(error.clone()));
+        }
+        self.publish_trace_span(&span).await;
     }
 }
 
 /// Compute SHA-256 hash of the result content.
-fn compute_result_hash(result: &Option<serde_json::Value>, error: &Option<String>) -> String {
+fn compute_result_hash(
+    result: &Option<serde_json::Value>,
+    error: &Option<String>,
+    trace_id: Option<&str>,
+) -> String {
     let mut hasher = Sha256::new();
 
     if let Some(r) = result {
@@ -287,9 +463,30 @@ fn compute_result_hash(result: &Option<serde_json::Value>, error: &Option<String
     if let Some(e) = error {
         hasher.update(e.as_bytes());
     }
+    if let Some(trace_id) = trace_id {
+        hasher.update(trace_id.as_bytes());
+    }
 
     let hash = hasher.finalize();
     hash.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn new_trace_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn new_span_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn trace_error_event(message: String) -> TraceEvent {
+    let mut attributes = std::collections::HashMap::new();
+    attributes.insert("message".to_string(), serde_json::Value::String(message));
+    TraceEvent {
+        ts: Utc::now(),
+        name: "error".to_string(),
+        attributes,
+    }
 }
 
 #[cfg(test)]
@@ -299,8 +496,8 @@ mod tests {
     #[test]
     fn result_hash_deterministic() {
         let result = Some(serde_json::json!({"foo": "bar"}));
-        let h1 = compute_result_hash(&result, &None);
-        let h2 = compute_result_hash(&result, &None);
+        let h1 = compute_result_hash(&result, &None, None);
+        let h2 = compute_result_hash(&result, &None, None);
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64); // SHA-256 hex
     }
@@ -309,8 +506,16 @@ mod tests {
     fn different_content_different_hash() {
         let r1 = Some(serde_json::json!({"foo": "bar"}));
         let r2 = Some(serde_json::json!({"foo": "baz"}));
-        let h1 = compute_result_hash(&r1, &None);
-        let h2 = compute_result_hash(&r2, &None);
+        let h1 = compute_result_hash(&r1, &None, None);
+        let h2 = compute_result_hash(&r2, &None, None);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn trace_id_changes_result_hash() {
+        let result = Some(serde_json::json!({"foo": "bar"}));
+        let h1 = compute_result_hash(&result, &None, Some("trace-a"));
+        let h2 = compute_result_hash(&result, &None, Some("trace-b"));
         assert_ne!(h1, h2);
     }
 }
