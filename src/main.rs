@@ -694,12 +694,13 @@ async fn maybe_accept_assignment(
     let eta_seconds = task.timeout_secs.unwrap_or(config.agent.timeout_secs);
     let decision = task_coordinator.apply_assignment(&assign, Instant::now(), eta_seconds);
     if let Some(decision) = decision {
-        if task_coordinator.has_active_execution() && decision.started.task_id != assign.task_id {
+        if task_coordinator.active_execution_count() > 1 {
+            let _ = task_coordinator.finish_execution(&assign.task_id);
             task_coordinator.enqueue_assignment(decision);
             return Ok(None);
         }
 
-        if task_coordinator.has_active_execution() && decision.started.task_id == assign.task_id {
+        if task_coordinator.has_active_execution() {
             return Ok(Some(decision));
         }
     }

@@ -137,6 +137,10 @@ impl TaskCoordinator {
         !self.active.is_empty()
     }
 
+    pub fn active_execution_count(&self) -> usize {
+        self.active.len()
+    }
+
     pub fn enqueue_assignment(&mut self, decision: AssignmentDecision) {
         self.queued_assignments.push_back(decision);
     }
