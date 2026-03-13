@@ -14,10 +14,9 @@ use servitor::comms::discord::DiscordTransport;
 use servitor::comms::{CommsResponse, CommsTransport};
 use servitor::config::Config;
 use servitor::egregore::{
-    EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorProfile, Task, TaskAssign,
-    TaskClaim, TaskFailed, TaskFailureReason, TaskPing, TaskStatusMessage,
-    ServitorLoad, ServitorStats, Task, TaskAssign, TaskClaim, TaskFailed, TaskFailureReason,
-    TaskPing, TaskStatus, TaskStatusMessage,
+    EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorLoad, ServitorProfile,
+    ServitorStats, Task, TaskAssign, TaskClaim, TaskFailed, TaskFailureReason, TaskPing,
+    TaskStatus, TaskStatusMessage,
 };
 use servitor::error::Result;
 use servitor::events::cron::CronSource;
