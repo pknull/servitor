@@ -1,6 +1,7 @@
 //! Scope enforcement policy — allow/block logic.
 
 use crate::config::ScopeConfig;
+use crate::egregore::messages::TaskScopeOverride;
 use crate::error::{Result, ServitorError};
 use crate::scope::matcher::{parse_scoped_pattern, ScopeMatcher};
 
@@ -44,54 +45,194 @@ impl ScopePolicy {
     /// 3. If no allow patterns defined, permit by default
     /// 4. If allow patterns exist but none match, deny
     pub fn check(&self, tool_name: &str, args: &serde_json::Value) -> Result<()> {
+        self.check_with_override(tool_name, args, None)
+    }
+
+    /// Check if a tool call is allowed with an optional task-level override.
+    pub fn check_with_override(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        scope_override: Option<&TaskScopeOverride>,
+    ) -> Result<()> {
         // Extract key arguments for matching
         let targets = extract_targets(tool_name, args);
 
         // Check block patterns first (they take precedence)
-        for (scope, matcher) in &self.block {
-            for target in &targets {
-                if scope_matches(scope, tool_name) && matcher.matches(target) {
-                    return Err(ServitorError::ScopeViolation {
-                        reason: format!(
-                            "blocked by policy: {} matches block pattern '{}:{}'",
-                            target,
-                            scope,
-                            matcher.pattern()
-                        ),
-                    });
-                }
-            }
+        if let Err(reason) = check_block_patterns(&self.block, tool_name, &targets, "policy") {
+            return Err(ServitorError::ScopeViolation { reason });
         }
 
         // If no allow patterns, permit by default
-        if self.allow.is_empty() {
+        if !self.allow.is_empty()
+            && !matches_allow_patterns(&self.allow, tool_name, &targets)
+        {
+            return Err(ServitorError::ScopeViolation {
+                reason: format!(
+                    "not allowed: tool '{}' with targets {:?} not permitted by any allow pattern",
+                    tool_name, targets
+                ),
+            });
+        }
+
+        let Some(scope_override) = scope_override else {
+            return Ok(());
+        };
+
+        if scope_override.is_empty() {
             return Ok(());
         }
 
-        // Check allow patterns
-        for (scope, matcher) in &self.allow {
-            // Wildcard scope or matching tool name
-            if scope_matches(scope, tool_name) {
-                // Wildcard pattern or matching target
-                if matcher.pattern() == "*" {
-                    return Ok(());
-                }
-                for target in &targets {
-                    if matcher.matches(target) {
-                        return Ok(());
-                    }
-                }
+        let override_block = compile_task_override_patterns(&scope_override.block)?;
+        let full_scope = format!("{}:{}", self.server_name, tool_name);
+        if let Err(reason) =
+            check_override_block_patterns(&override_block, &full_scope, &targets, "task scope override")
+        {
+            return Err(ServitorError::ScopeViolation { reason });
+        }
+
+        if !scope_override.allow.is_empty() {
+            let override_allow = compile_task_override_patterns(&scope_override.allow)?;
+            if !matches_override_allow_patterns(&override_allow, &full_scope, &targets) {
+                return Err(ServitorError::ScopeViolation {
+                    reason: format!(
+                        "task scope override does not allow tool '{}' with targets {:?}",
+                        tool_name, targets
+                    ),
+                });
             }
         }
 
-        // No allow pattern matched
-        Err(ServitorError::ScopeViolation {
-            reason: format!(
-                "not allowed: tool '{}' with targets {:?} not permitted by any allow pattern",
-                tool_name, targets
-            ),
-        })
+        Ok(())
     }
+}
+
+fn compile_patterns(patterns: &[String]) -> Result<Vec<(String, ScopeMatcher)>> {
+    let mut compiled = Vec::new();
+    for pattern in patterns {
+        let (scope, pat) = parse_scoped_pattern(pattern);
+        compiled.push((scope.to_string(), ScopeMatcher::new(pat)?));
+    }
+    Ok(compiled)
+}
+
+fn compile_task_override_patterns(patterns: &[String]) -> Result<Vec<(String, ScopeMatcher)>> {
+    let mut compiled = Vec::new();
+    for pattern in patterns {
+        let (scope, pat) = parse_task_override_pattern(pattern)?;
+        compiled.push((scope, ScopeMatcher::new(&pat)?));
+    }
+    Ok(compiled)
+}
+
+fn parse_task_override_pattern(pattern: &str) -> Result<(String, String)> {
+    let mut segments = pattern.splitn(3, ':');
+    let server = segments.next().unwrap_or_default();
+    let tool = segments.next().unwrap_or_default();
+    let target = segments.next().unwrap_or("*");
+
+    if server.is_empty() || tool.is_empty() {
+        return Err(ServitorError::Config {
+            reason: format!(
+                "invalid task scope override pattern '{}': expected '<server>:<tool>:<target>'",
+                pattern
+            ),
+        });
+    }
+
+    Ok((format!("{}:{}", server, tool), target.to_string()))
+}
+
+fn check_block_patterns(
+    patterns: &[(String, ScopeMatcher)],
+    tool_name: &str,
+    targets: &[String],
+    source: &str,
+) -> std::result::Result<(), String> {
+    for (scope, matcher) in patterns {
+        for target in targets {
+            if scope_matches(scope, tool_name) && matcher.matches(target) {
+                return Err(format!(
+                    "blocked by {}: {} matches block pattern '{}:{}'",
+                    source,
+                    target,
+                    scope,
+                    matcher.pattern()
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn matches_allow_patterns(
+    patterns: &[(String, ScopeMatcher)],
+    tool_name: &str,
+    targets: &[String],
+) -> bool {
+    for (scope, matcher) in patterns {
+        if scope_matches(scope, tool_name) {
+            if matcher.pattern() == "*" {
+                return true;
+            }
+            for target in targets {
+                if matcher.matches(target) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn check_override_block_patterns(
+    patterns: &[(String, ScopeMatcher)],
+    full_scope: &str,
+    targets: &[String],
+    source: &str,
+) -> std::result::Result<(), String> {
+    for (scope, matcher) in patterns {
+        for target in targets {
+            if override_scope_matches(scope, full_scope) && matcher.matches(target) {
+                return Err(format!(
+                    "blocked by {}: {} matches block pattern '{}:{}'",
+                    source,
+                    target,
+                    scope,
+                    matcher.pattern()
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn matches_override_allow_patterns(
+    patterns: &[(String, ScopeMatcher)],
+    full_scope: &str,
+    targets: &[String],
+) -> bool {
+    for (scope, matcher) in patterns {
+        if override_scope_matches(scope, full_scope) {
+            if matcher.pattern() == "*" {
+                return true;
+            }
+            for target in targets {
+                if matcher.matches(target) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn override_scope_matches(scope: &str, full_scope: &str) -> bool {
+    scope == "*" || scope == full_scope
 }
 
 /// Check if a scope matches a tool name.
@@ -155,12 +296,24 @@ impl ScopeEnforcer {
         mcp_name: &str,
         tool_name: &str,
         args: &serde_json::Value,
+        scope_override: Option<&TaskScopeOverride>,
     ) -> Result<()> {
         if let Some(policy) = self.policies.get(mcp_name) {
-            policy.check(tool_name, args)
+            policy.check_with_override(tool_name, args, scope_override)
         } else {
-            // No policy defined, allow by default
-            Ok(())
+            if let Some(scope_override) = scope_override {
+                let policy = ScopePolicy::from_config(
+                    mcp_name,
+                    &ScopeConfig {
+                        allow: vec![],
+                        block: vec![],
+                    },
+                )?;
+                policy.check_with_override(tool_name, args, Some(scope_override))
+            } else {
+                // No policy defined, allow by default
+                Ok(())
+            }
         }
     }
 }
@@ -171,14 +324,15 @@ mod tests {
 
     fn test_config() -> ScopeConfig {
         ScopeConfig {
-            allow: vec![
-                "execute:~/scripts/*".to_string(),
-                "*:*.txt".to_string(),
-            ],
-            block: vec![
-                "execute:/etc/*".to_string(),
-                "execute:rm *".to_string(),
-            ],
+            allow: vec!["execute:~/scripts/*".to_string(), "*:*.txt".to_string()],
+            block: vec!["execute:/etc/*".to_string(), "execute:rm *".to_string()],
+        }
+    }
+
+    fn allow_read_only_override() -> TaskScopeOverride {
+        TaskScopeOverride {
+            allow: vec!["shell:read:*".to_string()],
+            block: vec![],
         }
     }
 
@@ -215,6 +369,74 @@ mod tests {
     }
 
     #[test]
+    fn scope_override_can_further_restrict_allowed_tools() {
+        let policy = ScopePolicy::from_config(
+            "shell",
+            &ScopeConfig {
+                allow: vec!["*".to_string()],
+                block: vec![],
+            },
+        )
+        .unwrap();
+
+        let args = serde_json::json!({ "path": "notes.txt" });
+        assert!(policy
+            .check_with_override("read", &args, Some(&allow_read_only_override()))
+            .is_ok());
+        assert!(policy
+            .check_with_override(
+                "execute",
+                &serde_json::json!({ "command": "ls" }),
+                Some(&allow_read_only_override())
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn scope_override_cannot_expand_base_policy() {
+        let policy = ScopePolicy::from_config(
+            "shell",
+            &ScopeConfig {
+                allow: vec!["read:*".to_string()],
+                block: vec![],
+            },
+        )
+        .unwrap();
+
+        let scope_override = TaskScopeOverride {
+            allow: vec!["shell:execute:*".to_string()],
+            block: vec![],
+        };
+
+        let args = serde_json::json!({ "command": "ls" });
+        assert!(policy
+            .check_with_override("execute", &args, Some(&scope_override))
+            .is_err());
+    }
+
+    #[test]
+    fn scope_override_block_takes_precedence() {
+        let policy = ScopePolicy::from_config(
+            "shell",
+            &ScopeConfig {
+                allow: vec!["*".to_string()],
+                block: vec![],
+            },
+        )
+        .unwrap();
+
+        let scope_override = TaskScopeOverride {
+            allow: vec![],
+            block: vec!["shell:execute:rm *".to_string()],
+        };
+
+        let args = serde_json::json!({ "command": "rm -rf /tmp/demo" });
+        assert!(policy
+            .check_with_override("execute", &args, Some(&scope_override))
+            .is_err());
+    }
+
+    #[test]
     fn enforcer_with_multiple_policies() {
         let mut enforcer = ScopeEnforcer::new();
 
@@ -232,14 +454,16 @@ mod tests {
 
         // Shell allows most things
         let args = serde_json::json!({ "command": "ls" });
-        assert!(enforcer.check("shell", "execute", &args).is_ok());
+        assert!(enforcer.check("shell", "execute", &args, None).is_ok());
 
         // Shell blocks rm
         let args = serde_json::json!({ "command": "rm -rf /" });
-        assert!(enforcer.check("shell", "execute", &args).is_err());
+        assert!(enforcer.check("shell", "execute", &args, None).is_err());
 
         // Docker blocks traefik
         let args = serde_json::json!({ "container": "traefik" });
-        assert!(enforcer.check("docker", "container_lifecycle", &args).is_err());
+        assert!(enforcer
+            .check("docker", "container_lifecycle", &args, None)
+            .is_err());
     }
 }
