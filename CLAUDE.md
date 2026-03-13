@@ -80,7 +80,7 @@ Copy `authority.example.toml` to `~/.servitor/authority.toml` for access control
 - **Place**: Hierarchical patterns (`discord:guild:channel`, `egregore:local`)
 - **Skill**: Tool patterns (`shell:execute`, `docker:*`)
 
-No authority.toml = open mode (accept all). See `authority.example.toml` for syntax.
+No `authority.toml` means daemon and hook modes refuse to start. Use `--insecure` only for local development when you intentionally want open mode.
 
 ## Memory Bank
 

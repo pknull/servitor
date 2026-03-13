@@ -54,7 +54,7 @@ pub struct Authority {
     /// Index: http token -> keeper index.
     keeper_by_http: HashMap<String, usize>,
 
-    /// Whether authority is in open mode (no config = accept all).
+    /// Whether authority is in explicitly insecure open mode.
     open_mode: bool,
 }
 
@@ -65,8 +65,20 @@ impl Default for Authority {
 }
 
 impl Authority {
-    /// Create an empty authority (open mode - accepts all).
+    /// Create an empty authority (deny all).
     pub fn empty() -> Self {
+        Self {
+            keepers: Vec::new(),
+            permissions: Vec::new(),
+            keeper_by_egregore: HashMap::new(),
+            keeper_by_discord: HashMap::new(),
+            keeper_by_http: HashMap::new(),
+            open_mode: false,
+        }
+    }
+
+    /// Create an insecure authority that allows all requests.
+    pub fn insecure_open() -> Self {
         Self {
             keepers: Vec::new(),
             permissions: Vec::new(),
@@ -79,10 +91,9 @@ impl Authority {
 
     /// Load authority from a TOML file.
     ///
-    /// If the file doesn't exist, returns empty authority (open mode).
+    /// If the file doesn't exist, returns empty authority (deny all).
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
-            tracing::debug!(?path, "authority file not found, running in open mode");
             return Ok(Self::empty());
         }
 
@@ -125,7 +136,7 @@ impl Authority {
         }
     }
 
-    /// Check if running in open mode (no restrictions).
+    /// Check if running in insecure open mode (no restrictions).
     pub fn is_open_mode(&self) -> bool {
         self.open_mode
     }
@@ -170,10 +181,7 @@ impl Authority {
         let keeper = match self.identify(&req.person) {
             Some(k) => k,
             None => {
-                return AuthResult::denied(format!(
-                    "unknown identity: {}",
-                    req.person.display()
-                ));
+                return AuthResult::denied(format!("unknown identity: {}", req.person.display()));
             }
         };
 
@@ -232,7 +240,10 @@ impl Authority {
             }
         }
 
-        AuthResult::denied_keeper(keeper_name, format!("no matching permission for skill={skill}"))
+        AuthResult::denied_keeper(
+            keeper_name,
+            format!("no matching permission for skill={skill}"),
+        )
     }
 }
 
@@ -270,6 +281,19 @@ skills = ["docker:inspect_*"]
     #[test]
     fn test_empty_authority() {
         let auth = Authority::empty();
+        assert!(!auth.is_open_mode());
+
+        let result = auth.authorize(&AuthRequest {
+            person: PersonId::Egregore("@unknown.ed25519".to_string()),
+            place: "anywhere".to_string(),
+            skill: "anything".to_string(),
+        });
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn test_insecure_open_authority() {
+        let auth = Authority::insecure_open();
         assert!(auth.is_open_mode());
 
         let result = auth.authorize(&AuthRequest {
@@ -278,6 +302,22 @@ skills = ["docker:inspect_*"]
             skill: "anything".to_string(),
         });
         assert!(result.allowed);
+    }
+
+    #[test]
+    fn test_load_missing_authority_is_deny_all() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("authority.toml");
+
+        let auth = Authority::load(&path).unwrap();
+        assert!(!auth.is_open_mode());
+
+        let result = auth.authorize(&AuthRequest {
+            person: PersonId::Egregore("@unknown.ed25519".to_string()),
+            place: "egregore:local".to_string(),
+            skill: "*".to_string(),
+        });
+        assert!(!result.allowed);
     }
 
     #[test]

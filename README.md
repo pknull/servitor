@@ -71,13 +71,19 @@ servitor info
 ### Execute a task directly
 
 ```bash
-servitor exec "List files in ~/Documents"
+servitor exec --insecure "List files in ~/Documents"
 ```
 
 ### Run as daemon
 
 ```bash
 servitor run
+```
+
+`servitor run` and `servitor run --hook` now require `~/.servitor/authority.toml` by default. For local development only, you can opt out explicitly:
+
+```bash
+servitor run --insecure
 ```
 
 ### Run in hook mode (egregore integration)
@@ -116,6 +122,18 @@ scope.block = ["execute:/etc/*", "execute:rm *"]
 - Sandboxed sidecar deployment guide: [docs/deployment/containerization.md](docs/deployment/containerization.md)
 - Example compose stack: [examples/containerized/docker-compose.yml](examples/containerized/docker-compose.yml)
 - Example systemd units: [examples/systemd/](examples/systemd/)
+
+## Authority
+
+Servitor is fail-closed by default. If `~/.servitor/authority.toml` is missing, daemon and hook modes refuse to start and no work is executed until you define keepers and permissions.
+
+Use `authority.example.toml` as the starting point:
+
+```bash
+cp authority.example.toml ~/.servitor/authority.toml
+```
+
+`--insecure` preserves the old open behavior, but it is intended for local development only. Daemon and hook modes require authority unless you opt out with `--insecure`. Local `servitor exec` runs authorize as the servitor's own egregore identity when authority is present.
 
 ## Message Types
 
