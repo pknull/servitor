@@ -1,0 +1,21 @@
+[Unit]
+Description=Servitor shell MCP sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mcp-shell
+ExecStart=/usr/local/bin/mcp-shell-server --bind 127.0.0.1:3001
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/workspace
+BindPaths=/srv/workspace
+
+[Install]
+WantedBy=multi-user.target
