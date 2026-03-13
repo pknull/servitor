@@ -3,10 +3,12 @@
 # Defines keepers and their permissions for this Servitor.
 # Place this file at: ~/.servitor/authority.toml
 #
-# If no authority.toml exists, Servitor runs in "open mode" — accepting
-# tasks from any source with no restrictions. Use this for development.
+# If no authority.toml exists, Servitor refuses to execute work by default.
+# Copy this file into place and define keepers/permissions before running
+# daemon or hook mode.
 #
-# In production, define keepers and permissions to control access.
+# For local development only, you can opt into open mode with:
+#   servitor run --insecure
 
 # ==============================================================================
 # KEEPERS

@@ -200,6 +200,7 @@ mod tests {
             timeout_secs: Some(60),
             author: None,
             keeper: None,
+            scope_override: None,
         }
     }
 
