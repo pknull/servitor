@@ -152,7 +152,7 @@ impl<'a> AgentExecutor<'a> {
             // Execute each tool call
             let mut tool_results = Vec::new();
             for (tool_id, tool_name, arguments) in tool_uses {
-                let result = self.execute_tool(tool_name, arguments).await;
+                let result = self.execute_tool(task, tool_name, arguments).await;
                 tool_results.push(match result {
                     Ok(output) => {
                         ContentBlock::tool_result(tool_id, output.text_content(), output.is_error)
@@ -170,6 +170,7 @@ impl<'a> AgentExecutor<'a> {
     /// Execute a single tool call.
     async fn execute_tool(
         &self,
+        task: &Task,
         prefixed_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<crate::mcp::ToolCallResult> {
@@ -196,7 +197,14 @@ impl<'a> AgentExecutor<'a> {
         }
 
         // Check scope enforcement (existing allow/block patterns)
-        self.scope_enforcer.check(mcp_name, tool_name, arguments)?;
+        self.scope_enforcer
+            .check(mcp_name, tool_name, arguments, task.scope_override.as_ref())
+            .map_err(|error| match error {
+                ServitorError::ScopeViolation { reason } => ServitorError::ScopeViolation {
+                    reason: format!("task '{}' scope violation: {}", task.hash, reason),
+                },
+                other => other,
+            })?;
 
         tracing::debug!(mcp = mcp_name, tool = tool_name, "executing tool");
 
