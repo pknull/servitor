@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use jsonschema::JSONSchema;
 use tokio::sync::RwLock;
 
 use crate::config::{Config, McpServerConfig};
@@ -15,7 +16,13 @@ use crate::mcp::stdio::StdioMcpClient;
 pub struct McpPool {
     clients: HashMap<String, Arc<RwLock<Box<dyn McpClient>>>>,
     /// All tools with prefixed names, mapped to their server.
-    tools: HashMap<String, (String, ToolDefinition)>,
+    tools: HashMap<String, RegisteredTool>,
+}
+
+struct RegisteredTool {
+    server_name: String,
+    definition: ToolDefinition,
+    validator: Option<JSONSchema>,
 }
 
 impl McpPool {
@@ -67,7 +74,15 @@ impl McpPool {
             let tools = client.list_tools().await?;
             for tool in tools {
                 let prefixed_name = tool.prefixed_name(name);
-                self.tools.insert(prefixed_name, (name.clone(), tool));
+                let validator = compile_validator(&tool)?;
+                self.tools.insert(
+                    prefixed_name,
+                    RegisteredTool {
+                        server_name: name.clone(),
+                        definition: tool,
+                        validator,
+                    },
+                );
             }
         }
 
@@ -84,7 +99,7 @@ impl McpPool {
     pub fn all_tools(&self) -> Vec<(&str, &ToolDefinition)> {
         self.tools
             .iter()
-            .map(|(prefixed, (_, tool))| (prefixed.as_str(), tool))
+            .map(|(prefixed, tool)| (prefixed.as_str(), &tool.definition))
             .collect()
     }
 
@@ -92,10 +107,10 @@ impl McpPool {
     pub fn tools_for_llm(&self) -> Vec<LlmTool> {
         self.tools
             .iter()
-            .map(|(prefixed_name, (_, tool))| LlmTool {
+            .map(|(prefixed_name, tool)| LlmTool {
                 name: prefixed_name.clone(),
-                description: tool.description.clone(),
-                input_schema: tool.input_schema.clone().unwrap_or_else(|| {
+                description: tool.definition.description.clone(),
+                input_schema: tool.definition.input_schema.clone().unwrap_or_else(|| {
                     serde_json::json!({
                         "type": "object",
                         "properties": {}
@@ -107,12 +122,12 @@ impl McpPool {
 
     /// Parse a prefixed tool name into (server_name, tool_name).
     pub fn parse_tool_name<'a>(&'a self, prefixed: &'a str) -> Option<(&'a str, &'a str)> {
-        if let Some((server_name, _)) = self.tools.get(prefixed) {
+        if let Some(tool) = self.tools.get(prefixed) {
             // Extract the original tool name by removing the prefix
-            let prefix_len = server_name.len() + 1; // server_name + underscore
+            let prefix_len = tool.server_name.len() + 1; // server_name + underscore
             if prefixed.len() > prefix_len {
                 let tool_name = &prefixed[prefix_len..];
-                return Some((server_name.as_str(), tool_name));
+                return Some((tool.server_name.as_str(), tool_name));
             }
         }
         None
@@ -124,17 +139,24 @@ impl McpPool {
         prefixed_name: &str,
         arguments: serde_json::Value,
     ) -> Result<crate::mcp::client::ToolCallResult> {
-        let (server_name, tool_name) =
-            self.parse_tool_name(prefixed_name)
-                .ok_or_else(|| ServitorError::Mcp {
-                    reason: format!("unknown tool: {}", prefixed_name),
-                })?;
+        let tool = self
+            .tools
+            .get(prefixed_name)
+            .ok_or_else(|| ServitorError::Mcp {
+                reason: format!("unknown tool: {}", prefixed_name),
+            })?;
+        let tool_name = tool
+            .definition
+            .name
+            .as_str();
+
+        validate_arguments(prefixed_name, tool, &arguments)?;
 
         let client =
             self.clients
-                .get(server_name)
+                .get(&tool.server_name)
                 .ok_or_else(|| ServitorError::McpServerNotFound {
-                    name: server_name.to_string(),
+                    name: tool.server_name.to_string(),
                 })?;
 
         let client = client.read().await;
@@ -169,4 +191,176 @@ pub struct LlmTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
+}
+
+fn compile_validator(tool: &ToolDefinition) -> Result<Option<JSONSchema>> {
+    let Some(schema) = tool.input_schema.as_ref() else {
+        return Ok(None);
+    };
+
+    JSONSchema::options()
+        .compile(schema)
+        .map(Some)
+        .map_err(|error| ServitorError::Mcp {
+            reason: format!("invalid input schema for tool '{}': {}", tool.name, error),
+        })
+}
+
+fn validate_arguments(
+    prefixed_name: &str,
+    tool: &RegisteredTool,
+    arguments: &serde_json::Value,
+) -> Result<()> {
+    let Some(validator) = tool.validator.as_ref() else {
+        return Ok(());
+    };
+
+    let details = match validator.validate(arguments) {
+        Ok(()) => return Ok(()),
+        Err(errors) => errors
+            .take(5)
+            .map(|error| {
+                let path = error.instance_path.to_string();
+                if path.is_empty() {
+                    error.to_string()
+                } else {
+                    format!("{}: {}", path, error)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    };
+
+    tracing::warn!(tool = prefixed_name, reason = %details, "rejected MCP tool call");
+    Err(ServitorError::McpValidation {
+        tool: prefixed_name.to_string(),
+        reason: details,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+
+    use crate::mcp::client::{InitializeResult, ServerCapabilities, ServerInfo, ToolCallResult};
+
+    struct FakeClient {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl McpClient for FakeClient {
+        async fn initialize(&mut self) -> Result<InitializeResult> {
+            Ok(InitializeResult {
+                protocol_version: "2024-11-05".to_string(),
+                server_info: ServerInfo {
+                    name: "fake".to_string(),
+                    version: "1.0.0".to_string(),
+                },
+                capabilities: ServerCapabilities::default(),
+            })
+        }
+
+        async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
+            Ok(vec![])
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _arguments: serde_json::Value,
+        ) -> Result<ToolCallResult> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolCallResult::text("ok"))
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "fake"
+        }
+    }
+
+    fn pool_with_tool(schema: serde_json::Value) -> (McpPool, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut pool = McpPool::new();
+        pool.clients.insert(
+            "shell".to_string(),
+            Arc::new(RwLock::new(Box::new(FakeClient {
+                calls: calls.clone(),
+            }))),
+        );
+
+        let definition = ToolDefinition {
+            name: "execute".to_string(),
+            description: Some("Execute a shell command".to_string()),
+            input_schema: Some(schema),
+        };
+        let validator = compile_validator(&definition).unwrap();
+        pool.tools.insert(
+            "shell_execute".to_string(),
+            RegisteredTool {
+                server_name: "shell".to_string(),
+                definition,
+                validator,
+            },
+        );
+
+        (pool, calls)
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_arguments_before_transport_call() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string" }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        });
+        let (pool, calls) = pool_with_tool(schema);
+
+        let error = pool
+            .call_tool("shell_execute", serde_json::json!({ "command": 42 }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(error, ServitorError::McpValidation { .. }));
+        assert!(error.to_string().contains("command"));
+    }
+
+    #[tokio::test]
+    async fn allows_valid_arguments_through_to_transport() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string" }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        });
+        let (pool, calls) = pool_with_tool(schema);
+
+        let result = pool
+            .call_tool(
+                "shell_execute",
+                serde_json::json!({ "command": "ls /tmp" }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.text_content(), "ok");
+    }
 }
