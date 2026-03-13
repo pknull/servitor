@@ -20,6 +20,9 @@ pub enum ServitorError {
     #[error("MCP server '{name}' not found")]
     McpServerNotFound { name: String },
 
+    #[error("Invalid arguments for MCP tool '{tool}': {reason}")]
+    McpValidation { tool: String, reason: String },
+
     #[error("Scope violation: {reason}")]
     ScopeViolation { reason: String },
 
