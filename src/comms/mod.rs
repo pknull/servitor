@@ -1,7 +1,9 @@
 //! Communication transport layer.
 //!
-//! Provides pluggable transports (Discord, HTTP, etc.) for receiving
-//! messages and sending responses.
+//! Provides pluggable transports for receiving messages and sending responses.
+//!
+//! The current runtime wires Discord transport only. Some additional transport
+//! schemas remain in config as reserved future surfaces.
 
 pub mod discord;
 

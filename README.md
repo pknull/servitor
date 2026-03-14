@@ -1,24 +1,68 @@
 # Servitor
 
-Egregore network task executor using MCP servers as capabilities.
+Servitor is an egregore-connected task executor that owns MCP clients directly,
+uses an LLM for planning and execution, and publishes signed attestations back
+to the feed.
 
-Servitor implements the **ZeroClaw pattern**: it owns MCP clients directly, uses an LLM for reasoning (emitting `tool_use` blocks), and publishes signed attestations back to egregore.
+It implements the ZeroClaw pattern: communication arrives over egregore, hook
+stdin, cron, watcher events, or Discord; execution happens through scoped MCP
+tools; results and audit events are published as signed messages.
 
-**Name etymology**: Occult term for a created thoughtform that performs specific tasks — "like software that does one thing well."
+## Quick Start
+
+Build and install:
+
+```bash
+cargo build --release
+cp target/release/servitor ~/.local/bin/
+```
+
+Create local config and authority files:
+
+```bash
+cp servitor.example.toml servitor.toml
+servitor init
+cp authority.example.toml ~/.servitor/authority.toml
+```
+
+Then either execute directly:
+
+```bash
+servitor exec "List files in ~/Documents"
+```
+
+or run the daemon:
+
+```bash
+servitor run
+```
+
+Daemon and hook modes refuse work unless `authority.toml` is present or
+`--insecure` is set explicitly for local development. Local `servitor exec`
+runs authorize as the servitor's own egregore identity when authority is
+configured.
+
+## Documentation
+
+- Docs index: [docs/README.md](docs/README.md)
+- Protocol and message lifecycle: [docs/protocol.md](docs/protocol.md)
+- Configuration reference: [docs/configuration.md](docs/configuration.md)
+- Operational guidance: [docs/operations.md](docs/operations.md)
+- HTTP and OpenAPI boundary: [docs/api/README.md](docs/api/README.md)
 
 ## Architecture
 
-```
+```text
 ┌─────────────────┐     ┌─────────────────────────────────────────────┐
 │    Egregore     │────▶│                  SERVITOR                    │
 │   (messages)    │◀────│  ┌─────────────┐  ┌─────────────────────┐  │
-│                 │     │  │ Agent Loop  │  │   MCP Client Pool   │  │
+│                 │     │  │ Task State  │  │   MCP Client Pool   │  │
 │  - task         │     │  │ (reasoning) │──│  ┌─────┐ ┌─────┐   │  │
-│  - task_claim   │     │  └─────────────┘  │  │stdio│ │http │   │  │
-│  - task_result  │     │                    │  └──┬──┘ └──┬──┘   │  │
-│  - profile      │     │                    └─────┼───────┼──────┘  │
-└─────────────────┘     │   ┌──────────────────────┴───────┴──────┐  │
-                        │   │          Scope Enforcer             │  │
+│  - task_offer   │     │  └─────────────┘  │  │stdio│ │http │   │  │
+│  - task_assign  │     │                    │  └──┬──┘ └──┬──┘   │  │
+│  - task_result  │     │                    └─────┼───────┼──────┘  │
+│  - profile      │     │   ┌──────────────────────┴───────┴──────┐  │
+└─────────────────┘     │   │          Scope Enforcer             │  │
                         │   │   (allowlist/blocklist per MCP)     │  │
                         │   └─────────────────────────────────────┘  │
                         └─────────────────────────────────────────────┘
@@ -28,94 +72,63 @@ Servitor implements the **ZeroClaw pattern**: it owns MCP clients directly, uses
 
 | Plane | Purpose | Examples |
 |-------|---------|----------|
-| **Communication** | Message transport | Egregore, Discord, TUI |
-| **Tool** | Execution capabilities | MCP servers (Docker, Shell) |
-| **LLM** | Inference/reasoning | Claude, Ollama, OpenAI |
+| **Communication** | Task and operator interaction | Egregore, Discord, hook stdin |
+| **Tool** | Execution capabilities | MCP servers over stdio or HTTP |
+| **LLM** | Planning and reasoning | Anthropic, OpenAI-compatible, Codex, Claude Code |
 
-## Installation
+## Operating Modes
 
-```bash
-cargo build --release
-cp target/release/servitor ~/.local/bin/
-```
+| Mode | Command | Purpose |
+|------|---------|---------|
+| Direct exec | `servitor exec ...` | Local one-shot execution |
+| Planning only | `servitor exec --dry-run ...` | Produce a local validated `task_plan` and stop |
+| Plan-first exec | `servitor exec --plan-first ...` | Publish a `task_plan`, then execute |
+| Daemon | `servitor run` | SSE subscription, cron, watchers, Discord |
+| Hook | `servitor run --hook` | Read one egregore `task` envelope from stdin |
 
-## Configuration
+## Protocol Overview
 
-Copy the example configuration:
+Servitor currently uses two related task paths:
 
-```bash
-cp servitor.example.toml servitor.toml
-```
+1. Direct, hook, cron, and watcher execution:
+   `task -> task_claim (advisory) -> optional task_plan -> task_result`
+2. SSE-coordinated network execution:
+   `task -> task_offer -> task_assign -> task_started -> task_status/task_failed -> task_result`
 
-Edit `servitor.toml` to configure:
+Additional audit and observability messages:
 
-- LLM provider (Anthropic, OpenAI, Ollama)
-- MCP servers (tools/capabilities)
-- Scope enforcement (what tools can access)
-- Egregore network connection
+- `servitor_profile`: capability advertisement and heartbeat
+- `task_offer_withdraw`: offer TTL expired before assignment
+- `task_ping`: request a status update from an active execution
+- `auth_denied`: published when offer or assignment authorization fails
+- `trace_span`: opt-in distributed execution tracing
+- `notification`: outbound notification payloads
 
-## Usage
+See [docs/protocol.md](docs/protocol.md) for the lifecycle, auth gates, and
+message semantics.
 
-### Initialize identity
+## Configuration Highlights
 
-```bash
-servitor init
-```
+Key config surfaces live in [servitor.example.toml](servitor.example.toml):
 
-### Show configuration
+- `[llm]`: provider, model, credentials, and provider-specific auth
+- `[mcp.*]`: tool transports, timeouts, and scope enforcement
+- `[task]`: offer, assignment, start, ETA, and ping timeouts
+- `[agent]`: execution budget plus opt-in `trace_span` publishing
+- `[heartbeat]`: profile cadence plus opt-in runtime monitoring fields
+- `[egregore]`: egregore endpoint and SSE subscription
+- `[comms.discord]`: live inbound operator transport
 
-```bash
-servitor info
-```
+The `[egregore.group]` and `[comms.http]` sections are documented as reserved
+configuration on this branch. They are parsed by the config schema but are not
+wired into the current runtime.
 
-### Execute a task directly
+## Scope Enforcement
 
-```bash
-servitor exec --insecure "List files in ~/Documents"
-```
-
-### Run as daemon
-
-```bash
-servitor run
-```
-
-`servitor run` and `servitor run --hook` now require `~/.servitor/authority.toml` by default. For local development only, you can opt out explicitly:
-
-```bash
-servitor run --insecure
-```
-
-### Run in hook mode (egregore integration)
-
-Configure as an egregore hook in `config.toml`:
-
-```toml
-[[hooks]]
-name = "servitor"
-on_message = "/path/to/servitor"
-args = ["run", "--hook"]
-timeout_secs = 300
-idempotent = true
-```
-
-Then messages with type `task` will be routed to Servitor.
-
-## MCP Server Configuration
-
-```toml
-[mcp.shell]
-transport = "stdio"
-command = "mcp-server-shell"
-scope.allow = ["execute:~/scripts/*"]
-scope.block = ["execute:/etc/*", "execute:rm *"]
-```
-
-### Scope Enforcement
-
-- **Block patterns take precedence** over allow patterns
-- Patterns support glob syntax (`*`, `**`, `?`)
-- Scoped patterns: `execute:/etc/*` matches tool name + argument
+- Block patterns take precedence over allow patterns
+- Patterns support glob syntax: `*`, `**`, `?`
+- Scoped patterns bind a tool name to an argument pattern, for example `execute:/etc/*`
+- Per-task `scope_override` can only further restrict access; it cannot widen a tool's configured scope
 
 ## Deployment
 
@@ -123,52 +136,29 @@ scope.block = ["execute:/etc/*", "execute:rm *"]
 - Example compose stack: [examples/containerized/docker-compose.yml](examples/containerized/docker-compose.yml)
 - Example systemd units: [examples/systemd/](examples/systemd/)
 
-## Authority
-
-Servitor is fail-closed by default. If `~/.servitor/authority.toml` is missing, daemon and hook modes refuse to start and no work is executed until you define keepers and permissions.
-
-Use `authority.example.toml` as the starting point:
-
-```bash
-cp authority.example.toml ~/.servitor/authority.toml
-```
-
-`--insecure` preserves the old open behavior, but it is intended for local development only. Daemon and hook modes require authority unless you opt out with `--insecure`. Local `servitor exec` runs authorize as the servitor's own egregore identity when authority is present.
-
-## Message Types
-
-| Type | Direction | Purpose |
-|------|-----------|---------|
-| `servitor_profile` | Out | Capability advertisement |
-| `task` | In | Task request |
-| `task_claim` | Out | Claim task before execution |
-| `task_result` | Out | Signed attestation of result |
-
-Detailed `trace_span` publishing is opt-in. Set `agent.publish_trace_spans = true` to emit root and MCP tool spans with shared trace IDs.
-
-By default, `servitor_profile` messages only publish capability and scope data. Set `heartbeat.include_runtime_monitoring = true` to also include uptime, MCP server health, queue depth, and task counters in profile heartbeats.
-
 ## LLM Providers
-
-All providers compiled in, runtime selection via config:
 
 | Provider | Config | Notes |
 |----------|--------|-------|
-| `anthropic` | `api_key_env` | Claude models |
-| `openai` | `api_key_env` | GPT models |
-| `ollama` | `base_url` | Local inference |
-| `openai-compat` | `base_url`, `api_key_env` | Any compatible endpoint |
+| `anthropic` | `api_key_env` | Claude API models |
+| `openai` | `api_key_env` | OpenAI API via OpenAI-compatible client |
+| `ollama` | `base_url` optional | Local inference via OpenAI-compatible client |
+| `openai-compat` | `base_url`, optional `api_key_env` | Any compatible endpoint |
+| `codex` | `token_file`, optional `oauth_profile` | OAuth-backed Codex provider |
+| `claude-code` | none required | Uses local Claude Code authentication |
+
+## HTTP and OpenAPI
+
+Servitor does not expose a stable inbound HTTP control API on this branch, so
+it does not currently ship its own OpenAPI document. It talks to egregore's
+HTTP API and to MCP servers over HTTP as a client. See
+[docs/api/README.md](docs/api/README.md) for the exact boundary.
 
 ## Development
 
 ```bash
-# Run tests
 cargo test
-
-# Check compilation
 cargo check
-
-# Build release
 cargo build --release
 ```
 
