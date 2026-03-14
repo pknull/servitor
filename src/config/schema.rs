@@ -77,7 +77,9 @@ pub struct EgregoreConfig {
     #[serde(default)]
     pub subscribe: bool,
 
-    /// Consumer group configuration.
+    /// Reserved consumer group configuration.
+    ///
+    /// Parsed from config but not yet wired into the runtime on this branch.
     #[serde(default)]
     pub group: Option<ConsumerGroupConfig>,
 }
@@ -96,7 +98,7 @@ fn default_egregore_url() -> String {
     "http://127.0.0.1:7654".to_string()
 }
 
-/// Consumer group for feed partitioning.
+/// Reserved consumer group for future feed partitioning.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConsumerGroupConfig {
     /// Group name.
@@ -114,7 +116,7 @@ fn default_group_heartbeat() -> u64 {
 /// LLM provider configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
-    /// Provider type: "anthropic", "openai", "ollama", "openai-compat", "codex".
+    /// Provider type: "anthropic", "openai", "ollama", "openai-compat", "codex", "claude-code".
     pub provider: String,
 
     /// Model identifier.
@@ -378,7 +380,9 @@ pub struct CommsConfig {
     #[serde(default)]
     pub discord: Option<DiscordConfig>,
 
-    /// HTTP webhook transport.
+    /// Reserved HTTP webhook transport.
+    ///
+    /// Parsed from config but not instantiated by the current runtime.
     #[serde(default)]
     pub http: Option<HttpCommsConfig>,
 }
@@ -406,7 +410,7 @@ fn default_true() -> bool {
     true
 }
 
-/// HTTP webhook transport configuration.
+/// Reserved HTTP webhook transport configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpCommsConfig {
     /// Bind address.

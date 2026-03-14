@@ -10,18 +10,16 @@ data_dir = "~/.servitor"
 api_url = "http://127.0.0.1:7654"
 # Enable SSE subscription in daemon mode (real-time task feed)
 subscribe = false
-# Security: Only accept tasks from these authors (empty = accept all)
-# author_allowlist = [
-#     "@7JIN8TA3bZ1l786oQ6lPN3l94KEFFH0UlVz9lqTr5+E=.ed25519",
-# ]
+# Task authorization is controlled by ~/.servitor/authority.toml, not by an
+# inline allowlist in servitor.toml.
 
-# Optional: Consumer group for load distribution (deferred to v2)
+# Reserved: parsed by the config schema but not yet enforced by the runtime.
 # [egregore.group]
-# name = "servitors"
-# heartbeat_interval_secs = 10
+# name = "workers"
+# heartbeat_interval_secs = 5
 
 [llm]
-# Provider: "anthropic", "openai", "ollama", "openai-compat"
+# Provider: "anthropic", "openai", "ollama", "openai-compat", "codex", "claude-code"
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
@@ -42,6 +40,18 @@ api_key_env = "ANTHROPIC_API_KEY"
 # model = "anthropic/claude-3.5-sonnet"
 # api_key_env = "OPENROUTER_API_KEY"
 
+# Alternative: Codex OAuth provider
+# [llm]
+# provider = "codex"
+# model = "gpt-5-codex"
+# token_file = "~/.codex/auth.json"
+# oauth_profile = "openai-codex:default"
+
+# Alternative: Claude Code provider
+# [llm]
+# provider = "claude-code"
+# model = "claude-sonnet-4-20250514"
+
 [agent]
 # Maximum LLM turns per task
 max_turns = 50
@@ -51,6 +61,20 @@ timeout_secs = 300
 # system_prompt = "You are a helpful assistant."
 # Optional: publish trace_span messages for task and tool execution
 publish_trace_spans = false
+
+[task]
+# Offer time-to-live before the servitor withdraws an unassigned offer
+offer_ttl_secs = 300
+# How long a requestor has to react before an offer window is considered stale
+offer_timeout_secs = 60
+# How long an assignment remains valid before it is considered stale
+assign_timeout_secs = 300
+# How long the servitor has to acknowledge start
+start_timeout_secs = 30
+# Multiplier applied to ETA before treating execution as overrun
+eta_buffer_multiplier = 1.5
+# How long to wait after a ping before treating a task as unresponsive
+ping_timeout_secs = 30
 
 [heartbeat]
 # Heartbeat interval for capability advertisement
@@ -95,10 +119,9 @@ scope.block = ["container_lifecycle:traefik", "container_lifecycle:portainer"]
 # token_env = "DISCORD_BOT_TOKEN"           # Bot token from environment
 # guild_allowlist = ["123456789"]           # Guilds to respond in (empty = all)
 # require_mention = true                     # Only respond to @mentions
-# user_allowlist = ["987654321"]            # Users allowed to interact (empty = all)
 # notification_channel = "channel-id"       # Where to send notifications
 
-# HTTP webhook transport
+# Reserved: parsed by the config schema but not yet instantiated by the runtime
 # [comms.http]
 # bind = "127.0.0.1"
 # port = 8765
