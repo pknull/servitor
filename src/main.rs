@@ -223,7 +223,7 @@ async fn run_hook_mode(config: &Config, insecure: bool) -> Result<()> {
         }
     };
 
-    // Check authority (replaces author_allowlist check)
+    // Check keeper authorization for this inbound task.
     let person = PersonId::from_egregore(&message.author.0);
     let auth_result = authority.authorize(&AuthRequest {
         person: person.clone(),
