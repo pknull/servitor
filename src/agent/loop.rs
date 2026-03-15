@@ -480,6 +480,7 @@ impl<'a> AgentExecutor<'a> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_tool_trace_span(
         &self,
         trace_id: &str,

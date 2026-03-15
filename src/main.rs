@@ -849,6 +849,7 @@ async fn maybe_accept_assignment(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_assigned_task(
     assigned: AssignmentDecision,
     provider: &dyn servitor::agent::provider::Provider,
@@ -1268,7 +1269,7 @@ async fn build_profile(
         profile.mcp_servers = mcp_pool.server_statuses().await;
         profile.load = runtime_stats.load();
         profile.stats = runtime_stats.stats();
-        profile.last_task_ts = runtime_stats.last_task_ts.clone();
+        profile.last_task_ts = runtime_stats.last_task_ts;
     }
 
     // Add capabilities from MCP servers
