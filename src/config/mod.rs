@@ -17,6 +17,7 @@ impl Config {
     }
 
     /// Parse configuration from a TOML string.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(content: &str) -> Result<Self> {
         let config: Config = toml::from_str(content).map_err(|e| ServitorError::Config {
             reason: format!("failed to parse config: {}", e),
