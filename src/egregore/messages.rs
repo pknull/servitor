@@ -655,19 +655,14 @@ pub struct Notification {
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NotificationPriority {
     Low,
+    #[default]
     Normal,
     High,
     Urgent,
-}
-
-impl Default for NotificationPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Published trace span for task execution and MCP tool activity.
