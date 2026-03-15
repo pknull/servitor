@@ -1108,15 +1108,12 @@ impl Provider for CodexOAuthProvider {
                                 }
 
                                 // Check status
-                                match response["status"].as_str() {
-                                    Some("incomplete") => {
-                                        if response["incomplete_details"]["reason"].as_str()
-                                            == Some("max_output_tokens")
-                                        {
-                                            stop_reason = StopReason::MaxTokens;
-                                        }
+                                if let Some("incomplete") = response["status"].as_str() {
+                                    if response["incomplete_details"]["reason"].as_str()
+                                        == Some("max_output_tokens")
+                                    {
+                                        stop_reason = StopReason::MaxTokens;
                                     }
-                                    _ => {}
                                 }
                             }
                             break;
