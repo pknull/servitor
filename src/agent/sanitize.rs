@@ -231,14 +231,14 @@ mod tests {
         let args = json!({
             "count": 42,
             "enabled": true,
-            "ratio": 3.14
+            "ratio": 1.5
         });
         let result = sanitize_arguments(&args);
         let parsed: Value = serde_json::from_str(&result).unwrap();
 
         assert_eq!(parsed["count"], 42);
         assert_eq!(parsed["enabled"], true);
-        assert_eq!(parsed["ratio"], 3.14);
+        assert_eq!(parsed["ratio"], 1.5);
     }
 
     #[test]
