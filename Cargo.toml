@@ -65,6 +65,10 @@ uuid = { version = "1", features = ["v4"] }
 dirs = "5"
 shellexpand = "3"
 
+# Metrics (Prometheus)
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"

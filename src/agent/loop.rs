@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::agent::context::ConversationContext;
 use crate::agent::provider::{ContentBlock, Provider, StopReason};
+use crate::agent::sanitize::sanitize_arguments;
 use crate::authority::Authority;
 use crate::config::AgentConfig;
 use crate::egregore::messages::{
@@ -15,6 +16,7 @@ use crate::egregore::EgregoreClient;
 use crate::error::{Result, ServitorError};
 use crate::identity::Identity;
 use crate::mcp::{LlmTool, McpPool};
+use crate::metrics::{self, Timer, ToolCallStatus};
 use crate::scope::ScopeEnforcer;
 
 /// Agent executor — runs the tool_use loop for a task.
@@ -146,11 +148,13 @@ impl<'a> AgentExecutor<'a> {
                 return Ok(result);
             }
 
-            // Call LLM
+            // Call LLM with timing
+            let llm_timer = Timer::start();
             let response = self
                 .provider
                 .chat(&system, context.messages(), &tools)
                 .await?;
+            metrics::record_llm_latency(self.provider.name(), llm_timer.elapsed_secs());
 
             tracing::debug!(
                 turn = turn,
@@ -238,6 +242,7 @@ impl<'a> AgentExecutor<'a> {
                         &tool_span_id,
                         &mcp_name,
                         &bare_tool_name,
+                        arguments,
                         tool_span_started_at,
                         &result,
                     );
@@ -273,18 +278,39 @@ impl<'a> AgentExecutor<'a> {
             arguments,
             &self.mcp_pool.tools_for_llm(),
         ) {
-            if let ServitorError::Unauthorized { reason } = &error {
-                self.publish_assignment_denial(task, &skill, reason).await;
-            }
+            // Record metrics for validation failures
+            let status = match &error {
+                ServitorError::Unauthorized { .. } => {
+                    self.publish_assignment_denial(task, &skill, &error.to_string())
+                        .await;
+                    ToolCallStatus::Unauthorized
+                }
+                ServitorError::ScopeViolation { .. } => ToolCallStatus::ScopeViolation,
+                _ => ToolCallStatus::Error,
+            };
+            metrics::record_tool_call(tool_name, mcp_name, status);
             return Err(error);
         }
 
         tracing::debug!(mcp = mcp_name, tool = tool_name, "executing tool");
 
-        // Execute the tool
-        self.mcp_pool
+        // Execute the tool with timing
+        let timer = Timer::start();
+        let result = self
+            .mcp_pool
             .call_tool(prefixed_name, arguments.clone())
-            .await
+            .await;
+        let duration = timer.elapsed_secs();
+
+        // Record metrics
+        let status = match &result {
+            Ok(output) if !output.is_error => ToolCallStatus::Success,
+            _ => ToolCallStatus::Error,
+        };
+        metrics::record_tool_call(tool_name, mcp_name, status);
+        metrics::record_tool_call_duration(tool_name, duration);
+
+        result
     }
 
     async fn publish_assignment_denial(&self, task: &Task, skill: &str, reason: &str) {
@@ -489,6 +515,7 @@ impl<'a> AgentExecutor<'a> {
         span_id: &str,
         mcp_name: &str,
         tool_name: &str,
+        arguments: &serde_json::Value,
         start_ts: DateTime<Utc>,
         result: &Result<crate::mcp::ToolCallResult>,
     ) -> TraceSpan {
@@ -512,6 +539,11 @@ impl<'a> AgentExecutor<'a> {
         span.attributes.insert(
             "tool_name".to_string(),
             serde_json::Value::String(tool_name.to_string()),
+        );
+        // Add sanitized arguments for forensic completeness (redacts sensitive fields)
+        span.attributes.insert(
+            "arguments".to_string(),
+            serde_json::Value::String(sanitize_arguments(arguments)),
         );
         match result {
             Ok(output) => {

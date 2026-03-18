@@ -30,6 +30,7 @@ Egregore ──► Servitor ──► MCP Servers (tools)
 | identity | `src/identity/` | Ed25519 keys, signing |
 | egregore | `src/egregore/` | Hook, publish, context fetching |
 | mcp | `src/mcp/` | McpClient trait, pool |
+| metrics | `src/metrics.rs` | Prometheus metrics for observability |
 | scope | `src/scope/` | Allow/block policy enforcement |
 | agent | `src/agent/` | LLM providers, tool_use loop |
 | events | `src/events/` | EventRouter, CronSource, SseSource |
@@ -42,6 +43,7 @@ Egregore ──► Servitor ──► MCP Servers (tools)
 - `src/agent/loop.rs` — Core execution loop (tool_use → execute → feed_back)
 - `src/agent/provider.rs` — LLM abstraction (Anthropic, OpenAI-compat)
 - `src/mcp/pool.rs` — MCP client pool with tool introspection
+- `src/metrics.rs` — Prometheus metrics (counters, histograms, gauges)
 - `src/scope/policy.rs` — Scope enforcement logic
 - `src/egregore/context.rs` — Feed query, thread fetching
 - `src/events/mod.rs` — EventSource trait, EventRouter
@@ -52,7 +54,7 @@ Egregore ──► Servitor ──► MCP Servers (tools)
 
 ```bash
 cargo build --release      # Build
-cargo test                 # Run tests (70 total)
+cargo test                 # Run tests (129 total)
 ./target/release/servitor init    # Generate identity
 ./target/release/servitor info    # Show config + authority status
 ./target/release/servitor exec "task"  # Execute directly
@@ -68,6 +70,7 @@ Copy `servitor.example.toml` to `servitor.toml`. Key sections:
 - `[mcp.*]` — MCP server definitions with scope.allow/scope.block
 - `[agent]` — max_turns, timeout_secs
 - `[egregore]` — api_url, subscribe (SSE)
+- `[metrics]` — enabled, bind address for Prometheus endpoint
 - `[[schedule]]` — Cron tasks (name, cron, task, publish)
 
 ## Authority

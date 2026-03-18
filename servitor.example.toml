@@ -82,6 +82,12 @@ interval_secs = 10
 # Optional: include runtime monitoring fields like uptime, MCP health, and task counters
 include_runtime_monitoring = false
 
+[metrics]
+# Enable Prometheus metrics endpoint
+enabled = false
+# Bind address for metrics HTTP server
+bind = "127.0.0.1:9091"
+
 # MCP Servers
 # Each server provides tool capabilities to the Servitor.
 

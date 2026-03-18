@@ -176,6 +176,9 @@ pub struct Usage {
 /// LLM Provider trait.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Get provider name for metrics.
+    fn name(&self) -> &str;
+
     /// Get provider capabilities.
     fn capabilities(&self) -> ProviderCapabilities;
 
@@ -233,6 +236,10 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             supports_tools: true,
@@ -399,6 +406,10 @@ impl OpenAiCompatProvider {
 
 #[async_trait]
 impl Provider for OpenAiCompatProvider {
+    fn name(&self) -> &str {
+        "openai-compat"
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             supports_tools: true,
@@ -867,6 +878,10 @@ impl CodexOAuthProvider {
 
 #[async_trait]
 impl Provider for CodexOAuthProvider {
+    fn name(&self) -> &str {
+        "codex"
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             supports_tools: true,
@@ -1169,6 +1184,10 @@ impl ClaudeCodeProvider {
 
 #[async_trait]
 impl Provider for ClaudeCodeProvider {
+    fn name(&self) -> &str {
+        "claude-code"
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             supports_tools: true,
