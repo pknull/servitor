@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use jsonschema::JSONSchema;
 use tokio::sync::RwLock;
@@ -9,6 +10,7 @@ use tokio::sync::RwLock;
 use crate::config::{Config, McpServerConfig};
 use crate::egregore::{McpServerHealth, McpServerStatus};
 use crate::error::{Result, ServitorError};
+use crate::mcp::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use crate::mcp::client::{McpClient, ToolDefinition};
 use crate::mcp::http::HttpMcpClient;
 use crate::mcp::stdio::StdioMcpClient;
@@ -17,6 +19,8 @@ use crate::mcp::stdio::StdioMcpClient;
 pub struct McpPool {
     clients: HashMap<String, Arc<RwLock<Box<dyn McpClient>>>>,
     server_runtime: HashMap<String, McpServerRuntime>,
+    /// Circuit breakers per server.
+    circuit_breakers: HashMap<String, RwLock<CircuitBreaker>>,
     /// All tools with prefixed names, mapped to their server.
     tools: HashMap<String, RegisteredTool>,
 }
@@ -39,6 +43,7 @@ impl McpPool {
         Self {
             clients: HashMap::new(),
             server_runtime: HashMap::new(),
+            circuit_breakers: HashMap::new(),
             tools: HashMap::new(),
         }
     }
@@ -75,6 +80,16 @@ impl McpPool {
                 initialized: false,
             },
         );
+
+        // Add circuit breaker for this server
+        let cb_config = CircuitBreakerConfig {
+            failure_threshold: 3,
+            recovery_timeout: Duration::from_secs(30),
+            success_threshold: 1,
+        };
+        self.circuit_breakers
+            .insert(name.to_string(), RwLock::new(CircuitBreaker::new(cb_config)));
+
         Ok(())
     }
 
@@ -160,6 +175,9 @@ impl McpPool {
     }
 
     /// Call a tool by its prefixed name.
+    ///
+    /// Respects circuit breaker state — rejects calls if the server's
+    /// circuit is open (too many recent failures).
     pub async fn call_tool(
         &self,
         prefixed_name: &str,
@@ -172,17 +190,47 @@ impl McpPool {
                 reason: format!("unknown tool: {}", prefixed_name),
             })?;
         let tool_name = tool.definition.name.as_str();
+        let server_name = &tool.server_name;
+
+        // Check circuit breaker
+        if let Some(cb) = self.circuit_breakers.get(server_name) {
+            let mut cb = cb.write().await;
+            if !cb.should_allow() {
+                tracing::warn!(
+                    server = %server_name,
+                    tool = %prefixed_name,
+                    "circuit breaker open, rejecting call"
+                );
+                return Err(ServitorError::Mcp {
+                    reason: format!(
+                        "circuit breaker open for server '{}' — too many failures",
+                        server_name
+                    ),
+                });
+            }
+        }
 
         validate_arguments(prefixed_name, tool, &arguments)?;
 
-        let client = self.clients.get(&tool.server_name).ok_or_else(|| {
+        let client = self.clients.get(server_name).ok_or_else(|| {
             ServitorError::McpServerNotFound {
-                name: tool.server_name.to_string(),
+                name: server_name.to_string(),
             }
         })?;
 
         let client = client.read().await;
-        client.call_tool(tool_name, arguments).await
+        let result = client.call_tool(tool_name, arguments).await;
+
+        // Record success/failure in circuit breaker
+        if let Some(cb) = self.circuit_breakers.get(server_name) {
+            let mut cb = cb.write().await;
+            match &result {
+                Ok(_) => cb.record_success(),
+                Err(_) => cb.record_failure(),
+            }
+        }
+
+        result
     }
 
     /// Get capability classes (server names).
@@ -191,6 +239,8 @@ impl McpPool {
     }
 
     /// Get a health snapshot for each configured MCP server.
+    ///
+    /// Considers both ping results and circuit breaker state.
     pub async fn server_statuses(&self) -> Vec<McpServerStatus> {
         let mut statuses = Vec::with_capacity(self.clients.len());
 
@@ -199,8 +249,19 @@ impl McpPool {
                 continue;
             };
 
+            // Check circuit breaker state first
+            let circuit_open = if let Some(cb) = self.circuit_breakers.get(name) {
+                let cb = cb.read().await;
+                cb.state() == CircuitState::Open
+            } else {
+                false
+            };
+
             let status = if !runtime.initialized {
                 McpServerHealth::Unavailable
+            } else if circuit_open {
+                // Circuit is open — report as degraded without pinging
+                McpServerHealth::Degraded
             } else {
                 let client = client.read().await;
                 match client.ping().await {
@@ -221,6 +282,60 @@ impl McpPool {
 
         statuses.sort_by(|left, right| left.name.cmp(&right.name));
         statuses
+    }
+
+    /// Run health checks on all servers and update circuit breakers.
+    ///
+    /// Call this periodically to proactively detect server failures.
+    pub async fn health_check(&self) {
+        for (name, client) in &self.clients {
+            let Some(runtime) = self.server_runtime.get(name) else {
+                continue;
+            };
+
+            if !runtime.initialized {
+                continue;
+            }
+
+            let client = client.read().await;
+            let result = client.ping().await;
+
+            if let Some(cb) = self.circuit_breakers.get(name) {
+                let mut cb = cb.write().await;
+                match result {
+                    Ok(()) => {
+                        // Only record success if circuit was half-open (testing recovery)
+                        if cb.state() == CircuitState::HalfOpen {
+                            cb.record_success();
+                            tracing::info!(server = %name, "MCP server recovered");
+                        }
+                    }
+                    Err(error) => {
+                        cb.record_failure();
+                        tracing::warn!(server = %name, error = %error, "MCP server health check failed");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get circuit breaker state for a server.
+    pub async fn circuit_state(&self, server_name: &str) -> Option<CircuitState> {
+        if let Some(cb) = self.circuit_breakers.get(server_name) {
+            let cb = cb.read().await;
+            Some(cb.state())
+        } else {
+            None
+        }
+    }
+
+    /// Manually reset a server's circuit breaker.
+    pub async fn reset_circuit(&self, server_name: &str) {
+        if let Some(cb) = self.circuit_breakers.get(server_name) {
+            let mut cb = cb.write().await;
+            cb.reset();
+            tracing::info!(server = %server_name, "circuit breaker manually reset");
+        }
     }
 
     /// Shutdown all clients.
@@ -355,6 +470,12 @@ mod tests {
             }))),
         );
 
+        // Add circuit breaker for the server
+        pool.circuit_breakers.insert(
+            "shell".to_string(),
+            RwLock::new(CircuitBreaker::default()),
+        );
+
         let definition = ToolDefinition {
             name: "execute".to_string(),
             description: Some("Execute a shell command".to_string()),
@@ -438,5 +559,69 @@ command = "nonexistent-mcp-server"
         assert_eq!(statuses[0].name, "shell");
         assert_eq!(statuses[0].transport, "stdio");
         assert_eq!(statuses[0].status, McpServerHealth::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_rejects_after_failures() {
+        use crate::mcp::circuit_breaker::CircuitBreakerConfig;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut pool = McpPool::new();
+        pool.clients.insert(
+            "failing".to_string(),
+            Arc::new(RwLock::new(Box::new(FakeClient {
+                calls: calls.clone(),
+            }))),
+        );
+
+        // Circuit breaker that opens after 2 failures
+        let cb_config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: std::time::Duration::from_secs(60),
+            success_threshold: 1,
+        };
+        pool.circuit_breakers.insert(
+            "failing".to_string(),
+            RwLock::new(CircuitBreaker::new(cb_config)),
+        );
+
+        let definition = ToolDefinition {
+            name: "test".to_string(),
+            description: None,
+            input_schema: None,
+        };
+        pool.tools.insert(
+            "failing_test".to_string(),
+            RegisteredTool {
+                server_name: "failing".to_string(),
+                definition,
+                validator: None,
+            },
+        );
+
+        // Manually trip the circuit breaker
+        {
+            let mut cb = pool.circuit_breakers.get("failing").unwrap().write().await;
+            cb.record_failure();
+            cb.record_failure();
+            assert_eq!(cb.state(), CircuitState::Open);
+        }
+
+        // Call should be rejected
+        let result = pool.call_tool("failing_test", serde_json::json!({})).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("circuit breaker open"));
+
+        // The underlying client should not have been called
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn circuit_state_query() {
+        let pool = McpPool::new();
+
+        // Non-existent server returns None
+        assert!(pool.circuit_state("nonexistent").await.is_none());
     }
 }

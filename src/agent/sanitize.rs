@@ -20,6 +20,7 @@ const MAX_ARRAY_SIZE: usize = 100;
 const REDACTED: &str = "[REDACTED]";
 
 /// Patterns that indicate sensitive field names (case-insensitive matching).
+/// NOTE: Keep aligned with egregore/src/telemetry.rs SENSITIVE_PATTERNS.
 const SENSITIVE_PATTERNS: &[&str] = &[
     "key",
     "secret",

@@ -6,6 +6,9 @@
 //! schemas remain in config as reserved future surfaces.
 
 pub mod discord;
+mod task;
+
+pub use task::task_from_comms;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

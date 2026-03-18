@@ -8,6 +8,45 @@ use crate::error::{Result, ServitorError};
 use std::path::Path;
 
 impl Config {
+    /// Create a minimal default configuration for testing or fallback.
+    ///
+    /// This configuration uses sensible defaults for local development:
+    /// - Anthropic provider with claude-sonnet model
+    /// - Local egregore at 127.0.0.1:7654
+    /// - Standard agent limits (50 turns, 300s timeout)
+    pub fn minimal_defaults() -> Result<Self> {
+        let toml = r#"
+[identity]
+data_dir = "~/.servitor"
+
+[egregore]
+api_url = "http://127.0.0.1:7654"
+subscribe = false
+
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[agent]
+max_turns = 50
+timeout_secs = 300
+
+[task]
+offer_ttl_secs = 300
+offer_timeout_secs = 60
+assign_timeout_secs = 300
+start_timeout_secs = 30
+eta_buffer_multiplier = 1.5
+ping_timeout_secs = 30
+
+[heartbeat]
+interval_secs = 300
+include_runtime_monitoring = false
+"#;
+        Self::from_str(toml)
+    }
+
     /// Load configuration from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| ServitorError::Config {

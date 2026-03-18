@@ -247,6 +247,70 @@ impl Authority {
     }
 }
 
+/// Load authority configuration for runtime use.
+///
+/// Handles insecure mode and missing authority file errors with appropriate
+/// warnings and error messages.
+pub fn load_runtime_authority(identity_dir: &Path, insecure: bool) -> Result<Authority> {
+    let authority_path = identity_dir.join("authority.toml");
+
+    if insecure {
+        tracing::warn!(
+            path = %authority_path.display(),
+            "running with --insecure; keeper authorization is disabled"
+        );
+        return Ok(Authority::insecure_open());
+    }
+
+    if !authority_path.exists() {
+        tracing::warn!(
+            path = %authority_path.display(),
+            "authority file missing; refusing to start without explicit access control"
+        );
+        return Err(ServitorError::Config {
+            reason: format!(
+                "authority file not found: {}. Copy authority.example.toml there, or use --insecure for development only",
+                authority_path.display()
+            ),
+        });
+    }
+
+    let authority = Authority::load(&authority_path)?;
+    tracing::debug!("authority: loaded from {}", authority_path.display());
+    Ok(authority)
+}
+
+/// Authorize local execution for a servitor identity.
+///
+/// Returns the keeper name if authorized, None if in open mode.
+/// Returns an error if the identity is not authorized.
+pub fn authorize_local_exec(
+    authority: &Authority,
+    identity: &crate::identity::Identity,
+) -> Result<Option<String>> {
+    if authority.is_open_mode() {
+        return Ok(None);
+    }
+
+    let auth_result = authority.authorize(&AuthRequest {
+        person: PersonId::from_egregore(identity.public_id().0.clone()),
+        place: "egregore:local".to_string(),
+        skill: "*".to_string(),
+    });
+
+    if !auth_result.allowed {
+        return Err(ServitorError::Unauthorized {
+            reason: format!(
+                "local exec not authorized for {}: {}",
+                identity.public_id(),
+                auth_result.reason
+            ),
+        });
+    }
+
+    Ok(auth_result.keeper)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

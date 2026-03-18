@@ -27,7 +27,7 @@
 //! | Plane | Purpose | Examples |
 //! |-------|---------|----------|
 //! | Communication | Message transport | Egregore, Discord, TUI |
-//! | Tool | Execution capabilities | MCP servers (Docker, Shell) |
+//! | Tool | Execution capabilities | MCP servers, A2A agents |
 //! | LLM | Inference/reasoning | Claude, Ollama, OpenAI |
 //!
 //! ## Event Sources
@@ -39,8 +39,10 @@
 //! - **Hook**: Stdin JSON (for egregore hook mode)
 //! - **Direct**: CLI exec command
 
+pub mod a2a;
 pub mod agent;
 pub mod authority;
+pub mod cli;
 pub mod comms;
 pub mod config;
 pub mod egregore;
@@ -49,10 +51,14 @@ pub mod events;
 pub mod identity;
 pub mod mcp;
 pub mod metrics;
+pub mod runtime;
 pub mod scope;
 pub mod task;
 
-pub use authority::{AuthRequest, AuthResult, Authority, Keeper, PersonId};
+pub use authority::{
+    authorize_local_exec, load_runtime_authority, AuthRequest, AuthResult, Authority, Keeper,
+    PersonId,
+};
 pub use config::Config;
 pub use error::{Result, ServitorError};
 pub use identity::{Identity, PublicId};
