@@ -13,7 +13,6 @@ use servitor::authority::{AuthRequest, Authority, PersonId};
 use servitor::comms::discord::DiscordTransport;
 use servitor::comms::{CommsResponse, CommsTransport};
 use servitor::config::Config;
-use servitor::metrics::{self, AuthDecision, TaskStatus as MetricsTaskStatus};
 use servitor::egregore::{
     AuthDenied, AuthGate, EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorLoad,
     ServitorProfile, ServitorStats, Task, TaskAssign, TaskClaim, TaskFailed, TaskFailureReason,
@@ -25,6 +24,7 @@ use servitor::events::sse::SseSource;
 use servitor::events::EventRouter;
 use servitor::identity::Identity;
 use servitor::mcp::McpPool;
+use servitor::metrics::{self, AuthDecision, TaskStatus as MetricsTaskStatus};
 use servitor::scope::ScopeEnforcer;
 use servitor::task::{
     assign_skill, authorize_assignment, authorize_offer_request, request_skill, AssignmentDecision,

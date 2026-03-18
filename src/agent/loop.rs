@@ -8,7 +8,6 @@ use crate::agent::provider::{ContentBlock, Provider, StopReason};
 use crate::agent::sanitize::sanitize_arguments;
 use crate::authority::Authority;
 use crate::config::AgentConfig;
-use crate::metrics::{self, Timer, ToolCallStatus};
 use crate::egregore::messages::{
     Attestation, AuthDenied, AuthGate, PlannedToolCall, Task, TaskPlan, TaskResult, TaskStatus,
     TraceEvent, TraceSpan, TraceSpanStatus,
@@ -17,6 +16,7 @@ use crate::egregore::EgregoreClient;
 use crate::error::{Result, ServitorError};
 use crate::identity::Identity;
 use crate::mcp::{LlmTool, McpPool};
+use crate::metrics::{self, Timer, ToolCallStatus};
 use crate::scope::ScopeEnforcer;
 
 /// Agent executor — runs the tool_use loop for a task.

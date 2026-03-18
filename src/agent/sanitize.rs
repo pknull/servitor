@@ -20,8 +20,10 @@ const SENSITIVE_PATTERNS: &[&str] = &[
     "password",
     "token",
     "credential",
-    "api_key",
-    "apikey",
+    "auth",
+    "bearer",
+    "session",
+    "private",
 ];
 
 /// Sanitize tool arguments for safe inclusion in trace spans.
@@ -68,11 +70,12 @@ fn sanitize_value(value: &Value, field_name: Option<&str>) -> Value {
         }
         Value::String(s) => {
             if s.len() > MAX_VALUE_LENGTH {
-                let truncated = format!(
-                    "{}... [truncated, {} bytes total]",
-                    &s[..MAX_VALUE_LENGTH],
-                    s.len()
-                );
+                // Find safe UTF-8 boundary for truncation
+                let mut end = MAX_VALUE_LENGTH;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let truncated = format!("{}... [truncated, {} bytes total]", &s[..end], s.len());
                 Value::String(truncated)
             } else {
                 value.clone()
@@ -269,5 +272,21 @@ mod tests {
         assert_eq!(parsed["API_KEY"], "[REDACTED]");
         assert_eq!(parsed["Api_Key"], "[REDACTED]");
         assert_eq!(parsed["api_key"], "[REDACTED]");
+    }
+
+    #[test]
+    fn sanitize_truncates_utf8_safely() {
+        // Each emoji is 4 bytes, so 500 emojis = 2000 bytes (over 1KB limit)
+        let emoji_string = "🎉".repeat(500);
+        let args = json!({
+            "content": emoji_string
+        });
+        let result = sanitize_arguments(&args);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+
+        let content = parsed["content"].as_str().unwrap();
+        assert!(content.contains("[truncated,"));
+        // Verify the string is valid UTF-8 by attempting to use it
+        let _ = content.to_string();
     }
 }
