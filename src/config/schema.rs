@@ -44,6 +44,10 @@ pub struct Config {
     /// Event watchers.
     #[serde(default)]
     pub watch: Vec<WatchConfig>,
+
+    /// Metrics configuration.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 /// Identity storage configuration.
@@ -432,4 +436,29 @@ fn default_http_bind() -> String {
 
 fn default_http_port() -> u16 {
     8765
+}
+
+/// Prometheus metrics configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MetricsConfig {
+    /// Enable metrics endpoint.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Bind address for metrics server.
+    #[serde(default = "default_metrics_bind")]
+    pub bind: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_metrics_bind(),
+        }
+    }
+}
+
+fn default_metrics_bind() -> String {
+    "127.0.0.1:9091".to_string()
 }

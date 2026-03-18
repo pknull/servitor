@@ -13,6 +13,7 @@ use servitor::authority::{AuthRequest, Authority, PersonId};
 use servitor::comms::discord::DiscordTransport;
 use servitor::comms::{CommsResponse, CommsTransport};
 use servitor::config::Config;
+use servitor::metrics::{self, AuthDecision, TaskStatus as MetricsTaskStatus};
 use servitor::egregore::{
     AuthDenied, AuthGate, EgregoreClient, EgregoreMessage, ScopeConstraints, ServitorLoad,
     ServitorProfile, ServitorStats, Task, TaskAssign, TaskClaim, TaskFailed, TaskFailureReason,
@@ -94,6 +95,7 @@ struct RuntimeStats {
     tasks_executed: u64,
     tasks_failed: u64,
     last_task_ts: Option<DateTime<Utc>>,
+    task_start_time: Option<Instant>,
 }
 
 impl RuntimeStats {
@@ -106,6 +108,7 @@ impl RuntimeStats {
             tasks_executed: 0,
             tasks_failed: 0,
             last_task_ts: None,
+            task_start_time: None,
         }
     }
 
@@ -121,15 +124,29 @@ impl RuntimeStats {
     fn start_task(&mut self) {
         self.tasks_queued = self.tasks_queued.saturating_sub(1);
         self.tasks_executing += 1;
+        self.task_start_time = Some(Instant::now());
+        metrics::set_active_tasks(self.tasks_executing);
     }
 
-    fn finish_task(&mut self, success: bool) {
+    fn finish_task(&mut self, success: bool, task_type: Option<&str>) {
+        let duration = self.task_start_time.map(|t| t.elapsed().as_secs_f64());
+        self.task_start_time = None;
         self.tasks_executing = self.tasks_executing.saturating_sub(1);
+        metrics::set_active_tasks(self.tasks_executing);
+
+        let task_type_str = task_type.unwrap_or("unknown");
         if success {
             self.tasks_executed += 1;
+            metrics::record_task_complete(task_type_str, MetricsTaskStatus::Success);
         } else {
             self.tasks_failed += 1;
+            metrics::record_task_complete(task_type_str, MetricsTaskStatus::Error);
         }
+
+        if let Some(d) = duration {
+            metrics::record_task_duration(task_type_str, d);
+        }
+
         self.last_task_ts = Some(Utc::now());
     }
 
@@ -253,6 +270,7 @@ async fn run_hook_mode(config: &Config, insecure: bool) -> Result<()> {
     if let Some(ref keeper_name) = auth_result.keeper {
         tracing::debug!(keeper = %keeper_name, "authorized as keeper");
     }
+    metrics::record_auth_decision(AuthDecision::Allowed);
 
     // Extract task from message
     let task = message
@@ -310,6 +328,9 @@ async fn run_hook_mode(config: &Config, insecure: bool) -> Result<()> {
 
 /// Run as a long-lived daemon with event router.
 async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
+    // Initialize metrics if enabled
+    metrics::init(&config.metrics)?;
+
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
@@ -323,6 +344,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
     let provider = create_provider(&config.llm)?;
     let mut mcp_pool = McpPool::from_config(config)?;
     mcp_pool.initialize_all().await?;
+    metrics::set_mcp_servers_connected(mcp_pool.capabilities().len() as u64);
 
     let mut scope_enforcer = ScopeEnforcer::new();
     for (name, mcp_config) in &config.mcp {
@@ -451,6 +473,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                 if let Some(ref name) = keeper_name {
                     tracing::debug!(keeper = %name, "authorized as keeper");
                 }
+                metrics::record_auth_decision(AuthDecision::Allowed);
 
                 // Build task from comms message
                 let mut task = task_from_comms(&comms_msg);
@@ -496,11 +519,11 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                             tracing::debug!(error = %e, "failed to publish result to egregore");
                         }
 
-                        runtime_stats.finish_task(matches!(result.status, TaskStatus::Success));
+                        runtime_stats.finish_task(matches!(result.status, TaskStatus::Success), task.task_type.as_deref());
                         tracing::info!(status = ?result.status, "comms task complete");
                     }
                     Err(e) => {
-                        runtime_stats.finish_task(false);
+                        runtime_stats.finish_task(false, task.task_type.as_deref());
                         tracing::error!(error = %e, "comms task execution failed");
 
                         // Send error back to user
@@ -669,7 +692,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                                 }
                             }
 
-                            runtime_stats.finish_task(matches!(result.status, TaskStatus::Success));
+                            runtime_stats.finish_task(matches!(result.status, TaskStatus::Success), task.task_type.as_deref());
                             tracing::info!(
                                 status = ?result.status,
                                 hash = %result.result_hash,
@@ -677,7 +700,7 @@ async fn run_daemon_mode(config: &Config, insecure: bool) -> Result<()> {
                             );
                         }
                         Err(e) => {
-                            runtime_stats.finish_task(false);
+                            runtime_stats.finish_task(false, task.task_type.as_deref());
                             tracing::error!(error = %e, "task execution failed");
                         }
                     }
@@ -1029,6 +1052,9 @@ async fn publish_auth_denied_event(
     gate: AuthGate,
     reason: &str,
 ) {
+    // Record auth denial metric
+    metrics::record_auth_decision(AuthDecision::Denied);
+
     let person_id = match person {
         PersonId::Egregore(pubkey) => pubkey.clone(),
         PersonId::Discord(user_id) => format!("discord:{user_id}"),
@@ -1574,7 +1600,7 @@ scope.allow = ["execute:/tmp/*"]
         runtime_stats.started_at = Instant::now() - Duration::from_secs(42);
         runtime_stats.record_task_offer();
         runtime_stats.start_task();
-        runtime_stats.finish_task(true);
+        runtime_stats.finish_task(true, Some("test"));
 
         let profile = build_profile(&identity, &mcp_pool, &config, &runtime_stats).await;
         assert_eq!(profile.version, env!("CARGO_PKG_VERSION"));
