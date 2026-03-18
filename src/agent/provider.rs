@@ -10,6 +10,24 @@ use crate::config::LlmConfig;
 use crate::error::{Result, ServitorError};
 use crate::mcp::LlmTool;
 
+/// Maximum length for API error response bodies in error messages.
+/// Prevents leaking large response bodies that may contain sensitive information.
+const MAX_ERROR_BODY_LENGTH: usize = 256;
+
+/// Truncate an error response body to prevent leaking large/sensitive content.
+fn truncate_error_body(body: &str) -> String {
+    if body.len() <= MAX_ERROR_BODY_LENGTH {
+        body.to_string()
+    } else {
+        // Find safe UTF-8 boundary for truncation
+        let mut end = MAX_ERROR_BODY_LENGTH;
+        while end > 0 && !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [truncated]", &body[..end])
+    }
+}
+
 /// Provider capabilities.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderCapabilities {
@@ -297,7 +315,7 @@ impl Provider for AnthropicProvider {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ServitorError::Provider {
-                reason: format!("API error {}: {}", status, body),
+                reason: format!("API error {}: {}", status, truncate_error_body(&body)),
             });
         }
 
@@ -482,7 +500,7 @@ impl Provider for OpenAiCompatProvider {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ServitorError::Provider {
-                reason: format!("API error {}: {}", status, body),
+                reason: format!("API error {}: {}", status, truncate_error_body(&body)),
             });
         }
 
@@ -1023,7 +1041,7 @@ impl Provider for CodexOAuthProvider {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ServitorError::Provider {
-                reason: format!("API error {}: {}", status, body),
+                reason: format!("API error {}: {}", status, truncate_error_body(&body)),
             });
         }
 

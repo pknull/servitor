@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::agent::context::ConversationContext;
 use crate::agent::provider::{ContentBlock, Provider, StopReason};
-use crate::agent::sanitize::sanitize_arguments;
+use crate::agent::sanitize::{sanitize_arguments, sanitize_tool_result};
 use crate::authority::Authority;
 use crate::config::AgentConfig;
 use crate::egregore::messages::{
@@ -250,7 +250,9 @@ impl<'a> AgentExecutor<'a> {
                 }
                 tool_results.push(match result {
                     Ok(output) => {
-                        ContentBlock::tool_result(tool_id, output.text_content(), output.is_error)
+                        // Sanitize tool result to redact sensitive content before feeding back to LLM
+                        let sanitized_content = sanitize_tool_result(&output.text_content());
+                        ContentBlock::tool_result(tool_id, sanitized_content, output.is_error)
                     }
                     Err(e) => ContentBlock::tool_result(tool_id, e.to_string(), true),
                 });
