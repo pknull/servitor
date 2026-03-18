@@ -8,6 +8,7 @@
 pub mod context;
 pub mod r#loop;
 pub mod provider;
+pub mod sanitize;
 
 pub use context::ConversationContext;
 pub use provider::{create_provider, ChatResponse, ContentBlock, Message, Provider, Role};

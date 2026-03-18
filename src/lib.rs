@@ -48,6 +48,7 @@ pub mod error;
 pub mod events;
 pub mod identity;
 pub mod mcp;
+pub mod metrics;
 pub mod scope;
 pub mod task;
 
