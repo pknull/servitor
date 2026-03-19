@@ -19,13 +19,15 @@ use crate::scope::ScopeEnforcer;
 ///
 /// Encapsulates the common components needed by all CLI commands:
 /// identity, authority, MCP pool, A2A pool, scope enforcer, and LLM provider.
+///
+/// Provider is optional to support worker/coordinator modes that don't require LLM.
 pub struct RuntimeContext {
     pub identity: Identity,
     pub authority: Authority,
     pub mcp_pool: McpPool,
     pub a2a_pool: A2aPool,
     pub scope_enforcer: ScopeEnforcer,
-    pub provider: Box<dyn Provider>,
+    pub provider: Option<Box<dyn Provider>>,
     pub egregore: EgregoreClient,
 }
 
@@ -44,7 +46,10 @@ impl RuntimeContext {
         let identity = Identity::load_or_generate(&identity_dir)?;
         let authority = load_runtime_authority(&identity_dir, insecure)?;
 
-        let provider = create_provider(&config.llm)?;
+        let provider = match &config.llm {
+            Some(llm_config) => Some(create_provider(llm_config)?),
+            None => None,
+        };
         let mut mcp_pool = McpPool::from_config(config)?;
         mcp_pool.initialize_all().await?;
 
@@ -91,6 +96,22 @@ impl RuntimeContext {
     /// Shutdown all MCP servers cleanly.
     pub async fn shutdown(&mut self) -> Result<()> {
         self.mcp_pool.shutdown_all().await
+    }
+
+    /// Get the LLM provider, returning an error if not configured.
+    ///
+    /// Use this for commands that require LLM reasoning (exec, hook, daemon with SSE).
+    pub fn require_provider(&self) -> Result<&dyn Provider> {
+        self.provider.as_ref().map(|p| p.as_ref()).ok_or_else(|| {
+            crate::error::ServitorError::Config {
+                reason: "LLM provider not configured. Add [llm] section to config for reasoning modes.".into(),
+            }
+        })
+    }
+
+    /// Check if LLM provider is available.
+    pub fn has_provider(&self) -> bool {
+        self.provider.is_some()
     }
 }
 

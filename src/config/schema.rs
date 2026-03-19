@@ -14,8 +14,9 @@ pub struct Config {
     #[serde(default)]
     pub egregore: EgregoreConfig,
 
-    /// LLM provider configuration.
-    pub llm: LlmConfig,
+    /// LLM provider configuration (optional for worker/coordinator modes).
+    #[serde(default)]
+    pub llm: Option<LlmConfig>,
 
     /// MCP server configurations.
     #[serde(default)]

@@ -146,7 +146,13 @@ impl Authority {
         let idx = match person {
             PersonId::Egregore(pubkey) => self.keeper_by_egregore.get(pubkey),
             PersonId::Discord(user_id) => self.keeper_by_discord.get(user_id),
-            PersonId::Http(token) => self.keeper_by_http.get(token),
+            PersonId::Http(token) => {
+                // Try exact match first
+                self.keeper_by_http
+                    .get(token)
+                    // Fall back to wildcard match
+                    .or_else(|| self.keeper_by_http.get("*"))
+            }
         };
         idx.map(|&i| &self.keepers[i])
     }
@@ -474,5 +480,85 @@ skills = ["docker:inspect_*"]
 
         let result = auth.authorize_skill("automation", "shell:execute");
         assert!(!result.allowed);
+    }
+
+    #[test]
+    fn test_http_wildcard_token() {
+        let config = AuthorityConfig::from_toml(
+            r#"
+[[keeper]]
+name = "test-user"
+http_token = "*"
+
+[[permission]]
+keeper = "test-user"
+place = "*"
+skills = ["*"]
+"#,
+        )
+        .unwrap();
+        let auth = Authority::from_config(config);
+
+        // Any HTTP token should match the wildcard
+        let result = auth.authorize(&AuthRequest {
+            person: PersonId::Http("any-random-token".to_string()),
+            place: "a2a:server".to_string(),
+            skill: "some_skill".to_string(),
+        });
+        assert!(result.allowed);
+        assert_eq!(result.keeper, Some("test-user".to_string()));
+
+        // Another random token should also match
+        let result = auth.authorize(&AuthRequest {
+            person: PersonId::Http("test-token".to_string()),
+            place: "a2a:server".to_string(),
+            skill: "another_skill".to_string(),
+        });
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn test_http_exact_token_takes_precedence() {
+        let config = AuthorityConfig::from_toml(
+            r#"
+[[keeper]]
+name = "wildcard-user"
+http_token = "*"
+
+[[keeper]]
+name = "specific-user"
+http_token = "specific-token"
+
+[[permission]]
+keeper = "wildcard-user"
+place = "*"
+skills = ["basic:*"]
+
+[[permission]]
+keeper = "specific-user"
+place = "*"
+skills = ["*"]
+"#,
+        )
+        .unwrap();
+        let auth = Authority::from_config(config);
+
+        // Exact token match should take precedence
+        let result = auth.authorize(&AuthRequest {
+            person: PersonId::Http("specific-token".to_string()),
+            place: "a2a:server".to_string(),
+            skill: "advanced_skill".to_string(),
+        });
+        assert!(result.allowed);
+        assert_eq!(result.keeper, Some("specific-user".to_string()));
+
+        // Other tokens fall back to wildcard
+        let result = auth.authorize(&AuthRequest {
+            person: PersonId::Http("other-token".to_string()),
+            place: "a2a:server".to_string(),
+            skill: "basic:read".to_string(),
+        });
+        assert!(result.allowed);
+        assert_eq!(result.keeper, Some("wildcard-user".to_string()));
     }
 }

@@ -25,6 +25,18 @@ use super::daemon_handlers::{
 
 /// Run servitor as a long-lived daemon with event router.
 pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
+    // Check if reasoning capability is needed
+    let needs_llm = config.egregore.subscribe
+        || config.comms.discord.is_some()
+        || !config.schedule.is_empty();
+
+    if needs_llm && config.llm.is_none() {
+        return Err(crate::error::ServitorError::Config {
+            reason: "Daemon mode with SSE subscribe, Discord, or scheduled tasks requires [llm] configuration. \
+                    For worker-only mode (A2A server), disable subscribe and remove comms/schedule sections.".into(),
+        });
+    }
+
     // Initialize metrics if enabled
     metrics::init(&config.metrics)?;
 
@@ -151,6 +163,10 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                     std::future::pending().await
                 }
             } => {
+                // Safety: LLM is required for Discord mode, validated at startup
+                let provider = ctx.provider.as_ref()
+                    .expect("LLM provider required for Discord mode")
+                    .as_ref();
                 handle_discord_message(
                     comms_msg,
                     responder,
@@ -158,7 +174,7 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                     &ctx.identity,
                     &ctx.egregore,
                     &mut runtime_stats,
-                    ctx.provider.as_ref(),
+                    provider,
                     &ctx.mcp_pool,
                     &ctx.a2a_pool,
                     &ctx.scope_enforcer,
@@ -181,9 +197,13 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                             config,
                         ).await {
                             Ok(Some(assigned)) => {
+                                // Safety: LLM is required for SSE mode, validated at startup
+                                let provider = ctx.provider.as_ref()
+                                    .expect("LLM provider required for SSE mode")
+                                    .as_ref();
                                 if let Err(e) = execute_assigned_task(
                                     assigned,
-                                    ctx.provider.as_ref(),
+                                    provider,
                                     &ctx.mcp_pool,
                                     &ctx.a2a_pool,
                                     &ctx.scope_enforcer,
@@ -212,9 +232,13 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
 
                 // Process queued assignments
                 if let Some(assigned) = task_coordinator.take_next_assignment() {
+                    // Safety: LLM is required for SSE mode, validated at startup
+                    let provider = ctx.provider.as_ref()
+                        .expect("LLM provider required for SSE mode")
+                        .as_ref();
                     if let Err(e) = execute_assigned_task(
                         assigned,
-                        ctx.provider.as_ref(),
+                        provider,
                         &ctx.mcp_pool,
                         &ctx.a2a_pool,
                         &ctx.scope_enforcer,
@@ -240,13 +264,17 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                     );
                     runtime_stats.record_task_offer();
 
+                    // Safety: LLM is required for cron/SSE tasks, validated at startup
+                    let provider = ctx.provider.as_ref()
+                        .expect("LLM provider required for event router tasks")
+                        .as_ref();
                     handle_event_router_task(
                         task,
                         &ctx.authority,
                         &ctx.identity,
                         &ctx.egregore,
                         &mut runtime_stats,
-                        ctx.provider.as_ref(),
+                        provider,
                         &ctx.mcp_pool,
                         &ctx.a2a_pool,
                         &ctx.scope_enforcer,

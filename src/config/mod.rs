@@ -67,46 +67,48 @@ include_runtime_monitoring = false
 
     /// Validate configuration.
     fn validate(&self) -> Result<()> {
-        // Validate LLM provider
-        match self.llm.provider.as_str() {
-            "anthropic" => {
-                if self.llm.api_key_env.is_none() {
+        // Validate LLM provider (if configured)
+        if let Some(ref llm) = self.llm {
+            match llm.provider.as_str() {
+                "anthropic" => {
+                    if llm.api_key_env.is_none() {
+                        return Err(ServitorError::Config {
+                            reason: "anthropic provider requires api_key_env".into(),
+                        });
+                    }
+                }
+                "openai" => {
+                    if llm.api_key_env.is_none() {
+                        return Err(ServitorError::Config {
+                            reason: "openai provider requires api_key_env".into(),
+                        });
+                    }
+                }
+                "ollama" => {
+                    // Ollama doesn't require API key
+                }
+                "openai-compat" => {
+                    if llm.base_url.is_none() {
+                        return Err(ServitorError::Config {
+                            reason: "openai-compat provider requires base_url".into(),
+                        });
+                    }
+                }
+                "codex" => {
+                    if llm.token_file.is_none() {
+                        return Err(ServitorError::Config {
+                            reason: "codex provider requires token_file".into(),
+                        });
+                    }
+                }
+                "claude-code" => {
+                    // Claude Code uses CLI authentication, no config needed
+                }
+                other => {
                     return Err(ServitorError::Config {
-                        reason: "anthropic provider requires api_key_env".into(),
+                        reason: format!("unknown LLM provider: {}", other),
                     });
                 }
-            }
-            "openai" => {
-                if self.llm.api_key_env.is_none() {
-                    return Err(ServitorError::Config {
-                        reason: "openai provider requires api_key_env".into(),
-                    });
-                }
-            }
-            "ollama" => {
-                // Ollama doesn't require API key
-            }
-            "openai-compat" => {
-                if self.llm.base_url.is_none() {
-                    return Err(ServitorError::Config {
-                        reason: "openai-compat provider requires base_url".into(),
-                    });
-                }
-            }
-            "codex" => {
-                if self.llm.token_file.is_none() {
-                    return Err(ServitorError::Config {
-                        reason: "codex provider requires token_file".into(),
-                    });
-                }
-            }
-            "claude-code" => {
-                // Claude Code uses CLI authentication, no config needed
-            }
-            other => {
-                return Err(ServitorError::Config {
-                    reason: format!("unknown LLM provider: {}", other),
-                });
             }
         }
 
@@ -191,9 +193,32 @@ model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 "#;
         let config = Config::from_str(toml).unwrap();
-        assert_eq!(config.llm.provider, "anthropic");
-        assert_eq!(config.llm.model, "claude-sonnet-4-20250514");
+        let llm = config.llm.as_ref().expect("LLM should be configured");
+        assert_eq!(llm.provider, "anthropic");
+        assert_eq!(llm.model, "claude-sonnet-4-20250514");
         assert_eq!(config.heartbeat.interval_secs, 300);
+    }
+
+    #[test]
+    fn parse_worker_config_no_llm() {
+        // Worker mode: A2A server + MCP tools, no LLM reasoning
+        let toml = r#"
+[a2a_server]
+enabled = true
+bind = "0.0.0.0:8765"
+name = "shell-worker"
+
+[mcp.shell]
+transport = "stdio"
+command = "mcp-server-shell"
+"#;
+        let config = Config::from_str(toml).unwrap();
+        assert!(config.llm.is_none());
+        assert!(config
+            .a2a_server
+            .as_ref()
+            .map(|s| s.enabled)
+            .unwrap_or(false));
     }
 
     #[test]

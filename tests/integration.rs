@@ -35,7 +35,8 @@ timeout_secs = 60
 "#;
 
     let config = Config::from_str(toml).unwrap();
-    assert_eq!(config.llm.provider, "anthropic");
+    let llm = config.llm.as_ref().expect("LLM should be configured");
+    assert_eq!(llm.provider, "anthropic");
     assert_eq!(config.mcp.len(), 1);
     assert!(config.mcp.contains_key("test"));
     assert_eq!(config.task.offer_ttl_secs, 300);

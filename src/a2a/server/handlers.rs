@@ -150,12 +150,59 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// A2A message part.
+#[derive(Debug, Deserialize)]
+struct MessagePart {
+    #[serde(rename = "type")]
+    part_type: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// A2A message format.
+#[derive(Debug, Deserialize)]
+struct A2aMessage {
+    #[serde(default)]
+    parts: Vec<MessagePart>,
+}
+
 /// tasks/send parameters.
 #[derive(Debug, Deserialize)]
 struct TasksSendParams {
     skill: String,
+    /// Direct JSON input (preferred for internal use).
     #[serde(default)]
     input: serde_json::Value,
+    /// A2A message format (for A2A protocol compatibility).
+    #[serde(default)]
+    message: Option<A2aMessage>,
+}
+
+impl TasksSendParams {
+    /// Extract the input value, preferring direct input over message format.
+    fn extract_input(&self) -> serde_json::Value {
+        // If direct input is provided and not null, use it
+        if !self.input.is_null() {
+            return self.input.clone();
+        }
+
+        // Try to extract from message format
+        if let Some(ref message) = self.message {
+            for part in &message.parts {
+                if part.part_type == "text" {
+                    if let Some(ref text) = part.text {
+                        // Try to parse the text as JSON
+                        if let Ok(parsed) = serde_json::from_str(text) {
+                            return parsed;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Default to null
+        serde_json::Value::Null
+    }
 }
 
 /// tasks/send response.
@@ -232,10 +279,13 @@ async fn handle_tasks_send(
         );
     }
 
+    // Extract input from either direct input or message format
+    let input = params.extract_input();
+
     // Create task
     let task = match state
         .task_store
-        .create(params.skill.clone(), params.input.clone(), keeper_name.clone())
+        .create(params.skill.clone(), input.clone(), keeper_name.clone())
         .await
     {
         Some(t) => t,
@@ -245,6 +295,7 @@ async fn handle_tasks_send(
     };
 
     let task_id = task.id.clone();
+    let skill = params.skill.clone();
 
     // Spawn async execution
     let state_clone = Arc::new(A2aServerStateRef {
@@ -256,7 +307,7 @@ async fn handle_tasks_send(
     });
 
     tokio::spawn(async move {
-        execute_task(state_clone, task_id.clone(), params.skill, params.input, keeper_name).await;
+        execute_task(state_clone, task_id.clone(), skill, input, keeper_name).await;
     });
 
     JsonRpcResponse::success(

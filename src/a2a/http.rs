@@ -85,15 +85,19 @@ impl HttpA2aClient {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
         let request = JsonRpcRequest::new(id, method, params);
 
+        // A2A JSON-RPC endpoint is at /a2a
+        let rpc_url = format!("{}/a2a", self.url.trim_end_matches('/'));
+
         tracing::debug!(
             agent = %self.name,
             method = %method,
+            url = %rpc_url,
             "sending A2A request"
         );
 
         let response = self
             .http
-            .post(&self.url)
+            .post(&rpc_url)
             .json(&request)
             .send()
             .await
@@ -261,16 +265,17 @@ impl A2aClient for HttpA2aClient {
 
         #[derive(serde::Deserialize)]
         struct SendMessageResult {
-            id: String,
+            #[serde(rename = "taskId")]
+            task_id: String,
         }
 
         let result: SendMessageResult = self.rpc("tasks/send", Some(params)).await?;
-        Ok(result.id)
+        Ok(result.task_id)
     }
 
     async fn get_task(&self, task_id: &str) -> Result<A2aTask> {
         let params = serde_json::json!({
-            "id": task_id
+            "taskId": task_id
         });
 
         self.rpc("tasks/get", Some(params)).await
@@ -278,7 +283,7 @@ impl A2aClient for HttpA2aClient {
 
     async fn cancel_task(&self, task_id: &str) -> Result<()> {
         let params = serde_json::json!({
-            "id": task_id
+            "taskId": task_id
         });
 
         let _: serde_json::Value = self.rpc("tasks/cancel", Some(params)).await?;

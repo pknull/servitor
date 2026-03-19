@@ -80,8 +80,11 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
 
     tracing::debug!(hash = %task.hash, prompt_len = task.prompt.len(), "received task");
 
-    // Initialize components
-    let provider = create_provider(&config.llm)?;
+    // Initialize components - hook mode requires LLM
+    let llm_config = config.llm.as_ref().ok_or_else(|| ServitorError::Config {
+        reason: "hook mode requires [llm] configuration for reasoning".into(),
+    })?;
+    let provider = create_provider(llm_config)?;
     let mut mcp_pool = McpPool::from_config(config)?;
     mcp_pool.initialize_all().await?;
 

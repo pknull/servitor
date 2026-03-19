@@ -47,8 +47,12 @@ pub async fn run_info(config: &Config, insecure: bool) -> Result<()> {
     }
     println!();
 
-    println!("LLM Provider: {}", config.llm.provider);
-    println!("LLM Model: {}", config.llm.model);
+    if let Some(ref llm) = config.llm {
+        println!("LLM Provider: {}", llm.provider);
+        println!("LLM Model: {}", llm.model);
+    } else {
+        println!("LLM: not configured (worker/coordinator mode)");
+    }
     println!();
     println!("MCP Servers:");
     for (name, mcp) in &config.mcp {

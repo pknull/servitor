@@ -34,8 +34,11 @@ pub async fn run_exec(
 
     tracing::info!(id = %identity.public_id(), "executing task");
 
-    // Initialize components
-    let provider = create_provider(&config.llm)?;
+    // Initialize components - exec mode requires LLM
+    let llm_config = config.llm.as_ref().ok_or_else(|| ServitorError::Config {
+        reason: "exec mode requires [llm] configuration for reasoning".into(),
+    })?;
+    let provider = create_provider(llm_config)?;
     let mut mcp_pool = McpPool::from_config(config)?;
     mcp_pool.initialize_all().await?;
 
