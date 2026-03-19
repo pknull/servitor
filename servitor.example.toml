@@ -88,6 +88,16 @@ enabled = false
 # Bind address for metrics HTTP server
 bind = "127.0.0.1:9091"
 
+# A2A Server
+# Enables external A2A agents to discover and invoke Servitor's capabilities.
+# [a2a_server]
+# enabled = true
+# bind = "127.0.0.1:8765"
+# name = "servitor"
+# description = "Task executor with shell and docker capabilities"
+# task_timeout_secs = 300
+# max_concurrent_tasks = 10
+
 # MCP Servers
 # Each server provides tool capabilities to the Servitor.
 

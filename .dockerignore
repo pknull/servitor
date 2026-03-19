@@ -1,0 +1,10 @@
+target/
+.git/
+*.log
+.env
+.env.*
+Memory/
+Work/
+examples/a2a-mesh/config/
+*.md
+LICENSE

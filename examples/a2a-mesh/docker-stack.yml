@@ -1,0 +1,193 @@
+# A2A Mesh Stack - Docker Swarm deployment
+#
+# Prerequisites:
+#   docker build -t servitor:local -f examples/docker/Dockerfile .
+#   docker build -t egregore:local -f examples/docker/Dockerfile ../egregore
+#
+# Deploy:
+#   docker stack deploy -c docker-stack.yml a2a
+#
+# Teardown:
+#   docker stack rm a2a
+
+version: "3.8"
+
+x-egregore-base: &egregore-base
+  image: egregore:local
+  environment:
+    - RUST_LOG=egregore=info,gossip=debug
+  deploy:
+    replicas: 1
+    restart_policy:
+      condition: on-failure
+      delay: 5s
+      max_attempts: 3
+
+x-servitor-base: &servitor-base
+  image: servitor:local
+  environment:
+    - RUST_LOG=servitor=info,a2a=debug
+    - OLLAMA_BASE_URL=http://ollama:11434
+  deploy:
+    replicas: 1
+    restart_policy:
+      condition: on-failure
+      delay: 5s
+      max_attempts: 3
+
+services:
+  # === Egregore Nodes ===
+  egregore-1:
+    <<: *egregore-base
+    hostname: egregore-1
+    configs:
+      - source: egregore-1-config
+        target: /etc/egregore/config.yaml
+    volumes:
+      - egregore-1-data:/data
+    ports:
+      - "7665:7655"  # Gossip
+      - "7664:7654"  # API
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7654/v1/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - a2a-net
+
+  egregore-2:
+    <<: *egregore-base
+    hostname: egregore-2
+    configs:
+      - source: egregore-2-config
+        target: /etc/egregore/config.yaml
+    volumes:
+      - egregore-2-data:/data
+    ports:
+      - "7675:7655"
+      - "7674:7654"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7654/v1/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - a2a-net
+
+  egregore-3:
+    <<: *egregore-base
+    hostname: egregore-3
+    configs:
+      - source: egregore-3-config
+        target: /etc/egregore/config.yaml
+    volumes:
+      - egregore-3-data:/data
+    ports:
+      - "7685:7655"
+      - "7684:7654"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7654/v1/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - a2a-net
+
+  # === Servitor Nodes ===
+  servitor-1:
+    <<: *servitor-base
+    hostname: servitor-1
+    configs:
+      - source: servitor-1-config
+        target: /etc/servitor/servitor.toml
+      - source: authority-config
+        target: /var/lib/servitor/authority.toml
+    volumes:
+      - servitor-1-data:/var/lib/servitor
+    ports:
+      - "8765:8765"  # A2A Server
+    networks:
+      - a2a-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  servitor-2:
+    <<: *servitor-base
+    hostname: servitor-2
+    configs:
+      - source: servitor-2-config
+        target: /etc/servitor/servitor.toml
+      - source: authority-config
+        target: /var/lib/servitor/authority.toml
+    volumes:
+      - servitor-2-data:/var/lib/servitor
+    ports:
+      - "8775:8765"
+    networks:
+      - a2a-net
+
+  servitor-3:
+    <<: *servitor-base
+    hostname: servitor-3
+    configs:
+      - source: servitor-3-config
+        target: /etc/servitor/servitor.toml
+      - source: authority-config
+        target: /var/lib/servitor/authority.toml
+    volumes:
+      - servitor-3-data:/var/lib/servitor
+    ports:
+      - "8785:8765"
+    networks:
+      - a2a-net
+
+  # === Shared Services ===
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - a2a-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+
+configs:
+  egregore-1-config:
+    file: ./config/egregore-1.yaml
+  egregore-2-config:
+    file: ./config/egregore-2.yaml
+  egregore-3-config:
+    file: ./config/egregore-3.yaml
+  servitor-1-config:
+    file: ./config/servitor-1.toml
+  servitor-2-config:
+    file: ./config/servitor-2.toml
+  servitor-3-config:
+    file: ./config/servitor-3.toml
+  authority-config:
+    file: ./config/authority.toml
+
+volumes:
+  egregore-1-data:
+  egregore-2-data:
+  egregore-3-data:
+  servitor-1-data:
+  servitor-2-data:
+  servitor-3-data:
+  ollama-models:
+
+networks:
+  a2a-net:
+    driver: overlay
+    attachable: true

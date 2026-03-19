@@ -14,12 +14,21 @@ pub struct Config {
     #[serde(default)]
     pub egregore: EgregoreConfig,
 
-    /// LLM provider configuration.
-    pub llm: LlmConfig,
+    /// LLM provider configuration (optional for worker/coordinator modes).
+    #[serde(default)]
+    pub llm: Option<LlmConfig>,
 
     /// MCP server configurations.
     #[serde(default)]
     pub mcp: HashMap<String, McpServerConfig>,
+
+    /// A2A agent configurations.
+    #[serde(default)]
+    pub a2a: HashMap<String, A2aAgentConfig>,
+
+    /// A2A server configuration (for receiving tasks from external agents).
+    #[serde(default)]
+    pub a2a_server: Option<A2aServerConfig>,
 
     /// Agent execution parameters.
     #[serde(default)]
@@ -189,6 +198,57 @@ pub struct McpServerConfig {
 
 fn default_mcp_timeout() -> u64 {
     60
+}
+
+/// A2A agent configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct A2aAgentConfig {
+    /// Base URL for agent API.
+    pub url: String,
+
+    /// URL for agent card (defaults to {url}/.well-known/agent.json).
+    #[serde(default)]
+    pub card: Option<String>,
+
+    /// Timeout for task completion in seconds.
+    #[serde(default = "default_a2a_timeout")]
+    pub timeout_secs: u64,
+
+    /// Poll interval for task status in milliseconds.
+    #[serde(default = "default_a2a_poll_interval")]
+    pub poll_interval_ms: u64,
+
+    /// Authentication configuration.
+    #[serde(default)]
+    pub auth: Option<A2aAuthConfig>,
+
+    /// Scope enforcement rules.
+    #[serde(default)]
+    pub scope: ScopeConfig,
+}
+
+fn default_a2a_timeout() -> u64 {
+    300
+}
+
+fn default_a2a_poll_interval() -> u64 {
+    2000
+}
+
+/// A2A authentication configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct A2aAuthConfig {
+    /// Authentication type: "bearer" or "api_key".
+    #[serde(rename = "type")]
+    pub auth_type: String,
+
+    /// Environment variable containing the token/key.
+    #[serde(default)]
+    pub token_env: Option<String>,
+
+    /// Header name for API key authentication.
+    #[serde(default)]
+    pub header: Option<String>,
 }
 
 /// Scope enforcement configuration.
@@ -461,4 +521,61 @@ impl Default for MetricsConfig {
 
 fn default_metrics_bind() -> String {
     "127.0.0.1:9091".to_string()
+}
+
+/// A2A server configuration for receiving tasks from external agents.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct A2aServerConfig {
+    /// Enable the A2A server.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Bind address (host:port).
+    #[serde(default = "default_a2a_server_bind")]
+    pub bind: String,
+
+    /// Agent name (used in agent card).
+    #[serde(default = "default_a2a_server_name")]
+    pub name: String,
+
+    /// Agent description (used in agent card).
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// Task timeout in seconds.
+    #[serde(default = "default_a2a_server_timeout")]
+    pub task_timeout_secs: u64,
+
+    /// Maximum concurrent tasks.
+    #[serde(default = "default_a2a_server_max_tasks")]
+    pub max_concurrent_tasks: usize,
+}
+
+impl Default for A2aServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_a2a_server_bind(),
+            name: default_a2a_server_name(),
+            description: None,
+            task_timeout_secs: default_a2a_server_timeout(),
+            max_concurrent_tasks: default_a2a_server_max_tasks(),
+        }
+    }
+}
+
+fn default_a2a_server_bind() -> String {
+    "127.0.0.1:8765".to_string()
+}
+
+fn default_a2a_server_name() -> String {
+    "servitor".to_string()
+}
+
+fn default_a2a_server_timeout() -> u64 {
+    300
+}
+
+fn default_a2a_server_max_tasks() -> usize {
+    10
 }

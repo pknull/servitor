@@ -3,9 +3,10 @@
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
+use crate::a2a::A2aPool;
 use crate::agent::context::ConversationContext;
 use crate::agent::provider::{ContentBlock, Provider, StopReason};
-use crate::agent::sanitize::sanitize_arguments;
+use crate::agent::sanitize::{sanitize_arguments, sanitize_tool_result};
 use crate::authority::Authority;
 use crate::config::AgentConfig;
 use crate::egregore::messages::{
@@ -19,10 +20,22 @@ use crate::mcp::{LlmTool, McpPool};
 use crate::metrics::{self, Timer, ToolCallStatus};
 use crate::scope::ScopeEnforcer;
 
+/// Parameters for publishing A2A delegation spans.
+struct A2aDelegationParams<'a> {
+    agent_name: &'a str,
+    skill_name: &'a str,
+    task_id: &'a str,
+    arguments: &'a serde_json::Value,
+    start_ts: DateTime<Utc>,
+    end_ts: DateTime<Utc>,
+    success: bool,
+}
+
 /// Agent executor — runs the tool_use loop for a task.
 pub struct AgentExecutor<'a> {
     provider: &'a dyn Provider,
     mcp_pool: &'a McpPool,
+    a2a_pool: Option<&'a A2aPool>,
     scope_enforcer: &'a ScopeEnforcer,
     identity: &'a Identity,
     config: &'a AgentConfig,
@@ -42,6 +55,7 @@ impl<'a> AgentExecutor<'a> {
         Self {
             provider,
             mcp_pool,
+            a2a_pool: None,
             scope_enforcer,
             identity,
             config,
@@ -57,6 +71,12 @@ impl<'a> AgentExecutor<'a> {
         self
     }
 
+    /// Set A2A pool for external agent delegation.
+    pub fn with_a2a_pool(mut self, a2a_pool: &'a A2aPool) -> Self {
+        self.a2a_pool = Some(a2a_pool);
+        self
+    }
+
     /// Set authority for skill permission checks.
     pub fn with_authority(mut self, authority: &'a Authority, keeper_name: Option<String>) -> Self {
         self.authority = Some(authority);
@@ -64,10 +84,40 @@ impl<'a> AgentExecutor<'a> {
         self
     }
 
+    /// Get all tools (MCP + A2A) for LLM consumption.
+    fn all_tools_for_llm(&self) -> Vec<LlmTool> {
+        let mut tools = self.mcp_pool.tools_for_llm();
+        if let Some(a2a_pool) = self.a2a_pool {
+            tools.extend(a2a_pool.tools_for_llm());
+        }
+        tools
+    }
+
+    /// Check if a tool belongs to the A2A pool.
+    fn is_a2a_tool(&self, prefixed_name: &str) -> bool {
+        self.a2a_pool
+            .map(|pool| pool.has_tool(prefixed_name))
+            .unwrap_or(false)
+    }
+
+    /// Parse a prefixed tool name into (provider_name, tool_name).
+    /// Checks both MCP and A2A pools.
+    fn parse_tool_name<'b>(&'b self, prefixed_name: &'b str) -> Option<(&'b str, &'b str)> {
+        // Try MCP pool first
+        if let Some(result) = self.mcp_pool.parse_tool_name(prefixed_name) {
+            return Some(result);
+        }
+        // Try A2A pool
+        if let Some(a2a_pool) = self.a2a_pool {
+            return a2a_pool.parse_tool_name(prefixed_name);
+        }
+        None
+    }
+
     /// Produce and validate a signed plan artifact without executing tools.
     pub async fn plan(&self, task: &Task) -> Result<TaskPlan> {
         let mut context = self.load_context(task).await?;
-        let tools = self.mcp_pool.tools_for_llm();
+        let tools = self.all_tools_for_llm();
 
         context.add_user_message(&task.prompt);
 
@@ -110,7 +160,7 @@ impl<'a> AgentExecutor<'a> {
         let trace_service = "servitor";
         let trace_started_at = trace_enabled.then(Utc::now);
         let mut context = self.load_context(task).await?;
-        let tools = self.mcp_pool.tools_for_llm();
+        let tools = self.all_tools_for_llm();
 
         // Build system prompt
         let system = self.build_system_prompt(task);
@@ -230,17 +280,16 @@ impl<'a> AgentExecutor<'a> {
                 if let (Some(trace_id), Some(root_span_id)) = (&trace_id, &root_span_id) {
                     let tool_span_started_at = Utc::now();
                     let tool_span_id = new_span_id();
-                    let (mcp_name, bare_tool_name) = self
-                        .mcp_pool
+                    let (provider_name, bare_tool_name) = self
                         .parse_tool_name(tool_name)
-                        .map(|(mcp, tool)| (mcp.to_string(), tool.to_string()))
+                        .map(|(provider, tool)| (provider.to_string(), tool.to_string()))
                         .unwrap_or_else(|| ("unknown".to_string(), tool_name.to_string()));
                     let tool_span = self.build_tool_trace_span(
                         trace_id,
                         root_span_id,
                         trace_service,
                         &tool_span_id,
-                        &mcp_name,
+                        &provider_name,
                         &bare_tool_name,
                         arguments,
                         tool_span_started_at,
@@ -250,7 +299,9 @@ impl<'a> AgentExecutor<'a> {
                 }
                 tool_results.push(match result {
                     Ok(output) => {
-                        ContentBlock::tool_result(tool_id, output.text_content(), output.is_error)
+                        // Sanitize tool result to redact sensitive content before feeding back to LLM
+                        let sanitized_content = sanitize_tool_result(&output.text_content());
+                        ContentBlock::tool_result(tool_id, sanitized_content, output.is_error)
                     }
                     Err(e) => ContentBlock::tool_result(tool_id, e.to_string(), true),
                 });
@@ -269,15 +320,12 @@ impl<'a> AgentExecutor<'a> {
         prefixed_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<crate::mcp::ToolCallResult> {
-        let (mcp_name, tool_name) = parse_prefixed_tool_name(prefixed_name)?;
-        let skill = format!("{}:{}", mcp_name, tool_name);
+        let (provider_name, tool_name) = parse_prefixed_tool_name(prefixed_name)?;
+        let skill = format!("{}:{}", provider_name, tool_name);
 
-        if let Err(error) = self.validate_tool_call(
-            task,
-            prefixed_name,
-            arguments,
-            &self.mcp_pool.tools_for_llm(),
-        ) {
+        if let Err(error) =
+            self.validate_tool_call(task, prefixed_name, arguments, &self.all_tools_for_llm())
+        {
             // Record metrics for validation failures
             let status = match &error {
                 ServitorError::Unauthorized { .. } => {
@@ -288,13 +336,18 @@ impl<'a> AgentExecutor<'a> {
                 ServitorError::ScopeViolation { .. } => ToolCallStatus::ScopeViolation,
                 _ => ToolCallStatus::Error,
             };
-            metrics::record_tool_call(tool_name, mcp_name, status);
+            metrics::record_tool_call(tool_name, provider_name, status);
             return Err(error);
         }
 
-        tracing::debug!(mcp = mcp_name, tool = tool_name, "executing tool");
+        // Check if this is an A2A tool
+        if self.is_a2a_tool(prefixed_name) {
+            return self.execute_a2a_tool(task, prefixed_name, arguments).await;
+        }
 
-        // Execute the tool with timing
+        tracing::debug!(mcp = provider_name, tool = tool_name, "executing MCP tool");
+
+        // Execute the MCP tool with timing
         let timer = Timer::start();
         let result = self
             .mcp_pool
@@ -307,10 +360,157 @@ impl<'a> AgentExecutor<'a> {
             Ok(output) if !output.is_error => ToolCallStatus::Success,
             _ => ToolCallStatus::Error,
         };
-        metrics::record_tool_call(tool_name, mcp_name, status);
+        metrics::record_tool_call(tool_name, provider_name, status);
         metrics::record_tool_call_duration(tool_name, duration);
 
         result
+    }
+
+    /// Execute an A2A tool call (delegation to external agent).
+    async fn execute_a2a_tool(
+        &self,
+        task: &Task,
+        prefixed_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<crate::mcp::ToolCallResult> {
+        let Some(a2a_pool) = self.a2a_pool else {
+            return Err(ServitorError::Mcp {
+                reason: "A2A pool not configured".into(),
+            });
+        };
+
+        let (agent_name, skill_name) =
+            a2a_pool
+                .parse_tool_name(prefixed_name)
+                .ok_or_else(|| ServitorError::Mcp {
+                    reason: format!("unknown A2A tool: {}", prefixed_name),
+                })?;
+
+        tracing::debug!(
+            agent = agent_name,
+            skill = skill_name,
+            "executing A2A delegation"
+        );
+
+        // Execute the A2A skill with timing
+        let start_ts = Utc::now();
+        let timer = Timer::start();
+        let result = a2a_pool
+            .execute_skill(prefixed_name, arguments.clone())
+            .await;
+        let duration = timer.elapsed_secs();
+        let end_ts = Utc::now();
+
+        // Record metrics
+        let success = result.is_ok();
+        let status = if success {
+            ToolCallStatus::Success
+        } else {
+            ToolCallStatus::Error
+        };
+        metrics::record_tool_call(skill_name, agent_name, status);
+        metrics::record_tool_call_duration(skill_name, duration);
+
+        // Generate a task ID for the delegation span
+        let task_id = format!(
+            "{}-{}",
+            task.hash.chars().take(8).collect::<String>(),
+            start_ts.timestamp_millis()
+        );
+
+        // Publish delegation span to egregore (after execution to capture outcome)
+        self.publish_a2a_delegation(
+            task,
+            A2aDelegationParams {
+                agent_name,
+                skill_name,
+                task_id: &task_id,
+                arguments,
+                start_ts,
+                end_ts,
+                success,
+            },
+        )
+        .await;
+
+        // Convert A2A result to MCP result format
+        result
+            .map(|r| r.to_mcp_result())
+            .map_err(|e| ServitorError::Mcp {
+                reason: format!("A2A delegation failed: {}", e),
+            })
+    }
+
+    /// Publish A2A delegation event to egregore feed as a trace span.
+    async fn publish_a2a_delegation(&self, task: &Task, params: A2aDelegationParams<'_>) {
+        let Some(egregore) = self.egregore else {
+            return;
+        };
+
+        let A2aDelegationParams {
+            agent_name,
+            skill_name,
+            task_id,
+            arguments,
+            start_ts,
+            end_ts,
+            success,
+        } = params;
+
+        // Compute hash of input for audit trail (not the full input to avoid leaking data)
+        let input_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(
+                serde_json::to_string(arguments)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
+            let hash = hasher.finalize();
+            format!(
+                "sha256:{}",
+                hash.iter()
+                    .take(8)
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            )
+        };
+
+        let span_id = format!("a2a-{}-{}", agent_name, task_id);
+        let status = if success {
+            TraceSpanStatus::Ok
+        } else {
+            TraceSpanStatus::Error
+        };
+
+        let mut span = TraceSpan::new(
+            task.hash.clone(),             // trace_id: use task hash for correlation
+            span_id,                       // span_id: unique for this delegation
+            None,                          // parent_span_id
+            format!("a2a:{}", skill_name), // name
+            agent_name,                    // service
+            start_ts,
+            end_ts,
+            status,
+        );
+
+        // Add delegation-specific attributes
+        span.attributes
+            .insert("a2a.agent".to_string(), serde_json::json!(agent_name));
+        span.attributes
+            .insert("a2a.skill".to_string(), serde_json::json!(skill_name));
+        span.attributes
+            .insert("a2a.task_id".to_string(), serde_json::json!(task_id));
+        span.attributes
+            .insert("a2a.input_hash".to_string(), serde_json::json!(input_hash));
+
+        if let Err(error) = egregore.publish_trace_span(&span).await {
+            tracing::debug!(
+                error = %error,
+                agent = %agent_name,
+                skill = %skill_name,
+                "failed to publish A2A delegation span"
+            );
+        }
     }
 
     async fn publish_assignment_denial(&self, task: &Task, skill: &str, reason: &str) {

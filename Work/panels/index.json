@@ -1,0 +1,44 @@
+{
+  "panels": [
+    {
+      "id": "2026-03-18--agent-networking-systems",
+      "topic": "Find other agent networking systems - decentralized alone is not a selling point",
+      "status": "completed",
+      "created": "2026-03-18T15:40:00+10:00",
+      "updated": "2026-03-18T17:00:00+10:00",
+      "current_phase": 8,
+      "decision": "Compliance Positioning with Edge Secondary. Stop saying 'decentralized', start saying 'provable AI decisions'.",
+      "consensus": 85
+    },
+    {
+      "id": "2026-03-18--competitive-analysis",
+      "topic": "Competitive analysis of Servitor/Egregore vs similar tools (OpenClaw, etc.) - ease of implementation, scalability, networkability",
+      "status": "completed",
+      "created": "2026-03-18T14:30:00+10:00",
+      "updated": "2026-03-18T15:35:00+10:00",
+      "current_phase": 8,
+      "decision": "Hybrid Strategy: MCP-First with Compliance Positioning",
+      "consensus": 80
+    },
+    {
+      "id": "2026-03-18--thallus-deployability-review",
+      "topic": "Thorough review of Thallus project for deployability, understandability, and lightweight hardware suitability",
+      "status": "completed",
+      "created": "2026-03-18T18:45:00+10:00",
+      "updated": "2026-03-18T19:20:00+10:00",
+      "current_phase": 8,
+      "decision": "Project remains deployable and suitable for lightweight hardware. Minor documentation fixes recommended.",
+      "consensus": 80
+    },
+    {
+      "id": "2026-03-18--servitor-daemon-refactor",
+      "topic": "Design extraction of servitor daemon loop from main.rs (1,655 lines)",
+      "status": "completed",
+      "created": "2026-03-18T19:30:00+10:00",
+      "updated": "2026-03-18T20:00:00+10:00",
+      "current_phase": 8,
+      "decision": "Extract into cli/ and runtime/ modules plus extend existing task/, egregore/, authority/ modules. 5-phase incremental approach.",
+      "consensus": 75
+    }
+  ]
+}

@@ -9,9 +9,11 @@
 pub mod context;
 pub mod hook;
 pub mod messages;
+pub mod profile;
 pub mod publish;
 
 pub use context::ConversationTurn;
 pub use hook::{parse_message, receive_message};
 pub use messages::*;
+pub use profile::build_profile;
 pub use publish::EgregoreClient;

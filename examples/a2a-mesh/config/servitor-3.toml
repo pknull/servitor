@@ -1,0 +1,48 @@
+# Servitor 3 - Terminal node
+# Has A2A server but NO outbound A2A (terminates delegation chain)
+
+[identity]
+data_dir = "/var/lib/servitor"
+
+[egregore]
+api_url = "http://egregore-3:7654"
+subscribe = true
+
+[llm]
+provider = "ollama"
+base_url = "http://ollama:11434/v1"
+model = "llama3.2:3b"
+
+[agent]
+max_turns = 10
+timeout_secs = 120
+publish_trace_spans = true
+
+[task]
+offer_ttl_secs = 300
+offer_timeout_secs = 60
+assign_timeout_secs = 300
+start_timeout_secs = 30
+eta_buffer_multiplier = 1.5
+ping_timeout_secs = 30
+
+[heartbeat]
+interval_secs = 30
+
+[metrics]
+enabled = true
+bind = "0.0.0.0:9091"
+
+# A2A Server
+[a2a_server]
+enabled = true
+bind = "0.0.0.0:8765"
+name = "servitor-3"
+description = "Terminal servitor - no outbound A2A delegation"
+task_timeout_secs = 120
+max_concurrent_tasks = 5
+
+# NO A2A clients - this node terminates the delegation chain
+# This is a topology-based loop prevention strategy
+
+# No MCP servers - A2A-only test configuration
