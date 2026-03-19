@@ -1,0 +1,23 @@
+# Authority Configuration for A2A Mesh Test
+# Open mode - allows all requests for testing
+
+# Default keeper for anonymous requests
+[default_keeper]
+name = "anonymous"
+egregore_pubkey = "*"
+
+# Test keeper that matches any bearer token
+[[keeper]]
+name = "test-user"
+http_token = "*"
+
+# Allow all places
+[[place]]
+pattern = "*"
+keepers = ["*"]
+default_skills = ["*"]
+
+# Allow all skills
+[[skill]]
+pattern = "*"
+allowed = true

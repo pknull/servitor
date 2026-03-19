@@ -1,0 +1,71 @@
+{
+  "id": "2026-03-18--agent-networking-systems",
+  "topic": "Find other agent networking systems - decentralized alone is not a selling point. Compare agent networking tools to our setup.",
+  "status": "completed",
+  "created": "2026-03-18T15:40:00+10:00",
+  "updated": "2026-03-18T17:00:00+10:00",
+  "current_phase": 8,
+  "completed_phases": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "decision_rule": "consensus",
+  "context_files": [],
+  "panel": {
+    "core": [
+      "The Moderator",
+      "The Analyst",
+      "The Challenger"
+    ],
+    "specialists": [
+      {
+        "agent": "research-assistant",
+        "session_name": "The Protocol Archaeologist",
+        "score": 9
+      },
+      {
+        "agent": "devops-engineer",
+        "session_name": "The Integration Analyst",
+        "score": 7
+      },
+      {
+        "agent": "security-auditor",
+        "session_name": "The Trust Cartographer",
+        "score": 6
+      }
+    ]
+  },
+  "goals": [
+    "Identify agent networking tools (not just 'decentralized' frameworks)",
+    "Compare coordination protocols and message passing",
+    "Assess practical differentiators for Servitor/Egregore",
+    "Find what actually matters for agent-to-agent communication"
+  ],
+  "positions": {
+    "The Protocol Archaeologist": {
+      "position": "Gossip-based coordination is rare. Most use centralized orchestration.",
+      "recommendation": "Position gossip as 'coordination without central point of failure'"
+    },
+    "The Integration Analyst": {
+      "position": "Every competitor requires a central coordinator. Egregore is unique.",
+      "recommendation": "Embrace async-first, add soft checkpointing"
+    },
+    "The Trust Cartographer": {
+      "position": "Most frameworks have NO trust model. CrewAI has auth. Servitor has proof.",
+      "recommendation": "Emphasize 'cryptographic proof' not 'authentication'"
+    },
+    "The Challenger": {
+      "position": "These differences are real but may not matter to users.",
+      "recommendation": "Find users who need these features before celebrating"
+    }
+  },
+  "decision": "Compliance Positioning with Edge Secondary. Stop saying 'decentralized', start saying 'provable AI decisions'.",
+  "consensus": 85
+}

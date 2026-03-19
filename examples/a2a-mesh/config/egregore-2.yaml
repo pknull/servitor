@@ -1,0 +1,25 @@
+# Egregore Node 2
+data_dir: /data
+port: 7654
+gossip_port: 7655
+gossip_bind: "0.0.0.0"
+gossip_interval_secs: 60
+discovery_port: 7656
+
+# Shared network key - all nodes must match
+network_key: "a2a-mesh-test-network"
+
+# Static peers - point to other nodes
+peers:
+  - "egregore-1:7655"
+  - "egregore-3:7655"
+
+lan_discovery: false
+mdns_discovery: false
+push_enabled: true
+max_persistent_connections: 8
+
+api_enabled: true
+api_bind: "0.0.0.0"
+api_auth_enabled: false
+mcp_enabled: false

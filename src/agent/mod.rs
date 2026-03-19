@@ -7,9 +7,14 @@
 
 pub mod context;
 pub mod r#loop;
-pub mod provider;
+pub mod providers;
 pub mod sanitize;
 
+// Re-export for backward compatibility
+pub mod provider {
+    pub use super::providers::*;
+}
+
 pub use context::ConversationContext;
-pub use provider::{create_provider, ChatResponse, ContentBlock, Message, Provider, Role};
+pub use providers::{create_provider, ChatResponse, ContentBlock, Message, Provider, Role};
 pub use r#loop::AgentExecutor;

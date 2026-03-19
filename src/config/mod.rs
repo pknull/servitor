@@ -8,6 +8,45 @@ use crate::error::{Result, ServitorError};
 use std::path::Path;
 
 impl Config {
+    /// Create a minimal default configuration for testing or fallback.
+    ///
+    /// This configuration uses sensible defaults for local development:
+    /// - Anthropic provider with claude-sonnet model
+    /// - Local egregore at 127.0.0.1:7654
+    /// - Standard agent limits (50 turns, 300s timeout)
+    pub fn minimal_defaults() -> Result<Self> {
+        let toml = r#"
+[identity]
+data_dir = "~/.servitor"
+
+[egregore]
+api_url = "http://127.0.0.1:7654"
+subscribe = false
+
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[agent]
+max_turns = 50
+timeout_secs = 300
+
+[task]
+offer_ttl_secs = 300
+offer_timeout_secs = 60
+assign_timeout_secs = 300
+start_timeout_secs = 30
+eta_buffer_multiplier = 1.5
+ping_timeout_secs = 30
+
+[heartbeat]
+interval_secs = 300
+include_runtime_monitoring = false
+"#;
+        Self::from_str(toml)
+    }
+
     /// Load configuration from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| ServitorError::Config {
@@ -28,46 +67,48 @@ impl Config {
 
     /// Validate configuration.
     fn validate(&self) -> Result<()> {
-        // Validate LLM provider
-        match self.llm.provider.as_str() {
-            "anthropic" => {
-                if self.llm.api_key_env.is_none() {
+        // Validate LLM provider (if configured)
+        if let Some(ref llm) = self.llm {
+            match llm.provider.as_str() {
+                "anthropic" => {
+                    if llm.api_key_env.is_none() {
+                        return Err(ServitorError::Config {
+                            reason: "anthropic provider requires api_key_env".into(),
+                        });
+                    }
+                }
+                "openai" => {
+                    if llm.api_key_env.is_none() {
+                        return Err(ServitorError::Config {
+                            reason: "openai provider requires api_key_env".into(),
+                        });
+                    }
+                }
+                "ollama" => {
+                    // Ollama doesn't require API key
+                }
+                "openai-compat" => {
+                    if llm.base_url.is_none() {
+                        return Err(ServitorError::Config {
+                            reason: "openai-compat provider requires base_url".into(),
+                        });
+                    }
+                }
+                "codex" => {
+                    if llm.token_file.is_none() {
+                        return Err(ServitorError::Config {
+                            reason: "codex provider requires token_file".into(),
+                        });
+                    }
+                }
+                "claude-code" => {
+                    // Claude Code uses CLI authentication, no config needed
+                }
+                other => {
                     return Err(ServitorError::Config {
-                        reason: "anthropic provider requires api_key_env".into(),
+                        reason: format!("unknown LLM provider: {}", other),
                     });
                 }
-            }
-            "openai" => {
-                if self.llm.api_key_env.is_none() {
-                    return Err(ServitorError::Config {
-                        reason: "openai provider requires api_key_env".into(),
-                    });
-                }
-            }
-            "ollama" => {
-                // Ollama doesn't require API key
-            }
-            "openai-compat" => {
-                if self.llm.base_url.is_none() {
-                    return Err(ServitorError::Config {
-                        reason: "openai-compat provider requires base_url".into(),
-                    });
-                }
-            }
-            "codex" => {
-                if self.llm.token_file.is_none() {
-                    return Err(ServitorError::Config {
-                        reason: "codex provider requires token_file".into(),
-                    });
-                }
-            }
-            "claude-code" => {
-                // Claude Code uses CLI authentication, no config needed
-            }
-            other => {
-                return Err(ServitorError::Config {
-                    reason: format!("unknown LLM provider: {}", other),
-                });
             }
         }
 
@@ -152,9 +193,32 @@ model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 "#;
         let config = Config::from_str(toml).unwrap();
-        assert_eq!(config.llm.provider, "anthropic");
-        assert_eq!(config.llm.model, "claude-sonnet-4-20250514");
+        let llm = config.llm.as_ref().expect("LLM should be configured");
+        assert_eq!(llm.provider, "anthropic");
+        assert_eq!(llm.model, "claude-sonnet-4-20250514");
         assert_eq!(config.heartbeat.interval_secs, 300);
+    }
+
+    #[test]
+    fn parse_worker_config_no_llm() {
+        // Worker mode: A2A server + MCP tools, no LLM reasoning
+        let toml = r#"
+[a2a_server]
+enabled = true
+bind = "0.0.0.0:8765"
+name = "shell-worker"
+
+[mcp.shell]
+transport = "stdio"
+command = "mcp-server-shell"
+"#;
+        let config = Config::from_str(toml).unwrap();
+        assert!(config.llm.is_none());
+        assert!(config
+            .a2a_server
+            .as_ref()
+            .map(|s| s.enabled)
+            .unwrap_or(false));
     }
 
     #[test]

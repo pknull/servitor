@@ -1,0 +1,50 @@
+{
+  "id": "2026-03-18--servitor-daemon-refactor",
+  "topic": "Design the extraction of servitor's daemon loop from main.rs (1,655 lines) into maintainable modules",
+  "status": "completed",
+  "created": "2026-03-18T19:30:00+10:00",
+  "updated": "2026-03-18T20:00:00+10:00",
+  "current_phase": 8,
+  "completed_phases": [
+    -1,
+    1,
+    3,
+    4,
+    7,
+    8
+  ],
+  "decision_rule": "consensus",
+  "context_files": [],
+  "panel": {
+    "core": [
+      "The Moderator",
+      "The Analyst",
+      "The Challenger"
+    ],
+    "specialists": [
+      {
+        "agent": "code:architect",
+        "session_name": "The Systems Designer",
+        "score": 10
+      },
+      {
+        "agent": "refactoring-specialist",
+        "session_name": "The Extraction Surgeon",
+        "score": 9
+      },
+      {
+        "agent": "code:code-reviewer",
+        "session_name": "The Quality Auditor",
+        "score": 7
+      }
+    ]
+  },
+  "goals": [
+    "Reduce main.rs from 1,655 lines to <200 lines",
+    "Extract daemon loop into maintainable modules",
+    "Improve testability",
+    "Maintain existing behavior"
+  ],
+  "decision": "Extract into cli/ and runtime/ modules plus extend existing task/, egregore/, authority/ modules",
+  "consensus": 75
+}

@@ -45,14 +45,36 @@ impl EventRouter {
         self.sources.push(source);
     }
 
-    /// Poll all sources and return the first available task.
+    /// Poll all sources concurrently and return the first available task.
+    ///
+    /// Uses concurrent polling so a slow source doesn't block others.
     pub async fn poll(&mut self) -> Option<(usize, Task)> {
-        for (idx, source) in self.sources.iter_mut().enumerate() {
-            if let Some(task) = source.next().await {
-                tracing::debug!(source = source.name(), hash = %task.hash, "task from event source");
+        if self.sources.is_empty() {
+            return None;
+        }
+
+        // Poll all sources concurrently
+        let futures: Vec<_> = self
+            .sources
+            .iter_mut()
+            .enumerate()
+            .map(|(idx, source)| {
+                let name = source.name().to_string();
+                Box::pin(async move { (idx, name, source.next().await) })
+            })
+            .collect();
+
+        // Use select_all to get the first completed future
+        let results = futures::future::join_all(futures).await;
+
+        // Return the first source that yielded a task
+        for (idx, name, task_opt) in results {
+            if let Some(task) = task_opt {
+                tracing::debug!(source = %name, hash = %task.hash, "task from event source");
                 return Some((idx, task));
             }
         }
+
         None
     }
 

@@ -29,6 +29,7 @@ pub trait McpClient: Send + Sync {
 
 /// Result of MCP initialize call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeResult {
     pub protocol_version: String,
     pub server_info: ServerInfo,
@@ -38,6 +39,7 @@ pub struct InitializeResult {
 
 /// MCP server information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
@@ -45,6 +47,7 @@ pub struct ServerInfo {
 
 /// MCP server capabilities.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
     #[serde(default)]
     pub tools: Option<ToolsCapability>,
@@ -55,12 +58,14 @@ pub struct ServerCapabilities {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolsCapability {
     #[serde(default)]
     pub list_changed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourcesCapability {
     #[serde(default)]
     pub subscribe: bool,
@@ -69,6 +74,7 @@ pub struct ResourcesCapability {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptsCapability {
     #[serde(default)]
     pub list_changed: bool,
@@ -93,6 +99,7 @@ impl ToolDefinition {
 
 /// Result of a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolCallResult {
     #[serde(default)]
     pub content: Vec<ToolContent>,
@@ -102,15 +109,13 @@ pub struct ToolCallResult {
 
 /// Content item in tool result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ToolContent {
-    Text {
-        text: String,
-    },
-    Image {
-        data: String,
-        mime_type: String,
-    },
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image")]
+    Image { data: String, mime_type: String },
+    #[serde(rename = "resource")]
     Resource {
         uri: String,
         mime_type: Option<String>,

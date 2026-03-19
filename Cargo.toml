@@ -69,6 +69,10 @@ shellexpand = "3"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
+# HTTP server (for A2A server)
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"
@@ -76,3 +80,7 @@ tokio-test = "0.4"
 [[bin]]
 name = "servitor"
 path = "src/main.rs"
+
+[profile.release]
+lto = true
+strip = true

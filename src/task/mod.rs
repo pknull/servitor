@@ -1,7 +1,11 @@
 //! Task coordination helpers for offer -> assign -> execute flow.
 
+mod filter;
+mod handlers;
 mod state;
 
+pub use filter::task_matches_capabilities;
+pub use handlers::{execute_assigned_task, maybe_accept_assignment, process_sse_message};
 pub use state::{
     ActiveExecution, AssignmentDecision, ExpiredOffer, OfferDecision, OfferedTask, TaskCoordinator,
     TaskLifecycleEvent,
