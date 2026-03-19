@@ -97,9 +97,7 @@ const TASK_NOT_FOUND: i32 = -32002;
 const CAPACITY_EXCEEDED: i32 = -32003;
 
 /// Handle GET /.well-known/agent.json
-pub async fn handle_agent_card(
-    State(state): State<Arc<A2aServerState>>,
-) -> impl IntoResponse {
+pub async fn handle_agent_card(State(state): State<Arc<A2aServerState>>) -> impl IntoResponse {
     let mcp_pool = state.mcp_pool.read().await;
     let a2a_pool = state.a2a_pool.read().await;
 
@@ -128,7 +126,9 @@ pub async fn handle_jsonrpc(
 
     // Dispatch to method handler
     let response = match request.method.as_str() {
-        "tasks/send" => handle_tasks_send(&state, request.id.clone(), request.params, bearer_token).await,
+        "tasks/send" => {
+            handle_tasks_send(&state, request.id.clone(), request.params, bearer_token).await
+        }
         "tasks/get" => handle_tasks_get(&state, request.id.clone(), request.params).await,
         "tasks/cancel" => handle_tasks_cancel(&state, request.id.clone(), request.params).await,
         _ => JsonRpcResponse::error(
@@ -267,8 +267,7 @@ async fn handle_tasks_send(
     let skill_exists = {
         let mcp_pool = state.mcp_pool.read().await;
         let a2a_pool = state.a2a_pool.read().await;
-        mcp_pool.parse_tool_name(&params.skill).is_some()
-            || a2a_pool.has_tool(&params.skill)
+        mcp_pool.parse_tool_name(&params.skill).is_some() || a2a_pool.has_tool(&params.skill)
     };
 
     if !skill_exists {
@@ -346,7 +345,10 @@ async fn execute_task(
     if let Some(underscore_pos) = skill.find('_') {
         let server_name = &skill[..underscore_pos];
         let tool_name = &skill[underscore_pos + 1..];
-        if let Err(e) = state.scope_enforcer.check(server_name, tool_name, &input, None) {
+        if let Err(e) = state
+            .scope_enforcer
+            .check(server_name, tool_name, &input, None)
+        {
             let error = format!("Scope violation: {}", e);
             tracing::warn!(task_id = %task_id, error = %error, "task scope violation");
             state.task_store.fail(&task_id, error).await;
@@ -512,10 +514,8 @@ mod tests {
 
     #[test]
     fn test_jsonrpc_response_serialization() {
-        let success = JsonRpcResponse::success(
-            serde_json::json!(1),
-            serde_json::json!({"taskId": "abc"}),
-        );
+        let success =
+            JsonRpcResponse::success(serde_json::json!(1), serde_json::json!({"taskId": "abc"}));
         let json = serde_json::to_string(&success).unwrap();
         assert!(json.contains("\"result\""));
         assert!(!json.contains("\"error\""));

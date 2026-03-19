@@ -1,0 +1,36 @@
+{
+  "id": "2026-03-18--servitor-refactor-review",
+  "topic": "Full code review of servitor project following major daemon loop extraction refactor",
+  "status": "completed",
+  "created": "2026-03-18T12:00:00+10:00",
+  "updated": "2026-03-18T12:00:00+10:00",
+  "current_phase": -1,
+  "completed_phases": [],
+  "decision_rule": "consensus",
+  "context_files": [],
+  "panel": {
+    "core": [
+      "The Moderator",
+      "The Analyst",
+      "The Challenger"
+    ],
+    "specialists": [
+      {
+        "agent": "security-auditor",
+        "session_name": "The Sentinel",
+        "score": 9
+      },
+      {
+        "agent": "refactoring-specialist",
+        "session_name": "The Surgeon",
+        "score": 9
+      }
+    ]
+  },
+  "goals": [
+    "Validate refactor preserved correctness",
+    "Identify any security regressions",
+    "Assess code quality post-extraction",
+    "Surface any architectural concerns"
+  ]
+}

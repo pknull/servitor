@@ -112,14 +112,9 @@ pub struct ToolCallResult {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ToolContent {
     #[serde(rename = "text")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
     #[serde(rename = "image")]
-    Image {
-        data: String,
-        mime_type: String,
-    },
+    Image { data: String, mime_type: String },
     #[serde(rename = "resource")]
     Resource {
         uri: String,

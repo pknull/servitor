@@ -44,7 +44,12 @@ pub struct A2aServerTask {
 
 impl A2aServerTask {
     /// Create a new task.
-    pub fn new(id: String, skill: String, input: serde_json::Value, keeper: Option<String>) -> Self {
+    pub fn new(
+        id: String,
+        skill: String,
+        input: serde_json::Value,
+        keeper: Option<String>,
+    ) -> Self {
         let now = Instant::now();
         Self {
             id,
@@ -153,9 +158,9 @@ impl A2aTaskStore {
 
         // Clean up completed/failed/cancelled and timed out tasks
         let timeout = inner.task_timeout;
-        inner.tasks.retain(|_, task| {
-            !task.state.is_terminal() && !task.is_timed_out(timeout)
-        });
+        inner
+            .tasks
+            .retain(|_, task| !task.state.is_terminal() && !task.is_timed_out(timeout));
 
         // Check capacity
         if inner.tasks.len() >= inner.max_tasks {

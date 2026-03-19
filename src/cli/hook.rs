@@ -93,9 +93,12 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
         reason: format!("failed to create A2A pool: {}", e),
     })?;
     if !a2a_pool.is_empty() {
-        a2a_pool.initialize_all().await.map_err(|e| ServitorError::Config {
-            reason: format!("failed to initialize A2A pool: {}", e),
-        })?;
+        a2a_pool
+            .initialize_all()
+            .await
+            .map_err(|e| ServitorError::Config {
+                reason: format!("failed to initialize A2A pool: {}", e),
+            })?;
     }
 
     let mut scope_enforcer = ScopeEnforcer::new();

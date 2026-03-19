@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::{Client, header};
+use reqwest::{header, Client};
 use tokio::time::sleep;
 
 use super::card::AgentCard;
@@ -47,9 +47,11 @@ impl HttpA2aClient {
         let mut headers = header::HeaderMap::new();
 
         if let Some(token) = &config.bearer_token {
-            let value = header::HeaderValue::from_str(&format!("Bearer {}", token))
-                .map_err(|e| A2aError::AuthFailed {
-                    reason: format!("invalid bearer token: {}", e),
+            let value =
+                header::HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|e| {
+                    A2aError::AuthFailed {
+                        reason: format!("invalid bearer token: {}", e),
+                    }
                 })?;
             headers.insert(header::AUTHORIZATION, value);
         }
@@ -61,7 +63,10 @@ impl HttpA2aClient {
             .map_err(A2aError::Http)?;
 
         let card_url = config.card_url.unwrap_or_else(|| {
-            format!("{}/.well-known/agent.json", config.url.trim_end_matches('/'))
+            format!(
+                "{}/.well-known/agent.json",
+                config.url.trim_end_matches('/')
+            )
         });
 
         Ok(Self {
@@ -174,15 +179,15 @@ impl A2aClient for HttpA2aClient {
             "fetching agent card"
         );
 
-        let response = self
-            .http
-            .get(&self.card_url)
-            .send()
-            .await
-            .map_err(|e| A2aError::CardFetchFailed {
-                agent: self.name.clone(),
-                reason: e.to_string(),
-            })?;
+        let response =
+            self.http
+                .get(&self.card_url)
+                .send()
+                .await
+                .map_err(|e| A2aError::CardFetchFailed {
+                    agent: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
 
         if !response.status().is_success() {
             return Err(A2aError::CardFetchFailed {
@@ -191,10 +196,13 @@ impl A2aClient for HttpA2aClient {
             });
         }
 
-        let card: AgentCard = response.json().await.map_err(|e| A2aError::CardFetchFailed {
-            agent: self.name.clone(),
-            reason: format!("invalid JSON: {}", e),
-        })?;
+        let card: AgentCard = response
+            .json()
+            .await
+            .map_err(|e| A2aError::CardFetchFailed {
+                agent: self.name.clone(),
+                reason: format!("invalid JSON: {}", e),
+            })?;
 
         tracing::info!(
             agent = %self.name,
@@ -236,11 +244,9 @@ impl A2aClient for HttpA2aClient {
         let task = self.poll_until_complete(&task_id).await?;
 
         match task.state {
-            TaskState::Completed => {
-                task.result.ok_or_else(|| A2aError::Protocol {
-                    reason: "completed task missing result".into(),
-                })
-            }
+            TaskState::Completed => task.result.ok_or_else(|| A2aError::Protocol {
+                reason: "completed task missing result".into(),
+            }),
             TaskState::Failed => Err(A2aError::TaskFailed {
                 task_id,
                 reason: task.error.unwrap_or_else(|| "unknown error".to_string()),

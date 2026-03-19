@@ -3,7 +3,9 @@
 
 use async_trait::async_trait;
 
-use super::{ChatResponse, ContentBlock, Message, Provider, ProviderCapabilities, Role, StopReason, Usage};
+use super::{
+    ChatResponse, ContentBlock, Message, Provider, ProviderCapabilities, Role, StopReason, Usage,
+};
 use crate::config::LlmConfig;
 use crate::error::{Result, ServitorError};
 use crate::mcp::LlmTool;

@@ -71,18 +71,15 @@ impl A2aPool {
 
         for (name, a2a_config) in &config.a2a {
             // Resolve bearer token from environment
-            let bearer_token = a2a_config
-                .auth
-                .as_ref()
-                .and_then(|auth| {
-                    if auth.auth_type == "bearer" {
-                        auth.token_env.as_ref().and_then(|env_var| {
-                            std::env::var(env_var).ok()
-                        })
-                    } else {
-                        None
-                    }
-                });
+            let bearer_token = a2a_config.auth.as_ref().and_then(|auth| {
+                if auth.auth_type == "bearer" {
+                    auth.token_env
+                        .as_ref()
+                        .and_then(|env_var| std::env::var(env_var).ok())
+                } else {
+                    None
+                }
+            });
 
             pool.add_agent(A2aAgentPoolConfig {
                 name: name.clone(),
@@ -114,10 +111,8 @@ impl A2aPool {
             Arc::new(RwLock::new(Box::new(client) as Box<dyn A2aClient>)),
         );
 
-        self.agent_runtime.insert(
-            config.name.clone(),
-            A2aAgentRuntime { initialized: false },
-        );
+        self.agent_runtime
+            .insert(config.name.clone(), A2aAgentRuntime { initialized: false });
 
         // Add circuit breaker for this agent
         let cb_config = CircuitBreakerConfig {
@@ -125,10 +120,8 @@ impl A2aPool {
             recovery_timeout: Duration::from_secs(60),
             success_threshold: 1,
         };
-        self.circuit_breakers.insert(
-            config.name,
-            RwLock::new(CircuitBreaker::new(cb_config)),
-        );
+        self.circuit_breakers
+            .insert(config.name, RwLock::new(CircuitBreaker::new(cb_config)));
 
         Ok(())
     }

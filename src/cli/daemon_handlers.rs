@@ -8,7 +8,7 @@ use crate::a2a::A2aPool;
 use crate::agent::provider::Provider;
 use crate::agent::AgentExecutor;
 use crate::authority::{AuthRequest, Authority, PersonId};
-use crate::comms::{task_from_comms, CommsMessage, CommsResponse, CommsResponder};
+use crate::comms::{task_from_comms, CommsMessage, CommsResponder, CommsResponse};
 use crate::config::Config;
 use crate::egregore::{build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskStatus};
 use crate::identity::Identity;

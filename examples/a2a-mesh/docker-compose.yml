@@ -1,0 +1,181 @@
+# A2A Mesh: 3-node Egregore + Servitor cluster with A2A interop
+# For testing gossip replication and A2A delegation between servitors.
+#
+# Usage:
+#   cd examples/a2a-mesh
+#   docker compose up -d
+#
+# Architecture:
+#   - 3 egregore nodes gossip with each other (shared network_key)
+#   - 3 servitors each connect to their local egregore
+#   - Each servitor exposes A2A server
+#   - Each servitor has A2A client connections to OTHER servitors
+#
+# Loop Prevention:
+#   - Each servitor only delegates to the NEXT servitor in the ring (not all)
+#   - servitor-1 → servitor-2 → servitor-3 → (no outbound A2A)
+#   - This breaks cycles by design (DAG topology)
+
+x-egregore-base: &egregore-base
+  build:
+    context: ../../../egregore
+    dockerfile: examples/docker/Dockerfile
+  restart: unless-stopped
+  environment:
+    - RUST_LOG=egregore=info,gossip=debug
+
+x-servitor-base: &servitor-base
+  build:
+    context: ../..
+    dockerfile: examples/docker/Dockerfile
+  restart: unless-stopped
+  environment:
+    - RUST_LOG=servitor=info,a2a=debug
+    - OLLAMA_BASE_URL=http://ollama:11434
+
+services:
+  # === Node 1 (Primary) ===
+  egregore-1:
+    <<: *egregore-base
+    container_name: egregore-1
+    hostname: egregore-1
+    volumes:
+      - egregore-1-data:/data
+      - ./config/egregore-1.yaml:/etc/egregore/config.yaml:ro
+    ports:
+      - "7665:7655"  # Gossip
+      - "127.0.0.1:7664:7654"  # API
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7654/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  servitor-1:
+    <<: *servitor-base
+    container_name: servitor-1
+    hostname: servitor-1
+    depends_on:
+      egregore-1:
+        condition: service_healthy
+    volumes:
+      - servitor-1-data:/var/lib/servitor
+      - ./config/servitor-1.toml:/etc/servitor/servitor.toml:ro
+      - ./config/authority.toml:/etc/servitor/authority.toml:ro
+    ports:
+      - "127.0.0.1:8765:8765"  # A2A Server
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/.well-known/agent.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # === Node 2 ===
+  egregore-2:
+    <<: *egregore-base
+    container_name: egregore-2
+    hostname: egregore-2
+    volumes:
+      - egregore-2-data:/data
+      - ./config/egregore-2.yaml:/etc/egregore/config.yaml:ro
+    ports:
+      - "7675:7655"  # Gossip (offset port)
+      - "127.0.0.1:7674:7654"  # API
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7654/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  servitor-2:
+    <<: *servitor-base
+    container_name: servitor-2
+    hostname: servitor-2
+    depends_on:
+      egregore-2:
+        condition: service_healthy
+      servitor-1:
+        condition: service_healthy
+    volumes:
+      - servitor-2-data:/var/lib/servitor
+      - ./config/servitor-2.toml:/etc/servitor/servitor.toml:ro
+      - ./config/authority.toml:/etc/servitor/authority.toml:ro
+    ports:
+      - "127.0.0.1:8775:8765"  # A2A Server
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/.well-known/agent.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # === Node 3 ===
+  egregore-3:
+    <<: *egregore-base
+    container_name: egregore-3
+    hostname: egregore-3
+    volumes:
+      - egregore-3-data:/data
+      - ./config/egregore-3.yaml:/etc/egregore/config.yaml:ro
+    ports:
+      - "7685:7655"  # Gossip (offset port)
+      - "127.0.0.1:7684:7654"  # API
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7654/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  servitor-3:
+    <<: *servitor-base
+    container_name: servitor-3
+    hostname: servitor-3
+    depends_on:
+      egregore-3:
+        condition: service_healthy
+      servitor-2:
+        condition: service_healthy
+    volumes:
+      - servitor-3-data:/var/lib/servitor
+      - ./config/servitor-3.toml:/etc/servitor/servitor.toml:ro
+      - ./config/authority.toml:/etc/servitor/authority.toml:ro
+    ports:
+      - "127.0.0.1:8785:8765"  # A2A Server
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/.well-known/agent.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # === Shared Services ===
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  egregore-1-data:
+  egregore-2-data:
+  egregore-3-data:
+  servitor-1-data:
+  servitor-2-data:
+  servitor-3-data:
+  ollama-models:
+
+networks:
+  default:
+    driver: bridge

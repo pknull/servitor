@@ -55,10 +55,7 @@ pub async fn spawn_server(
     let bind_addr = config.bind.clone();
     let base_url = format!("http://{}", bind_addr);
 
-    let task_store = A2aTaskStore::new(
-        config.max_concurrent_tasks,
-        config.task_timeout_secs,
-    );
+    let task_store = A2aTaskStore::new(config.max_concurrent_tasks, config.task_timeout_secs);
 
     let state = Arc::new(A2aServerState {
         config,
@@ -72,11 +69,11 @@ pub async fn spawn_server(
 
     let router = build_router(state);
 
-    let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
-        ServitorError::Config {
+    let listener = TcpListener::bind(&bind_addr)
+        .await
+        .map_err(|e| ServitorError::Config {
             reason: format!("failed to bind A2A server to {}: {}", bind_addr, e),
-        }
-    })?;
+        })?;
 
     tracing::info!(bind = %bind_addr, "A2A server listening");
 

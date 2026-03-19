@@ -26,9 +26,8 @@ use super::daemon_handlers::{
 /// Run servitor as a long-lived daemon with event router.
 pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
     // Check if reasoning capability is needed
-    let needs_llm = config.egregore.subscribe
-        || config.comms.discord.is_some()
-        || !config.schedule.is_empty();
+    let needs_llm =
+        config.egregore.subscribe || config.comms.discord.is_some() || !config.schedule.is_empty();
 
     if needs_llm && config.llm.is_none() {
         return Err(crate::error::ServitorError::Config {
@@ -77,9 +76,7 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
         if a2a_server_config.enabled {
             // Create independent pools for the A2A server
             // These are used for tool introspection and execution
-            let mcp_pool_shared = Arc::new(RwLock::new(
-                crate::mcp::McpPool::from_config(config)?
-            ));
+            let mcp_pool_shared = Arc::new(RwLock::new(crate::mcp::McpPool::from_config(config)?));
             // Initialize the shared MCP pool
             {
                 let mut pool = mcp_pool_shared.write().await;
@@ -91,7 +88,7 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                     crate::error::ServitorError::Config {
                         reason: format!("failed to create A2A pool for server: {}", e),
                     }
-                })?
+                })?,
             ));
             // Initialize the shared A2A pool
             {
@@ -119,7 +116,9 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                 a2a_pool_shared,
                 authority_shared,
                 scope_enforcer_shared,
-            ).await {
+            )
+            .await
+            {
                 Ok(handle) => Some(handle),
                 Err(e) => {
                     tracing::error!(error = %e, "failed to spawn A2A server");
@@ -135,7 +134,14 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
 
     // Publish initial profile
     let mut runtime_stats = RuntimeStats::new();
-    let profile = build_profile(&ctx.identity, &ctx.mcp_pool, &ctx.a2a_pool, config, &runtime_stats).await;
+    let profile = build_profile(
+        &ctx.identity,
+        &ctx.mcp_pool,
+        &ctx.a2a_pool,
+        config,
+        &runtime_stats,
+    )
+    .await;
     if let Err(e) = ctx.egregore.publish_profile(&profile).await {
         tracing::warn!(error = %e, "failed to publish profile (egregore may be offline)");
     }

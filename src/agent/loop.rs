@@ -20,6 +20,17 @@ use crate::mcp::{LlmTool, McpPool};
 use crate::metrics::{self, Timer, ToolCallStatus};
 use crate::scope::ScopeEnforcer;
 
+/// Parameters for publishing A2A delegation spans.
+struct A2aDelegationParams<'a> {
+    agent_name: &'a str,
+    skill_name: &'a str,
+    task_id: &'a str,
+    arguments: &'a serde_json::Value,
+    start_ts: DateTime<Utc>,
+    end_ts: DateTime<Utc>,
+    success: bool,
+}
+
 /// Agent executor — runs the tool_use loop for a task.
 pub struct AgentExecutor<'a> {
     provider: &'a dyn Provider,
@@ -312,12 +323,9 @@ impl<'a> AgentExecutor<'a> {
         let (provider_name, tool_name) = parse_prefixed_tool_name(prefixed_name)?;
         let skill = format!("{}:{}", provider_name, tool_name);
 
-        if let Err(error) = self.validate_tool_call(
-            task,
-            prefixed_name,
-            arguments,
-            &self.all_tools_for_llm(),
-        ) {
+        if let Err(error) =
+            self.validate_tool_call(task, prefixed_name, arguments, &self.all_tools_for_llm())
+        {
             // Record metrics for validation failures
             let status = match &error {
                 ServitorError::Unauthorized { .. } => {
@@ -371,11 +379,12 @@ impl<'a> AgentExecutor<'a> {
             });
         };
 
-        let (agent_name, skill_name) = a2a_pool
-            .parse_tool_name(prefixed_name)
-            .ok_or_else(|| ServitorError::Mcp {
-                reason: format!("unknown A2A tool: {}", prefixed_name),
-            })?;
+        let (agent_name, skill_name) =
+            a2a_pool
+                .parse_tool_name(prefixed_name)
+                .ok_or_else(|| ServitorError::Mcp {
+                    reason: format!("unknown A2A tool: {}", prefixed_name),
+                })?;
 
         tracing::debug!(
             agent = agent_name,
@@ -403,18 +412,24 @@ impl<'a> AgentExecutor<'a> {
         metrics::record_tool_call_duration(skill_name, duration);
 
         // Generate a task ID for the delegation span
-        let task_id = format!("{}-{}", task.hash.chars().take(8).collect::<String>(), start_ts.timestamp_millis());
+        let task_id = format!(
+            "{}-{}",
+            task.hash.chars().take(8).collect::<String>(),
+            start_ts.timestamp_millis()
+        );
 
         // Publish delegation span to egregore (after execution to capture outcome)
         self.publish_a2a_delegation(
             task,
-            agent_name,
-            skill_name,
-            &task_id,
-            arguments,
-            start_ts,
-            end_ts,
-            success,
+            A2aDelegationParams {
+                agent_name,
+                skill_name,
+                task_id: &task_id,
+                arguments,
+                start_ts,
+                end_ts,
+                success,
+            },
         )
         .await;
 
@@ -427,25 +442,29 @@ impl<'a> AgentExecutor<'a> {
     }
 
     /// Publish A2A delegation event to egregore feed as a trace span.
-    async fn publish_a2a_delegation(
-        &self,
-        task: &Task,
-        agent_name: &str,
-        skill_name: &str,
-        task_id: &str,
-        arguments: &serde_json::Value,
-        start_ts: DateTime<Utc>,
-        end_ts: DateTime<Utc>,
-        success: bool,
-    ) {
+    async fn publish_a2a_delegation(&self, task: &Task, params: A2aDelegationParams<'_>) {
         let Some(egregore) = self.egregore else {
             return;
         };
 
+        let A2aDelegationParams {
+            agent_name,
+            skill_name,
+            task_id,
+            arguments,
+            start_ts,
+            end_ts,
+            success,
+        } = params;
+
         // Compute hash of input for audit trail (not the full input to avoid leaking data)
         let input_hash = {
             let mut hasher = Sha256::new();
-            hasher.update(serde_json::to_string(arguments).unwrap_or_default().as_bytes());
+            hasher.update(
+                serde_json::to_string(arguments)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
             let hash = hasher.finalize();
             format!(
                 "sha256:{}",
@@ -464,11 +483,11 @@ impl<'a> AgentExecutor<'a> {
         };
 
         let mut span = TraceSpan::new(
-            task.hash.clone(),            // trace_id: use task hash for correlation
-            span_id,                      // span_id: unique for this delegation
-            None,                         // parent_span_id
+            task.hash.clone(),             // trace_id: use task hash for correlation
+            span_id,                       // span_id: unique for this delegation
+            None,                          // parent_span_id
             format!("a2a:{}", skill_name), // name
-            agent_name,                   // service
+            agent_name,                    // service
             start_ts,
             end_ts,
             status,

@@ -87,8 +87,10 @@ impl McpPool {
             recovery_timeout: Duration::from_secs(30),
             success_threshold: 1,
         };
-        self.circuit_breakers
-            .insert(name.to_string(), RwLock::new(CircuitBreaker::new(cb_config)));
+        self.circuit_breakers.insert(
+            name.to_string(),
+            RwLock::new(CircuitBreaker::new(cb_config)),
+        );
 
         Ok(())
     }
@@ -212,11 +214,12 @@ impl McpPool {
 
         validate_arguments(prefixed_name, tool, &arguments)?;
 
-        let client = self.clients.get(server_name).ok_or_else(|| {
-            ServitorError::McpServerNotFound {
-                name: server_name.to_string(),
-            }
-        })?;
+        let client =
+            self.clients
+                .get(server_name)
+                .ok_or_else(|| ServitorError::McpServerNotFound {
+                    name: server_name.to_string(),
+                })?;
 
         let client = client.read().await;
         let result = client.call_tool(tool_name, arguments).await;
@@ -471,10 +474,8 @@ mod tests {
         );
 
         // Add circuit breaker for the server
-        pool.circuit_breakers.insert(
-            "shell".to_string(),
-            RwLock::new(CircuitBreaker::default()),
-        );
+        pool.circuit_breakers
+            .insert("shell".to_string(), RwLock::new(CircuitBreaker::default()));
 
         let definition = ToolDefinition {
             name: "execute".to_string(),

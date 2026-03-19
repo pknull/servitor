@@ -54,17 +54,17 @@ impl RuntimeContext {
         mcp_pool.initialize_all().await?;
 
         // Initialize A2A pool (agents are external services, not local processes)
-        let mut a2a_pool = A2aPool::from_config(config).map_err(|e| {
-            crate::error::ServitorError::Config {
+        let mut a2a_pool =
+            A2aPool::from_config(config).map_err(|e| crate::error::ServitorError::Config {
                 reason: format!("failed to create A2A pool: {}", e),
-            }
-        })?;
-        if !a2a_pool.is_empty() {
-            a2a_pool.initialize_all().await.map_err(|e| {
-                crate::error::ServitorError::Config {
-                    reason: format!("failed to initialize A2A pool: {}", e),
-                }
             })?;
+        if !a2a_pool.is_empty() {
+            a2a_pool
+                .initialize_all()
+                .await
+                .map_err(|e| crate::error::ServitorError::Config {
+                    reason: format!("failed to initialize A2A pool: {}", e),
+                })?;
             tracing::info!(
                 agents = a2a_pool.agents().len(),
                 "initialized A2A agent pool"
@@ -104,7 +104,9 @@ impl RuntimeContext {
     pub fn require_provider(&self) -> Result<&dyn Provider> {
         self.provider.as_ref().map(|p| p.as_ref()).ok_or_else(|| {
             crate::error::ServitorError::Config {
-                reason: "LLM provider not configured. Add [llm] section to config for reasoning modes.".into(),
+                reason:
+                    "LLM provider not configured. Add [llm] section to config for reasoning modes."
+                        .into(),
             }
         })
     }
