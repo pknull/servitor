@@ -25,24 +25,31 @@ Egregore ──► Servitor ──► MCP Servers (tools)
 
 | Module | Location | Purpose |
 |--------|----------|---------|
+| a2a | `src/a2a/` | Agent-to-Agent protocol (client, server, pool) |
 | authority | `src/authority/` | Person/Place/Skill authorization |
+| cli | `src/cli/` | Command implementations (daemon, exec, hook, info, init) |
 | config | `src/config/` | TOML loading, validation, cron parsing |
 | identity | `src/identity/` | Ed25519 keys, signing |
 | egregore | `src/egregore/` | Hook, publish, context fetching |
-| mcp | `src/mcp/` | McpClient trait, pool |
+| mcp | `src/mcp/` | McpClient trait, pool, circuit breaker |
 | metrics | `src/metrics.rs` | Prometheus metrics for observability |
+| runtime | `src/runtime/` | RuntimeContext, stats tracking, auth events |
 | scope | `src/scope/` | Allow/block policy enforcement |
 | agent | `src/agent/` | LLM providers, tool_use loop |
+| task | `src/task/` | Task filtering, handlers, state management |
 | events | `src/events/` | EventRouter, CronSource, SseSource |
 | comms | `src/comms/` | Discord transport with authorization |
 
 ## Key Files
 
-- `src/main.rs` — CLI entry point, daemon modes, event loop
+- `src/main.rs` — CLI entry point, argument parsing
+- `src/cli/daemon.rs` — Daemon mode event loop
 - `src/authority/mod.rs` — Authority struct, authorize(), skill checks
 - `src/agent/loop.rs` — Core execution loop (tool_use → execute → feed_back)
-- `src/agent/provider.rs` — LLM abstraction (Anthropic, OpenAI-compat)
+- `src/agent/providers/mod.rs` — LLM abstraction (Anthropic, OpenAI, Claude CLI, Codex)
+- `src/a2a/server/mod.rs` — A2A server (JSON-RPC 2.0 task delegation)
 - `src/mcp/pool.rs` — MCP client pool with tool introspection
+- `src/runtime/context.rs` — RuntimeContext initialization
 - `src/metrics.rs` — Prometheus metrics (counters, histograms, gauges)
 - `src/scope/policy.rs` — Scope enforcement logic
 - `src/egregore/context.rs` — Feed query, thread fetching
@@ -66,8 +73,10 @@ cargo test                 # Run tests (129 total)
 
 Copy `servitor.example.toml` to `servitor.toml`. Key sections:
 
-- `[llm]` — Provider (anthropic/openai/ollama), model, API key env var
+- `[llm]` — Provider (anthropic/openai/ollama/claude_cli/codex), model, API key env var
 - `[mcp.*]` — MCP server definitions with scope.allow/scope.block
+- `[a2a.*]` — A2A agent clients (delegate tasks to external agents)
+- `[a2a_server]` — A2A server (receive tasks from external agents)
 - `[agent]` — max_turns, timeout_secs
 - `[egregore]` — api_url, subscribe (SSE)
 - `[metrics]` — enabled, bind address for Prometheus endpoint

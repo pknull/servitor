@@ -18,6 +18,9 @@ cp authority.example.toml ~/.servitor/authority.toml
 | `egregore` | Egregore API endpoint and SSE subscription |
 | `llm` | Reasoning provider selection and auth |
 | `mcp.*` | Tool transports, timeouts, notification templates, and scopes |
+| `a2a.*` | A2A agent clients for task delegation |
+| `a2a_server` | A2A server for receiving external tasks |
+| `metrics` | Prometheus metrics endpoint |
 | `agent` | Turn budget, execution timeout, and trace publishing |
 | `task` | Offer/assignment/start/ping timing |
 | `heartbeat` | Profile cadence and runtime monitoring toggle |
@@ -78,6 +81,62 @@ Shared fields:
 - `on_notification`
 
 Scope rules are deny-first: block patterns always win over allow patterns.
+
+## `a2a.*`
+
+Each named A2A section declares an external agent to delegate tasks to.
+
+Required fields:
+
+- `url`: agent's A2A endpoint (e.g., `http://agent.local:8765/a2a`)
+
+Optional fields:
+
+- `card_url`: override `/.well-known/agent.json` discovery URL
+- `auth.type`: `bearer` for token auth
+- `auth.token_env`: environment variable containing the bearer token
+- `timeout_secs`: per-request timeout
+- `retry_attempts`: retry count on failure
+
+Example:
+
+```toml
+[a2a.research-agent]
+url = "http://localhost:8766/a2a"
+auth.type = "bearer"
+auth.token_env = "RESEARCH_AGENT_TOKEN"
+```
+
+## `a2a_server`
+
+Enable servitor to receive tasks from external A2A agents.
+
+- `enabled`: toggle the A2A server
+- `bind`: listen address (e.g., `127.0.0.1:8765`)
+- `name`: agent name in the published AgentCard
+- `description`: agent description
+- `task_timeout_secs`: max execution time per task
+- `max_concurrent_tasks`: bounded in-flight tasks
+
+Example:
+
+```toml
+[a2a_server]
+enabled = true
+bind = "127.0.0.1:8765"
+name = "servitor"
+description = "Task executor with shell and docker capabilities"
+```
+
+## `metrics`
+
+Prometheus metrics endpoint configuration.
+
+- `enabled`: toggle metrics endpoint
+- `bind`: listen address (e.g., `127.0.0.1:9090`)
+
+When enabled, exposes `/metrics` with counters, histograms, and gauges for
+tool calls, task execution, and provider latency.
 
 ## `agent`
 
