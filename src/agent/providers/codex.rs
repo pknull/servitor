@@ -292,10 +292,16 @@ impl CodexOAuthProvider {
                 reason: format!("failed to parse token file for update: {}", e),
             })?;
 
-        if let Some(profile) = profiles
+        if let Some(tokens) = profiles.get_mut("tokens") {
+            // Codex CLI format
+            tokens["access_token"] = serde_json::Value::String(access.to_string());
+            tokens["refresh_token"] = serde_json::Value::String(refresh.to_string());
+            profiles["last_refresh"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+        } else if let Some(profile) = profiles
             .get_mut("profiles")
             .and_then(|p| p.get_mut(&self.profile_name))
         {
+            // OpenClaw auth-profiles format
             profile["access"] = serde_json::Value::String(access.to_string());
             profile["refresh"] = serde_json::Value::String(refresh.to_string());
             profile["expires"] = serde_json::Value::Number(expires.into());
