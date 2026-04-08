@@ -183,6 +183,7 @@ mod tests {
             timeout_secs: None,
             author: None,
             keeper: None,
+            tool_calls: vec![],
         };
         assert!(source.matches_capabilities(&task1));
 
@@ -203,6 +204,7 @@ mod tests {
             timeout_secs: None,
             author: None,
             keeper: None,
+            tool_calls: vec![],
         };
         assert!(source.matches_capabilities(&task2));
 
@@ -223,6 +225,7 @@ mod tests {
             timeout_secs: None,
             author: None,
             keeper: None,
+            tool_calls: vec![],
         };
         assert!(!source.matches_capabilities(&task3));
     }

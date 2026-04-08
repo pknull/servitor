@@ -101,8 +101,8 @@ include_runtime_monitoring = false
                         });
                     }
                 }
-                "claude-code" => {
-                    // Claude Code uses CLI authentication, no config needed
+                "claude-code" | "mock" => {
+                    // No additional config validation needed.
                 }
                 other => {
                     return Err(ServitorError::Config {

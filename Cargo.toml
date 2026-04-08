@@ -1,6 +1,6 @@
 [package]
 name = "servitor"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Louis Grenzebach <pk@zalgo.net>"]
 description = "Egregore network task executor using MCP servers as capabilities"
@@ -8,6 +8,9 @@ license = "MIT"
 repository = "https://github.com/pknull/servitor"
 
 [dependencies]
+# Shared core
+thallus-core = { path = "../thallus-core" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -22,12 +25,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 reqwest-eventsource = "0.6"
 eventsource-stream = "0.2"
 
-# Discord (comms transport)
-serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend"] }
-
 # Cryptography (matching egregore)
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
 
@@ -61,6 +59,9 @@ cron = "0.13"
 # UUID generation
 uuid = { version = "1", features = ["v4"] }
 
+# SQLite (for session storage)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 # Directory expansion
 dirs = "5"
 shellexpand = "3"
@@ -72,6 +73,7 @@ metrics-exporter-prometheus = "0.16"
 # HTTP server (for A2A server)
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+regex = "1.12.3"
 
 [dev-dependencies]
 tempfile = "3"

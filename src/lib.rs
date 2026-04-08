@@ -26,7 +26,7 @@
 //!
 //! | Plane | Purpose | Examples |
 //! |-------|---------|----------|
-//! | Communication | Message transport | Egregore, Discord, TUI |
+//! | Communication | Message transport | Egregore, TUI |
 //! | Tool | Execution capabilities | MCP servers, A2A agents |
 //! | LLM | Inference/reasoning | Claude, Ollama, OpenAI |
 //!
@@ -43,7 +43,6 @@ pub mod a2a;
 pub mod agent;
 pub mod authority;
 pub mod cli;
-pub mod comms;
 pub mod config;
 pub mod egregore;
 pub mod error;
@@ -53,6 +52,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod runtime;
 pub mod scope;
+pub mod session;
 pub mod task;
 
 pub use authority::{

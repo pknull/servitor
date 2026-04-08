@@ -419,6 +419,13 @@ pub struct Task {
     /// Resolved keeper name (set after authorization).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keeper: Option<String>,
+
+    /// Pre-planned tool calls for direct execution (bypasses LLM).
+    ///
+    /// When present and non-empty, servitor executes these tool calls
+    /// sequentially without engaging the LLM reasoning loop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<PlannedToolCall>,
 }
 
 impl Task {
@@ -451,6 +458,11 @@ impl Task {
 
     pub fn effective_request(&self) -> &str {
         self.request.as_deref().unwrap_or(&self.prompt)
+    }
+
+    /// Whether this task carries pre-planned tool calls for direct execution.
+    pub fn is_direct(&self) -> bool {
+        !self.tool_calls.is_empty()
     }
 }
 
@@ -753,9 +765,6 @@ pub struct AuthDenied {
     /// Denied person identity or redacted identity hint.
     pub person_id: String,
 
-    /// Origin place that was checked.
-    pub place: String,
-
     /// Requested skill or wildcard scope.
     pub skill: String,
 
@@ -773,7 +782,6 @@ impl AuthDenied {
     pub fn new(
         servitor_id: PublicId,
         person_id: String,
-        place: String,
         skill: String,
         gate: AuthGate,
         reason: String,
@@ -782,7 +790,6 @@ impl AuthDenied {
             msg_type: "auth_denied".to_string(),
             servitor_id,
             person_id,
-            place,
             skill,
             gate,
             reason,
@@ -814,23 +821,26 @@ pub struct EgregoreMessage {
     pub author: PublicId,
     pub sequence: u64,
     pub timestamp: DateTime<Utc>,
-    pub content: serde_json::Value,
+    pub content: Option<serde_json::Value>,
     pub hash: String,
     pub signature: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Related message hash (for threading/replies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relates: Option<String>,
 }
 
 impl EgregoreMessage {
     /// Extract the content type from the message.
     pub fn content_type(&self) -> Option<&str> {
-        self.content.get("type").and_then(|v| v.as_str())
+        self.content.as_ref()?.get("type").and_then(|v| v.as_str())
     }
 
     /// Try to parse content as a Task.
     pub fn as_task(&self) -> Option<Task> {
         if self.content_type() == Some("task") {
-            serde_json::from_value(self.content.clone()).ok()
+            serde_json::from_value(self.content.clone()?).ok()
         } else {
             None
         }
@@ -839,7 +849,7 @@ impl EgregoreMessage {
     /// Try to parse content as a TaskResult.
     pub fn as_task_result(&self) -> Option<TaskResult> {
         if self.content_type() == Some("task_result") {
-            serde_json::from_value(self.content.clone()).ok()
+            serde_json::from_value(self.content.clone()?).ok()
         } else {
             None
         }
@@ -847,7 +857,7 @@ impl EgregoreMessage {
 
     pub fn as_task_assign(&self) -> Option<TaskAssign> {
         if self.content_type() == Some("task_assign") {
-            serde_json::from_value(self.content.clone()).ok()
+            serde_json::from_value(self.content.clone()?).ok()
         } else {
             None
         }
@@ -855,7 +865,7 @@ impl EgregoreMessage {
 
     pub fn as_task_ping(&self) -> Option<TaskPing> {
         if self.content_type() == Some("task_ping") {
-            serde_json::from_value(self.content.clone()).ok()
+            serde_json::from_value(self.content.clone()?).ok()
         } else {
             None
         }
@@ -863,12 +873,18 @@ impl EgregoreMessage {
 
     /// Get the prompt if this is a task message.
     pub fn prompt(&self) -> Option<&str> {
-        self.content.get("prompt").and_then(|v| v.as_str())
+        self.content
+            .as_ref()?
+            .get("prompt")
+            .and_then(|v| v.as_str())
     }
 
     /// Get the parent_id if present.
     pub fn parent_id(&self) -> Option<&str> {
-        self.content.get("parent_id").and_then(|v| v.as_str())
+        self.content
+            .as_ref()?
+            .get("parent_id")
+            .and_then(|v| v.as_str())
     }
 }
 
@@ -982,7 +998,6 @@ mod tests {
         let denial = AuthDenied::new(
             identity.public_id(),
             "discord:123".to_string(),
-            "discord:guild:channel".to_string(),
             "shell:execute".to_string(),
             AuthGate::Offer,
             "no matching permission".to_string(),

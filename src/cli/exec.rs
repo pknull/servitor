@@ -80,6 +80,7 @@ pub async fn run_exec(
         timeout_secs: Some(config.agent.timeout_secs),
         author: None,
         keeper: None,
+        tool_calls: vec![],
     };
 
     let executor = AgentExecutor::new(

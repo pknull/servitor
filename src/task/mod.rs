@@ -33,7 +33,6 @@ pub fn authorize_offer_request(
 ) -> AuthResult {
     authority.authorize(&AuthRequest {
         person: PersonId::from_egregore(&requestor.0),
-        place: "egregore:local".to_string(),
         skill: request_skill(task),
     })
 }
@@ -52,7 +51,6 @@ pub fn authorize_assignment(
     authority
         .authorize(&AuthRequest {
             person: PersonId::from_egregore(&assigner.0),
-            place: "egregore:local".to_string(),
             skill: assign_skill(task),
         })
         .allowed
@@ -77,12 +75,10 @@ egregore = "@BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=.ed25519"
 
 [[permission]]
 keeper = "requestor"
-place = "*"
 skills = ["request:docker:*"]
 
 [[permission]]
 keeper = "assigner"
-place = "*"
 skills = ["assign:*"]
 "#,
             )
@@ -109,6 +105,7 @@ skills = ["assign:*"]
             author: None,
             keeper: None,
             scope_override: None,
+            tool_calls: vec![],
         }
     }
 

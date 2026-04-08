@@ -134,9 +134,12 @@ mod tests {
 
     #[test]
     fn insecure_flag_restores_open_mode() {
+        // Set env var required by hardened insecure mode
+        std::env::set_var("SERVITOR_INSECURE", "1");
         let dir = tempfile::tempdir().unwrap();
         let authority = load_runtime_authority(dir.path(), true).unwrap();
         assert!(authority.is_open_mode());
+        // Note: not removing env var because parallel tests may race on it
     }
 
     #[test]
@@ -152,7 +155,6 @@ egregore = "@dev.ed25519"
 
 [[permission]]
 keeper = "dev"
-place = "*"
 skills = ["*"]
 "#,
         )
@@ -173,7 +175,6 @@ egregore = "@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519"
 
 [[permission]]
 keeper = "servitor"
-place = "*"
 skills = ["*"]
 "#,
             )
@@ -209,7 +210,6 @@ egregore = "@BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=.ed25519"
 
 [[permission]]
 keeper = "other"
-place = "*"
 skills = ["*"]
 "#,
             )

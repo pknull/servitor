@@ -201,6 +201,7 @@ mod tests {
             author: None,
             keeper: None,
             scope_override: None,
+            tool_calls: vec![],
         }
     }
 

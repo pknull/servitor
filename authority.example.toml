@@ -36,16 +36,7 @@ http_token = "secure-bearer-token-here"
 # ==============================================================================
 # PERMISSIONS
 # ==============================================================================
-# Permissions map keepers to places and skills using patterns.
-#
-# Place patterns use colon-delimited hierarchy:
-#   *                              - anywhere
-#   egregore:*                     - any egregore
-#   egregore:local                 - this node's egregore
-#   discord:*                      - any Discord
-#   discord:187489110150086656     - specific guild
-#   discord:187489110150086656:*   - any channel in guild
-#   discord:187489110150086656:123 - specific channel
+# Permissions map keepers to skills using patterns.
 #
 # Skill patterns:
 #   *                              - all skills
@@ -54,20 +45,17 @@ http_token = "secure-bearer-token-here"
 #   shell:execute                  - specific tool
 #   docker:container_*             - wildcard within tool name
 
-# Full access from anywhere
+# Full access
 [[permission]]
 keeper = "pknull"
-place = "*"
 skills = ["*"]
 
-# Limited automation access — only from local egregore, only docker inspect
+# Limited automation access -- only docker inspect
 [[permission]]
 keeper = "automation"
-place = "egregore:local"
 skills = ["docker:inspect_*", "docker:logs"]
 
-# Bot service can only use shell from Discord guild
+# Bot service can only use shell
 [[permission]]
 keeper = "bot-service"
-place = "discord:187489110150086656:*"
 skills = ["shell:*"]

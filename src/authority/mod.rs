@@ -1,12 +1,11 @@
-//! Person/Place/Skill authorization for Servitor.
+//! Person/Skill authorization for Servitor.
 //!
-//! A Servitor serves **Keepers** using **Person/Place/Skill** authorization.
+//! A Servitor serves **Keepers** using **Person/Skill** authorization.
 //! Each Servitor holds its own authority definitions locally.
 //!
 //! ## Core Concepts
 //!
 //! - **Person (Keeper)**: Who is making the request. Has identities across planes.
-//! - **Place**: Where the request originates. Hierarchical colon-delimited format.
 //! - **Skill**: What capabilities can be invoked. Pattern format with wildcards.
 //!
 //! ## Example authority.toml
@@ -19,7 +18,6 @@
 //!
 //! [[permission]]
 //! keeper = "pknull"
-//! place = "*"
 //! skills = ["*"]
 //! ```
 
@@ -36,7 +34,7 @@ use std::path::Path;
 
 use crate::error::{Result, ServitorError};
 
-/// Authority manager for Person/Place/Skill authorization.
+/// Authority manager for Person/Skill authorization.
 #[derive(Debug, Clone)]
 pub struct Authority {
     /// All defined keepers.
@@ -198,23 +196,17 @@ impl Authority {
         }
 
         for perm in permissions {
-            if perm.matches(&req.place, &req.skill) {
+            if perm.matches(&req.skill) {
                 return AuthResult::allowed(
                     &keeper.name,
-                    format!(
-                        "matched permission: place={}, skills={:?}",
-                        perm.place, perm.skills
-                    ),
+                    format!("matched permission: skills={:?}", perm.skills),
                 );
             }
         }
 
         AuthResult::denied_keeper(
             &keeper.name,
-            format!(
-                "no matching permission for place={}, skill={}",
-                req.place, req.skill
-            ),
+            format!("no matching permission for skill={}", req.skill),
         )
     }
 
@@ -236,7 +228,7 @@ impl Authority {
             return AuthResult::denied_keeper(keeper_name, "no permissions defined for keeper");
         }
 
-        // Check if any permission allows this skill (with wildcard place)
+        // Check if any permission allows this skill
         for perm in permissions {
             if perm.skills.iter().any(|s| skill_pattern_matches(s, skill)) {
                 return AuthResult::allowed(
@@ -261,10 +253,18 @@ pub fn load_runtime_authority(identity_dir: &Path, insecure: bool) -> Result<Aut
     let authority_path = identity_dir.join("authority.toml");
 
     if insecure {
-        tracing::warn!(
-            path = %authority_path.display(),
-            "running with --insecure; keeper authorization is disabled"
-        );
+        if std::env::var("SERVITOR_INSECURE").as_deref() != Ok("1") {
+            return Err(ServitorError::Config {
+                reason: "Insecure mode requires SERVITOR_INSECURE=1 environment variable. \
+                        This prevents accidental deployment without authorization."
+                    .into(),
+            });
+        }
+        tracing::warn!("=======================================================");
+        tracing::warn!("  INSECURE MODE: All authorization checks are disabled");
+        tracing::warn!("  Any identity can execute any skill");
+        tracing::warn!("  DO NOT use in production");
+        tracing::warn!("=======================================================");
         return Ok(Authority::insecure_open());
     }
 
@@ -300,7 +300,6 @@ pub fn authorize_local_exec(
 
     let auth_result = authority.authorize(&AuthRequest {
         person: PersonId::from_egregore(identity.public_id().0.clone()),
-        place: "egregore:local".to_string(),
         skill: "*".to_string(),
     });
 
@@ -335,12 +334,10 @@ egregore = "@AutomationKey.ed25519"
 
 [[permission]]
 keeper = "pknull"
-place = "*"
 skills = ["*"]
 
 [[permission]]
 keeper = "automation"
-place = "egregore:local"
 skills = ["docker:inspect_*"]
 "#,
         )
@@ -355,7 +352,6 @@ skills = ["docker:inspect_*"]
 
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Egregore("@unknown.ed25519".to_string()),
-            place: "anywhere".to_string(),
             skill: "anything".to_string(),
         });
         assert!(!result.allowed);
@@ -368,7 +364,6 @@ skills = ["docker:inspect_*"]
 
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Egregore("@unknown.ed25519".to_string()),
-            place: "anywhere".to_string(),
             skill: "anything".to_string(),
         });
         assert!(result.allowed);
@@ -384,7 +379,6 @@ skills = ["docker:inspect_*"]
 
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Egregore("@unknown.ed25519".to_string()),
-            place: "egregore:local".to_string(),
             skill: "*".to_string(),
         });
         assert!(!result.allowed);
@@ -417,7 +411,6 @@ skills = ["docker:inspect_*"]
             person: PersonId::Egregore(
                 "@7JIN8TA3bZ1l786oQ6lPN3l94KEFFH0UlVz9lqTr5+E=.ed25519".to_string(),
             ),
-            place: "discord:guild:channel".to_string(),
             skill: "shell:execute".to_string(),
         });
         assert!(result.allowed);
@@ -428,10 +421,9 @@ skills = ["docker:inspect_*"]
     fn test_authorize_limited_access() {
         let auth = test_authority();
 
-        // automation can only use docker:inspect_* from egregore:local
+        // automation can only use docker:inspect_*
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Egregore("@AutomationKey.ed25519".to_string()),
-            place: "egregore:local".to_string(),
             skill: "docker:inspect_container".to_string(),
         });
         assert!(result.allowed);
@@ -439,16 +431,7 @@ skills = ["docker:inspect_*"]
         // automation denied for wrong skill
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Egregore("@AutomationKey.ed25519".to_string()),
-            place: "egregore:local".to_string(),
             skill: "shell:execute".to_string(),
-        });
-        assert!(!result.allowed);
-
-        // automation denied for wrong place
-        let result = auth.authorize(&AuthRequest {
-            person: PersonId::Egregore("@AutomationKey.ed25519".to_string()),
-            place: "discord:guild".to_string(),
-            skill: "docker:inspect_container".to_string(),
         });
         assert!(!result.allowed);
     }
@@ -459,7 +442,6 @@ skills = ["docker:inspect_*"]
 
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Egregore("@unknown.ed25519".to_string()),
-            place: "anywhere".to_string(),
             skill: "anything".to_string(),
         });
         assert!(!result.allowed);
@@ -492,7 +474,6 @@ http_token = "*"
 
 [[permission]]
 keeper = "test-user"
-place = "*"
 skills = ["*"]
 "#,
         )
@@ -502,7 +483,6 @@ skills = ["*"]
         // Any HTTP token should match the wildcard
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Http("any-random-token".to_string()),
-            place: "a2a:server".to_string(),
             skill: "some_skill".to_string(),
         });
         assert!(result.allowed);
@@ -511,7 +491,6 @@ skills = ["*"]
         // Another random token should also match
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Http("test-token".to_string()),
-            place: "a2a:server".to_string(),
             skill: "another_skill".to_string(),
         });
         assert!(result.allowed);
@@ -531,12 +510,10 @@ http_token = "specific-token"
 
 [[permission]]
 keeper = "wildcard-user"
-place = "*"
 skills = ["basic:*"]
 
 [[permission]]
 keeper = "specific-user"
-place = "*"
 skills = ["*"]
 "#,
         )
@@ -546,7 +523,6 @@ skills = ["*"]
         // Exact token match should take precedence
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Http("specific-token".to_string()),
-            place: "a2a:server".to_string(),
             skill: "advanced_skill".to_string(),
         });
         assert!(result.allowed);
@@ -555,7 +531,6 @@ skills = ["*"]
         // Other tokens fall back to wildcard
         let result = auth.authorize(&AuthRequest {
             person: PersonId::Http("other-token".to_string()),
-            place: "a2a:server".to_string(),
             skill: "basic:read".to_string(),
         });
         assert!(result.allowed);

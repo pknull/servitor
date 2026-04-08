@@ -26,7 +26,7 @@ Egregore ──► Servitor ──► MCP Servers (tools)
 | Module | Location | Purpose |
 |--------|----------|---------|
 | a2a | `src/a2a/` | Agent-to-Agent protocol (client, server, pool) |
-| authority | `src/authority/` | Person/Place/Skill authorization |
+| authority | `src/authority/` | Person/Skill authorization |
 | cli | `src/cli/` | Command implementations (daemon, exec, hook, info, init) |
 | config | `src/config/` | TOML loading, validation, cron parsing |
 | identity | `src/identity/` | Ed25519 keys, signing |
@@ -38,7 +38,6 @@ Egregore ──► Servitor ──► MCP Servers (tools)
 | agent | `src/agent/` | LLM providers, tool_use loop |
 | task | `src/task/` | Task filtering, handlers, state management |
 | events | `src/events/` | EventRouter, CronSource, SseSource |
-| comms | `src/comms/` | Discord transport with authorization |
 
 ## Key Files
 
@@ -61,7 +60,7 @@ Egregore ──► Servitor ──► MCP Servers (tools)
 
 ```bash
 cargo build --release      # Build
-cargo test                 # Run tests (129 total)
+cargo test                 # Run tests (187 total)
 ./target/release/servitor init    # Generate identity
 ./target/release/servitor info    # Show config + authority status
 ./target/release/servitor exec "task"  # Execute directly
@@ -86,10 +85,9 @@ Copy `servitor.example.toml` to `servitor.toml`. Key sections:
 
 Copy `authority.example.toml` to `~/.servitor/authority.toml` for access control.
 
-**Person/Place/Skill model**:
+**Person/Skill model**:
 
 - **Keeper**: Identity across planes (egregore pubkey, discord ID, http token)
-- **Place**: Hierarchical patterns (`discord:guild:channel`, `egregore:local`)
 - **Skill**: Tool patterns (`shell:execute`, `docker:*`)
 
 No `authority.toml` means daemon and hook modes refuse to start. Use `--insecure` only for local development when you intentionally want open mode.

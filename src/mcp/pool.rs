@@ -10,10 +10,22 @@ use tokio::sync::RwLock;
 use crate::config::{Config, McpServerConfig};
 use crate::egregore::{McpServerHealth, McpServerStatus};
 use crate::error::{Result, ServitorError};
-use crate::mcp::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
-use crate::mcp::client::{McpClient, ToolDefinition};
-use crate::mcp::http::HttpMcpClient;
-use crate::mcp::stdio::StdioMcpClient;
+use thallus_core::mcp::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
+use thallus_core::mcp::client::{McpClient, ToolDefinition};
+use thallus_core::mcp::http::HttpMcpClient;
+use thallus_core::mcp::stdio::StdioMcpClient;
+
+/// Convert servitor's McpServerConfig to thallus-core's McpServerConfig.
+fn to_core_config(config: &McpServerConfig) -> thallus_core::config::McpServerConfig {
+    thallus_core::config::McpServerConfig {
+        transport: config.transport.clone(),
+        command: config.command.clone(),
+        args: config.args.clone(),
+        env: config.env.clone(),
+        url: config.url.clone(),
+        timeout_secs: config.timeout_secs,
+    }
+}
 
 /// Pool of MCP clients with tool introspection.
 pub struct McpPool {
@@ -61,9 +73,10 @@ impl McpPool {
 
     /// Add a client to the pool.
     pub fn add_client(&mut self, name: &str, config: &McpServerConfig) -> Result<()> {
+        let core_config = to_core_config(config);
         let client: Box<dyn McpClient> = match config.transport.as_str() {
-            "stdio" => Box::new(StdioMcpClient::new(name, config.clone())),
-            "http" => Box::new(HttpMcpClient::new(name, config)?),
+            "stdio" => Box::new(StdioMcpClient::new(name, core_config)),
+            "http" => Box::new(HttpMcpClient::new(name, &core_config)?),
             other => {
                 return Err(ServitorError::Mcp {
                     reason: format!("unknown transport: {}", other),
@@ -233,7 +246,7 @@ impl McpPool {
             }
         }
 
-        result
+        result.map_err(ServitorError::from)
     }
 
     /// Get capability classes (server names).
@@ -357,14 +370,8 @@ impl Default for McpPool {
     }
 }
 
-/// Tool definition formatted for LLM consumption.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct LlmTool {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub input_schema: serde_json::Value,
-}
+/// Tool definition formatted for LLM consumption -- re-exported from thallus-core.
+pub use thallus_core::mcp::pool::LlmTool;
 
 fn compile_validator(tool: &ToolDefinition) -> Result<Option<JSONSchema>> {
     let Some(schema) = tool.input_schema.as_ref() else {
@@ -418,7 +425,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::mcp::client::{InitializeResult, ServerCapabilities, ServerInfo, ToolCallResult};
+    use thallus_core::mcp::client::{InitializeResult, ServerCapabilities, ServerInfo, ToolCallResult};
 
     struct FakeClient {
         calls: Arc<AtomicUsize>,
@@ -426,7 +433,7 @@ mod tests {
 
     #[async_trait]
     impl McpClient for FakeClient {
-        async fn initialize(&mut self) -> Result<InitializeResult> {
+        async fn initialize(&mut self) -> thallus_core::Result<InitializeResult> {
             Ok(InitializeResult {
                 protocol_version: "2024-11-05".to_string(),
                 server_info: ServerInfo {
@@ -437,7 +444,7 @@ mod tests {
             })
         }
 
-        async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
+        async fn list_tools(&self) -> thallus_core::Result<Vec<ToolDefinition>> {
             Ok(vec![])
         }
 
@@ -445,16 +452,16 @@ mod tests {
             &self,
             _name: &str,
             _arguments: serde_json::Value,
-        ) -> Result<ToolCallResult> {
+        ) -> thallus_core::Result<ToolCallResult> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ToolCallResult::text("ok"))
         }
 
-        async fn ping(&self) -> Result<()> {
+        async fn ping(&self) -> thallus_core::Result<()> {
             Ok(())
         }
 
-        async fn shutdown(&mut self) -> Result<()> {
+        async fn shutdown(&mut self) -> thallus_core::Result<()> {
             Ok(())
         }
 

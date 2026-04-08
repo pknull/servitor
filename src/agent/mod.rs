@@ -6,6 +6,8 @@
 //! - Tool use → execute → feed back cycle
 
 pub mod context;
+pub mod direct;
+pub mod injection;
 pub mod r#loop;
 pub mod providers;
 pub mod sanitize;

@@ -42,10 +42,6 @@ pub struct Config {
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
 
-    /// Communication transports.
-    #[serde(default)]
-    pub comms: CommsConfig,
-
     /// Scheduled tasks.
     #[serde(default)]
     pub schedule: Vec<ScheduledTask>,
@@ -435,67 +431,6 @@ pub struct WatchConfig {
     /// Notification channel.
     #[serde(default)]
     pub notify: Option<String>,
-}
-
-/// Communication transport configuration.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct CommsConfig {
-    /// Discord transport.
-    #[serde(default)]
-    pub discord: Option<DiscordConfig>,
-
-    /// Reserved HTTP webhook transport.
-    ///
-    /// Parsed from config but not instantiated by the current runtime.
-    #[serde(default)]
-    pub http: Option<HttpCommsConfig>,
-}
-
-/// Discord transport configuration.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DiscordConfig {
-    /// Environment variable containing bot token.
-    pub token_env: String,
-
-    /// Guild IDs to allow (empty = all guilds).
-    #[serde(default)]
-    pub guild_allowlist: Vec<String>,
-
-    /// Require @mention to respond.
-    #[serde(default = "default_true")]
-    pub require_mention: bool,
-
-    /// Channel for sending notifications.
-    #[serde(default)]
-    pub notification_channel: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// Reserved HTTP webhook transport configuration.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct HttpCommsConfig {
-    /// Bind address.
-    #[serde(default = "default_http_bind")]
-    pub bind: String,
-
-    /// Port.
-    #[serde(default = "default_http_port")]
-    pub port: u16,
-
-    /// Authentication token (optional).
-    #[serde(default)]
-    pub auth_token: Option<String>,
-}
-
-fn default_http_bind() -> String {
-    "127.0.0.1".to_string()
-}
-
-fn default_http_port() -> u16 {
-    8765
 }
 
 /// Prometheus metrics configuration.

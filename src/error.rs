@@ -56,6 +56,12 @@ pub enum ServitorError {
     #[error("Internal error: {reason}")]
     Internal { reason: String },
 
+    #[error("Session error: {reason}")]
+    Session { reason: String },
+
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -67,3 +73,28 @@ pub enum ServitorError {
 }
 
 pub type Result<T> = std::result::Result<T, ServitorError>;
+
+impl From<thallus_core::CoreError> for ServitorError {
+    fn from(err: thallus_core::CoreError) -> Self {
+        match err {
+            thallus_core::CoreError::IdentityNotFound { path } => {
+                ServitorError::IdentityNotFound { path }
+            }
+            thallus_core::CoreError::InvalidKeypair { reason } => {
+                ServitorError::InvalidKeypair { reason }
+            }
+            thallus_core::CoreError::Mcp { reason } => ServitorError::Mcp { reason },
+            thallus_core::CoreError::McpServerNotFound { name } => {
+                ServitorError::McpServerNotFound { name }
+            }
+            thallus_core::CoreError::McpValidation { tool, reason } => {
+                ServitorError::McpValidation { tool, reason }
+            }
+            thallus_core::CoreError::Provider { reason } => ServitorError::Provider { reason },
+            thallus_core::CoreError::Config { reason } => ServitorError::Config { reason },
+            thallus_core::CoreError::Io(e) => ServitorError::Io(e),
+            thallus_core::CoreError::Json(e) => ServitorError::Json(e),
+            thallus_core::CoreError::Http(e) => ServitorError::Http(e),
+        }
+    }
+}

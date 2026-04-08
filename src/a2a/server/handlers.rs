@@ -242,7 +242,6 @@ async fn handle_tasks_send(
         let person = PersonId::from_http(token);
         let auth_result = state.authority.authorize(&AuthRequest {
             person,
-            place: "a2a:server".to_string(),
             skill: params.skill.clone(),
         });
 

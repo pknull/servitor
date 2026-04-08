@@ -10,6 +10,7 @@ use crate::egregore::messages::{
 use crate::error::{Result, ServitorError};
 
 /// Client for publishing messages to egregore.
+#[derive(Clone)]
 pub struct EgregoreClient {
     http: Client,
     api_url: String,
@@ -178,7 +179,6 @@ impl EgregoreClient {
         tracing::info!(
             hash = %response.hash,
             person_id = %denial.person_id,
-            place = %denial.place,
             skill = %denial.skill,
             "published auth denial"
         );
@@ -251,6 +251,42 @@ impl EgregoreClient {
             Ok(response) => Ok(response.status().is_success()),
             Err(_) => Ok(false),
         }
+    }
+
+    /// Query messages from egregore by content type.
+    pub async fn query_messages(
+        &self,
+        content_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::egregore::EgregoreMessage>> {
+        let mut url = format!("{}/v1/query?limit={}", self.api_url, limit);
+        if let Some(ct) = content_type {
+            url.push_str(&format!("&content_type={}", ct));
+        }
+
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ServitorError::Egregore {
+                reason: format!("query request failed: {}", e),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ServitorError::Egregore {
+                reason: format!("query failed with {}: {}", status, body),
+            });
+        }
+
+        let envelope: ApiResponse<Vec<crate::egregore::EgregoreMessage>> =
+            response.json().await.map_err(|e| ServitorError::Egregore {
+                reason: format!("failed to parse query response: {}", e),
+            })?;
+
+        Ok(envelope.data.unwrap_or_default())
     }
 }
 

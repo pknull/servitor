@@ -4,12 +4,27 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use super::{
-    truncate_error_body, ChatResponse, ContentBlock, Message, Provider, ProviderCapabilities, Role,
-    StopReason, Usage,
+    ChatResponse, ContentBlock, Message, Provider, ProviderCapabilities, Role, StopReason, Usage,
 };
+
+/// Maximum length for API error response bodies in error messages.
+const MAX_ERROR_BODY_LENGTH: usize = 256;
+
+/// Truncate an error response body to prevent leaking large/sensitive content.
+fn truncate_error_body(body: &str) -> String {
+    if body.len() <= MAX_ERROR_BODY_LENGTH {
+        body.to_string()
+    } else {
+        let mut end = MAX_ERROR_BODY_LENGTH;
+        while end > 0 && !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [truncated]", &body[..end])
+    }
+}
 use crate::config::LlmConfig;
-use crate::error::{Result, ServitorError};
-use crate::mcp::LlmTool;
+use thallus_core::error::{CoreError, Result};
+use thallus_core::mcp::LlmTool;
 
 /// Codex OAuth provider — reads tokens from OpenClaw's auth-profiles.json format.
 pub struct CodexOAuthProvider {
@@ -35,7 +50,7 @@ impl CodexOAuthProvider {
             .token_file
             .as_ref()
             .map(|p| shellexpand::tilde(p).to_string())
-            .ok_or_else(|| ServitorError::Config {
+            .ok_or_else(|| CoreError::Config {
                 reason: "codex provider requires token_file".into(),
             })?;
 
@@ -68,12 +83,12 @@ impl CodexOAuthProvider {
 
         // Load from file
         let content =
-            std::fs::read_to_string(&self.token_file).map_err(|e| ServitorError::Config {
+            std::fs::read_to_string(&self.token_file).map_err(|e| CoreError::Config {
                 reason: format!("failed to read token file: {}", e),
             })?;
 
         let json: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| ServitorError::Config {
+            serde_json::from_str(&content).map_err(|e| CoreError::Config {
                 reason: format!("failed to parse token file: {}", e),
             })?;
 
@@ -86,7 +101,7 @@ impl CodexOAuthProvider {
             let access = tokens
                 .get("access_token")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ServitorError::Config {
+                .ok_or_else(|| CoreError::Config {
                     reason: "missing access_token in tokens".into(),
                 })?
                 .to_string();
@@ -94,7 +109,7 @@ impl CodexOAuthProvider {
             let refresh = tokens
                 .get("refresh_token")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ServitorError::Config {
+                .ok_or_else(|| CoreError::Config {
                     reason: "missing refresh_token in tokens".into(),
                 })?
                 .to_string();
@@ -114,14 +129,14 @@ impl CodexOAuthProvider {
             let profile =
                 profiles
                     .get(&self.profile_name)
-                    .ok_or_else(|| ServitorError::Config {
+                    .ok_or_else(|| CoreError::Config {
                         reason: format!("profile '{}' not found in token file", self.profile_name),
                     })?;
 
             let access = profile
                 .get("access")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ServitorError::Config {
+                .ok_or_else(|| CoreError::Config {
                     reason: "missing access token".into(),
                 })?
                 .to_string();
@@ -129,7 +144,7 @@ impl CodexOAuthProvider {
             let refresh = profile
                 .get("refresh")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ServitorError::Config {
+                .ok_or_else(|| CoreError::Config {
                     reason: "missing refresh token".into(),
                 })?
                 .to_string();
@@ -143,7 +158,7 @@ impl CodexOAuthProvider {
 
             (access, refresh, expires, account_id)
         } else {
-            return Err(ServitorError::Config {
+            return Err(CoreError::Config {
                 reason: "token file must have 'tokens' or 'profiles' field".into(),
             });
         };
@@ -192,27 +207,27 @@ impl CodexOAuthProvider {
             ])
             .send()
             .await
-            .map_err(|e| ServitorError::Provider {
+            .map_err(|e| CoreError::Provider {
                 reason: format!("token refresh request failed: {}", e),
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(ServitorError::Provider {
+            return Err(CoreError::Provider {
                 reason: format!("token refresh failed {}: {}", status, body),
             });
         }
 
         let body: serde_json::Value =
-            response.json().await.map_err(|e| ServitorError::Provider {
+            response.json().await.map_err(|e| CoreError::Provider {
                 reason: format!("failed to parse refresh response: {}", e),
             })?;
 
         let access = body
             .get("access_token")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ServitorError::Provider {
+            .ok_or_else(|| CoreError::Provider {
                 reason: "missing access_token in refresh response".into(),
             })?
             .to_string();
@@ -283,12 +298,12 @@ impl CodexOAuthProvider {
 
     fn save_token(&self, access: &str, refresh: &str, expires: i64) -> Result<()> {
         let content =
-            std::fs::read_to_string(&self.token_file).map_err(|e| ServitorError::Config {
+            std::fs::read_to_string(&self.token_file).map_err(|e| CoreError::Config {
                 reason: format!("failed to read token file for update: {}", e),
             })?;
 
         let mut profiles: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| ServitorError::Config {
+            serde_json::from_str(&content).map_err(|e| CoreError::Config {
                 reason: format!("failed to parse token file for update: {}", e),
             })?;
 
@@ -308,11 +323,11 @@ impl CodexOAuthProvider {
         }
 
         let content =
-            serde_json::to_string_pretty(&profiles).map_err(|e| ServitorError::Config {
+            serde_json::to_string_pretty(&profiles).map_err(|e| CoreError::Config {
                 reason: format!("failed to serialize token file: {}", e),
             })?;
 
-        std::fs::write(&self.token_file, content).map_err(|e| ServitorError::Config {
+        std::fs::write(&self.token_file, content).map_err(|e| CoreError::Config {
             reason: format!("failed to write token file: {}", e),
         })?;
 
@@ -472,14 +487,14 @@ impl Provider for CodexOAuthProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ServitorError::Provider {
+            .map_err(|e| CoreError::Provider {
                 reason: format!("request failed: {}", e),
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(ServitorError::Provider {
+            return Err(CoreError::Provider {
                 reason: format!("API error {}: {}", status, truncate_error_body(&body)),
             });
         }
@@ -503,7 +518,7 @@ impl Provider for CodexOAuthProvider {
                     tracing::debug!(event = %evt.event, data_len = evt.data.len(), "SSE event received");
 
                     if evt.event == "error" {
-                        return Err(ServitorError::Provider {
+                        return Err(CoreError::Provider {
                             reason: format!("SSE error: {}", evt.data),
                         });
                     }
@@ -576,6 +591,7 @@ impl Provider for CodexOAuthProvider {
                                             as u32,
                                         output_tokens: u["output_tokens"].as_u64().unwrap_or(0)
                                             as u32,
+                                        ..Default::default()
                                     };
                                 }
 
@@ -595,7 +611,7 @@ impl Provider for CodexOAuthProvider {
                 }
                 Err(e) => {
                     tracing::error!(error = ?e, "SSE stream error");
-                    return Err(ServitorError::Provider {
+                    return Err(CoreError::Provider {
                         reason: format!("SSE error: {:?}", e),
                     });
                 }

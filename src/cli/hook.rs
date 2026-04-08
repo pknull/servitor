@@ -43,7 +43,6 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
     let person = PersonId::from_egregore(&message.author.0);
     let auth_result = authority.authorize(&AuthRequest {
         person: person.clone(),
-        place: "egregore:local".to_string(),
         skill: "*".to_string(), // Task intake doesn't specify skill yet
     });
 
@@ -52,7 +51,6 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
             &egregore,
             &identity,
             &person,
-            "egregore:local",
             "*",
             AuthGate::Offer,
             &auth_result.reason,

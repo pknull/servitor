@@ -129,27 +129,13 @@ scope.block = ["container_lifecycle:traefik", "container_lifecycle:portainer"]
 # timeout_secs = 30
 # scope.allow = ["*"]
 
-# Communication transports
-# Discord transport for direct messaging
-# [comms.discord]
-# token_env = "DISCORD_BOT_TOKEN"           # Bot token from environment
-# guild_allowlist = ["123456789"]           # Guilds to respond in (empty = all)
-# require_mention = true                     # Only respond to @mentions
-# notification_channel = "channel-id"       # Where to send notifications
-
-# Reserved: parsed by the config schema but not yet instantiated by the runtime
-# [comms.http]
-# bind = "127.0.0.1"
-# port = 8765
-# auth_token = "your-secret-token"
-
 # Scheduled tasks (cron-style, 6-field cron with seconds)
 # [[schedule]]
 # name = "daily-email-check"
 # cron = "0 0 9 * * *"           # 9:00 AM daily (sec min hr day mon dow)
 # task = "Check my email and summarize anything important"
 # publish = true                  # Publish result to egregore
-# notify = "discord:channel:inbox-alerts"
+# notify = "egregore:channel:inbox-alerts"
 
 # [[schedule]]
 # name = "hourly-backup-check"
@@ -164,4 +150,4 @@ scope.block = ["container_lifecycle:traefik", "container_lifecycle:portainer"]
 # event = "new_message"
 # filter = { priority = "high" }
 # task = "Summarize this email: {{event.body}}"
-# notify = "discord:channel:inbox-alerts"
+# notify = "egregore:channel:inbox-alerts"

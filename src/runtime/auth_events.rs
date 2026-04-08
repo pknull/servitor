@@ -10,7 +10,6 @@ pub async fn publish_auth_denied_event(
     egregore: &EgregoreClient,
     identity: &Identity,
     person: &PersonId,
-    place: &str,
     skill: &str,
     gate: AuthGate,
     reason: &str,
@@ -27,13 +26,12 @@ pub async fn publish_auth_denied_event(
     let denial = AuthDenied::new(
         identity.public_id(),
         person_id,
-        place.to_string(),
         skill.to_string(),
         gate,
         reason.to_string(),
     );
 
     if let Err(error) = egregore.publish_auth_denied(&denial).await {
-        tracing::debug!(error = %error, place = %place, skill = %skill, "failed to publish auth denial");
+        tracing::debug!(error = %error, skill = %skill, "failed to publish auth denial");
     }
 }

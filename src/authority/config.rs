@@ -42,12 +42,10 @@ egregore = "@AutomationKey.ed25519"
 
 [[permission]]
 keeper = "pknull"
-place = "*"
 skills = ["*"]
 
 [[permission]]
 keeper = "automation"
-place = "egregore:local"
 skills = ["docker:inspect_*"]
 "#;
 
@@ -62,7 +60,6 @@ skills = ["docker:inspect_*"]
         );
 
         assert_eq!(config.permissions[0].keeper, "pknull");
-        assert_eq!(config.permissions[0].place, "*");
         assert_eq!(config.permissions[0].skills, vec!["*"]);
     }
 

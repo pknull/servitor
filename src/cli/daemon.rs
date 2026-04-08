@@ -7,8 +7,6 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 
 use crate::a2a::server as a2a_server;
-use crate::comms::discord::DiscordTransport;
-use crate::comms::CommsTransport;
 use crate::config::Config;
 use crate::egregore::build_profile;
 use crate::error::Result;
@@ -17,27 +15,44 @@ use crate::events::sse::SseSource;
 use crate::events::EventRouter;
 use crate::metrics;
 use crate::runtime::{RuntimeContext, RuntimeStats};
+use crate::session::TaskWatcher;
 use crate::task::{execute_assigned_task, process_sse_message, TaskCoordinator};
 
 use super::daemon_handlers::{
-    handle_discord_message, handle_event_router_task, handle_heartbeat, handle_lifecycle_timeouts,
+    handle_event_router_task, handle_heartbeat, handle_lifecycle_timeouts,
+    handle_task_completion,
 };
 
 /// Run servitor as a long-lived daemon with event router.
 pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
     // Check if reasoning capability is needed
     let needs_llm =
-        config.egregore.subscribe || config.comms.discord.is_some() || !config.schedule.is_empty();
+        config.egregore.subscribe || !config.schedule.is_empty();
 
     if needs_llm && config.llm.is_none() {
         return Err(crate::error::ServitorError::Config {
-            reason: "Daemon mode with SSE subscribe, Discord, or scheduled tasks requires [llm] configuration. \
-                    For worker-only mode (A2A server), disable subscribe and remove comms/schedule sections.".into(),
+            reason: "Daemon mode with SSE subscribe or scheduled tasks requires [llm] configuration. \
+                    For worker-only mode (A2A server), disable subscribe and remove schedule sections.".into(),
         });
     }
 
     // Initialize metrics if enabled
     metrics::init(&config.metrics)?;
+
+    // In insecure mode, auto-exit after timeout to prevent accidental long-running exposure.
+    // Configurable via SERVITOR_INSECURE_TIMEOUT_SECS (default: 60).
+    if insecure {
+        let timeout_secs: u64 = std::env::var("SERVITOR_INSECURE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;
+            tracing::error!("INSECURE MODE: {timeout_secs}-second timeout reached — shutting down");
+            eprintln!("\n*** INSECURE MODE TIMEOUT ({timeout_secs}s) — auto-exit ***");
+            std::process::exit(1);
+        });
+    }
 
     // Initialize core components
     let ctx = RuntimeContext::new(config, insecure).await?;
@@ -67,9 +82,6 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
         None
     };
     let mut task_coordinator = TaskCoordinator::new(ctx.identity.public_id(), config.task.clone());
-
-    // Initialize Discord transport
-    let mut discord_transport = init_discord_transport(config).await;
 
     // Spawn A2A server if enabled
     let _a2a_server_handle = if let Some(ref a2a_server_config) = config.a2a_server {
@@ -132,6 +144,12 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
         None
     };
 
+    // Spawn task watcher for delegated task completion notifications
+    let task_watcher = TaskWatcher::new(ctx.egregore.clone());
+    let (mut task_completion_rx, _watcher_handle) =
+        task_watcher.start(ctx.session_store.clone());
+    tracing::info!("task completion watcher started");
+
     // Publish initial profile
     let mut runtime_stats = RuntimeStats::new();
     let profile = build_profile(
@@ -153,7 +171,6 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
 
     tracing::info!(
         sources = event_router.source_count(),
-        discord = discord_transport.is_some(),
         sse = sse_source.is_some(),
         a2a_server = _a2a_server_handle.is_some(),
         "entering event loop"
@@ -161,30 +178,11 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
 
     loop {
         tokio::select! {
-            // Handle Discord messages
-            Some((comms_msg, responder)) = async {
-                if let Some(ref mut transport) = discord_transport {
-                    transport.recv().await
-                } else {
-                    std::future::pending().await
-                }
-            } => {
-                // Safety: LLM is required for Discord mode, validated at startup
-                let provider = ctx.provider.as_ref()
-                    .expect("LLM provider required for Discord mode")
-                    .as_ref();
-                handle_discord_message(
-                    comms_msg,
-                    responder,
-                    &ctx.authority,
-                    &ctx.identity,
-                    &ctx.egregore,
-                    &mut runtime_stats,
-                    provider,
-                    &ctx.mcp_pool,
-                    &ctx.a2a_pool,
-                    &ctx.scope_enforcer,
-                    config,
+            // Handle task completion events from delegated work
+            Some(completion) = task_completion_rx.recv() => {
+                handle_task_completion(
+                    completion,
+                    &ctx.session_store,
                 ).await;
             }
 
@@ -301,27 +299,6 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                     ).await;
                 }
             }
-        }
-    }
-}
-
-/// Initialize Discord transport if configured.
-async fn init_discord_transport(config: &Config) -> Option<DiscordTransport> {
-    let discord_config = config.comms.discord.as_ref()?;
-
-    match DiscordTransport::new(discord_config) {
-        Ok(mut transport) => {
-            if let Err(e) = transport.connect().await {
-                tracing::error!(error = %e, "failed to connect Discord transport");
-                None
-            } else {
-                tracing::info!("Discord transport connected");
-                Some(transport)
-            }
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to create Discord transport");
-            None
         }
     }
 }

@@ -115,6 +115,7 @@ fn task_message_construction() {
         timeout_secs: Some(60),
         author: None,
         keeper: None,
+        tool_calls: vec![],
     };
 
     let json = serde_json::to_string(&task).unwrap();

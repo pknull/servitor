@@ -1,38 +1,31 @@
 //! Permission types and pattern matching.
 //!
-//! Permissions map keepers to places and skills using glob-style patterns.
+//! Permissions map keepers to skills using glob-style patterns.
 
 use serde::{Deserialize, Serialize};
 
-/// A permission grant mapping keeper to allowed places and skills.
+/// A permission grant mapping keeper to allowed skills.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Permission {
     /// Name of the keeper this permission applies to.
     pub keeper: String,
-
-    /// Place pattern (e.g., "discord:*", "egregore:local").
-    pub place: String,
 
     /// Skill patterns (e.g., ["shell:*", "docker:inspect_*"]).
     pub skills: Vec<String>,
 }
 
 impl Permission {
-    /// Check if this permission matches the given place and skill.
-    pub fn matches(&self, place: &str, skill: &str) -> bool {
-        pattern_matches(&self.place, place)
-            && self.skills.iter().any(|s| skill_pattern_matches(s, skill))
+    /// Check if this permission matches the given skill.
+    pub fn matches(&self, skill: &str) -> bool {
+        self.skills.iter().any(|s| skill_pattern_matches(s, skill))
     }
 }
 
-/// Authorization request containing person, place, and skill.
+/// Authorization request containing person and skill.
 #[derive(Debug, Clone)]
 pub struct AuthRequest {
     /// The person identity making the request.
     pub person: super::keeper::PersonId,
-
-    /// The place where the request originates (e.g., "discord:guild:channel").
-    pub place: String,
 
     /// The skill being invoked (e.g., "shell:execute").
     pub skill: String,
@@ -80,7 +73,7 @@ impl AuthResult {
     }
 }
 
-/// Glob-style pattern matching for places and skills.
+/// Glob-style pattern matching for skills.
 ///
 /// Patterns use colon-delimited segments:
 /// - `*` matches any single segment
@@ -210,13 +203,11 @@ mod tests {
     fn test_permission_matches() {
         let perm = Permission {
             keeper: "pknull".to_string(),
-            place: "discord:*".to_string(),
             skills: vec!["shell:*".to_string(), "docker:inspect_*".to_string()],
         };
 
-        assert!(perm.matches("discord:123", "shell:execute"));
-        assert!(perm.matches("discord:456", "docker:inspect_container"));
-        assert!(!perm.matches("egregore:local", "shell:execute"));
-        assert!(!perm.matches("discord:123", "dangerous:tool"));
+        assert!(perm.matches("shell:execute"));
+        assert!(perm.matches("docker:inspect_container"));
+        assert!(!perm.matches("dangerous:tool"));
     }
 }

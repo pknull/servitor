@@ -21,13 +21,37 @@ Servitor can run in different modes depending on configuration. Each mode enable
 
 Each component is optional. Configuration determines which are active.
 
+## Dual Execution Model
+
+Servitor has two execution paths. The task format decides which is used:
+
+**Direct tool call (no LLM):** The task specifies exactly which tool to call with what arguments. Servitor executes immediately — no LLM invocation, no reasoning cost, instant response. Use this when Familiar (or another agent) has already done the planning.
+
+```json
+{
+  "type": "task",
+  "tool_call": { "server": "systemctl", "tool": "restart", "args": { "service": "nginx" } }
+}
+```
+
+**Reasoning task (with LLM):** The task is a natural language prompt. Servitor engages its LLM to reason about which tools to use, in what order, and how to interpret results. Use this when the servitor needs local context to figure out the plan.
+
+```json
+{
+  "type": "task",
+  "prompt": "Why is system 12 having resource spikes? Investigate and report."
+}
+```
+
+**The principle:** Don't burn LLM tokens for what's already been decided. Familiar does the thinking when it can. Servitor thinks only when it must — when it has local context that Familiar doesn't.
+
 ## Mode Summary
 
 | Mode | LLM | Egregore | A2A Server | A2A Client | MCP | Use Case |
 |------|-----|----------|------------|------------|-----|----------|
-| Full Agent | ✓ | ✓ | ✓ | ✓ | ✓ | Personal AI agent |
+| Full Agent | ✓ | ✓ | ✓ | ✓ | ✓ | Reasoning + execution |
 | Personal Agent | ✓ | ✗ | ✗ | ✗ | ✓ | Local assistant |
-| Worker | ✗ | ✗ | ✓ | ✗ | ✓ | Execute tasks |
+| Worker | ✗ | ✗ | ✓ | ✗ | ✓ | Direct tool execution only |
 | Coordinator | ✗ | ✓ | ✓ | ✓ | ✗ | Route tasks |
 | Gateway | ✗ | ✓ | ✓ | ✗ | ✗ | Egregore ↔ A2A bridge |
 

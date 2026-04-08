@@ -121,5 +121,6 @@ pub fn task_from_schedule(
         timeout_secs: None,
         author: None,
         keeper: None,
+        tool_calls: vec![],
     }
 }
