@@ -57,6 +57,22 @@ pub struct ServitorProfile {
     /// Timestamp when the last task finished execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_task_ts: Option<DateTime<Utc>>,
+
+    /// Low-cardinality placement roles such as "staging" or "docker-host".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+
+    /// Small stable key/value labels used for placement or filtering.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub labels: HashMap<String, String>,
+
+    /// Hash of the latest published servitor_manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_ref: Option<String>,
+
+    /// Summary of planner-facing deployment targets exposed by this servitor.
+    #[serde(default, skip_serializing_if = "TargetSummary::is_empty")]
+    pub target_summary: TargetSummary,
 }
 
 fn default_version() -> String {
@@ -83,8 +99,132 @@ impl ServitorProfile {
             load: ServitorLoad::default(),
             stats: ServitorStats::default(),
             last_task_ts: None,
+            roles: vec![],
+            labels: HashMap::new(),
+            manifest_ref: None,
+            target_summary: TargetSummary::default(),
         }
     }
+}
+
+/// Summary of planner-facing deployment targets.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetSummary {
+    pub count: u64,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+}
+
+impl TargetSummary {
+    pub fn is_empty(&self) -> bool {
+        self.count == 0 && self.kinds.is_empty()
+    }
+}
+
+/// Detailed planner-facing executor manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServitorManifest {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub servitor_id: PublicId,
+    pub manifest_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub labels: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolsets: Vec<ToolsetSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployment_targets: Vec<DeploymentTargetSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_hints: Option<serde_json::Value>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Grouped tool surface derived from one local MCP server or A2A backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsetSummary {
+    pub server: String,
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_templates: Vec<ResourceTemplateSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSummary {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceSummary {
+    pub id: String,
+    pub uri: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_hint_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceTemplateSummary {
+    pub id: String,
+    pub uri_template: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_hint_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentTargetSummary {
+    pub target_id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_ref: Option<String>,
+}
+
+/// Target-specific planner-safe environment snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentSnapshot {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub snapshot_id: String,
+    pub servitor_id: PublicId,
+    pub target_id: String,
+    pub manifest_ref: String,
+    pub kind: String,
+    pub summary: serde_json::Value,
+    pub state: serde_json::Value,
+    pub observed_at: DateTime<Utc>,
+    pub ttl_secs: u64,
+    pub sensitivity: SnapshotSensitivity,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotSensitivity {
+    PublicSummary,
+    #[default]
+    Restricted,
 }
 
 /// MCP server health snapshot for profile publishing.
@@ -283,10 +423,6 @@ pub struct TaskResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<u64>,
 
-    /// Referenced pre-execution plan hash, if execution was plan-first.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_hash: Option<String>,
-
     /// Signed attestation.
     pub attestation: Attestation,
 
@@ -317,10 +453,10 @@ pub struct Attestation {
     pub timestamp: DateTime<Utc>,
 }
 
-/// Planned tool call emitted during exec planning.
+/// Planned tool call embedded in a structured task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlannedToolCall {
-    /// Provider-generated tool_use id.
+    /// Stable call identifier.
     pub id: String,
 
     /// Prefixed MCP tool name.
@@ -328,36 +464,6 @@ pub struct PlannedToolCall {
 
     /// Proposed arguments for the call.
     pub arguments: serde_json::Value,
-}
-
-/// Signed pre-execution plan artifact for direct exec mode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskPlan {
-    #[serde(rename = "type")]
-    pub msg_type: String,
-
-    /// Correlation ID for tracking.
-    pub correlation_id: String,
-
-    /// Hash of the task being planned.
-    pub task_hash: String,
-
-    /// Hash of the plan payload.
-    pub plan_hash: String,
-
-    /// Planner summary text, if any.
-    #[serde(default)]
-    pub summary: String,
-
-    /// Provider stop reason during planning.
-    pub stop_reason: String,
-
-    /// Planned tool calls in execution order.
-    #[serde(default)]
-    pub tool_calls: Vec<PlannedToolCall>,
-
-    /// Signed attestation over the plan hash.
-    pub attestation: Attestation,
 }
 
 /// Task message received from egregore.
@@ -426,6 +532,13 @@ pub struct Task {
     /// sequentially without engaging the LLM reasoning loop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<PlannedToolCall>,
+
+    /// Task hashes that must complete before this task can execute.
+    ///
+    /// Servitor does not interpret this field — it exists for planner
+    /// audit trails and Scry dependency visualization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 impl Task {
@@ -957,6 +1070,10 @@ mod tests {
         assert_eq!(profile.load, ServitorLoad::default());
         assert_eq!(profile.stats, ServitorStats::default());
         assert!(profile.last_task_ts.is_none());
+        assert!(profile.roles.is_empty());
+        assert!(profile.labels.is_empty());
+        assert!(profile.manifest_ref.is_none());
+        assert!(profile.target_summary.is_empty());
     }
 
     #[test]
@@ -978,6 +1095,16 @@ mod tests {
             tasks_failed: 1,
         };
         profile.last_task_ts = Some(Utc::now());
+        profile.roles = vec!["docker-host".to_string(), "staging".to_string()];
+        profile.labels = HashMap::from([
+            ("env".to_string(), "staging".to_string()),
+            ("site".to_string(), "lab-a".to_string()),
+        ]);
+        profile.manifest_ref = Some("manifest-123".to_string());
+        profile.target_summary = TargetSummary {
+            count: 1,
+            kinds: vec!["docker_compose_project".to_string()],
+        };
 
         let json = serde_json::to_value(&profile).unwrap();
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
@@ -990,6 +1117,10 @@ mod tests {
         assert_eq!(json["stats"]["tasks_executed"], 2);
         assert_eq!(json["stats"]["tasks_failed"], 1);
         assert!(json["last_task_ts"].is_string());
+        assert_eq!(json["roles"][0], "docker-host");
+        assert_eq!(json["labels"]["env"], "staging");
+        assert_eq!(json["manifest_ref"], "manifest-123");
+        assert_eq!(json["target_summary"]["count"], 1);
     }
 
     #[test]
@@ -1008,40 +1139,5 @@ mod tests {
         assert_eq!(parsed.msg_type, "auth_denied");
         assert_eq!(parsed.gate, AuthGate::Offer);
         assert_eq!(parsed.person_id, "discord:123");
-    }
-
-    #[test]
-    fn task_plan_roundtrip() {
-        let identity = crate::identity::Identity::generate();
-        let plan_hash = "abc123plan";
-        let signature = identity.sign_hash(plan_hash);
-
-        let plan = TaskPlan {
-            msg_type: "task_plan".to_string(),
-            correlation_id: "corr-123".to_string(),
-            task_hash: "task-123".to_string(),
-            plan_hash: plan_hash.to_string(),
-            summary: "Inspect files, then summarize.".to_string(),
-            stop_reason: "tool_use".to_string(),
-            tool_calls: vec![PlannedToolCall {
-                id: "toolu_1".to_string(),
-                name: "shell_execute".to_string(),
-                arguments: serde_json::json!({ "command": "pwd" }),
-            }],
-            attestation: Attestation {
-                servitor_id: identity.public_id(),
-                signature: signature.clone(),
-                timestamp: Utc::now(),
-            },
-        };
-
-        let json = serde_json::to_string(&plan).unwrap();
-        let parsed: TaskPlan = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.tool_calls.len(), 1);
-        assert!(parsed
-            .attestation
-            .servitor_id
-            .verify(plan_hash.as_bytes(), &signature)
-            .unwrap());
     }
 }

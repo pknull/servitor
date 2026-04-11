@@ -8,34 +8,23 @@ use tokio::sync::RwLock;
 
 use crate::a2a::server as a2a_server;
 use crate::config::Config;
-use crate::egregore::build_profile;
+use crate::egregore::{build_environment_snapshots, build_manifest, build_profile};
 use crate::error::Result;
 use crate::events::cron::CronSource;
+use crate::events::mcp::McpNotificationSource;
 use crate::events::sse::SseSource;
-use crate::events::EventRouter;
+use crate::events::{EventRouter, EventSource};
 use crate::metrics;
 use crate::runtime::{RuntimeContext, RuntimeStats};
 use crate::session::TaskWatcher;
 use crate::task::{execute_assigned_task, process_sse_message, TaskCoordinator};
 
 use super::daemon_handlers::{
-    handle_event_router_task, handle_heartbeat, handle_lifecycle_timeouts,
-    handle_task_completion,
+    handle_event_router_task, handle_heartbeat, handle_lifecycle_timeouts, handle_task_completion,
 };
 
 /// Run servitor as a long-lived daemon with event router.
 pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
-    // Check if reasoning capability is needed
-    let needs_llm =
-        config.egregore.subscribe || !config.schedule.is_empty();
-
-    if needs_llm && config.llm.is_none() {
-        return Err(crate::error::ServitorError::Config {
-            reason: "Daemon mode with SSE subscribe or scheduled tasks requires [llm] configuration. \
-                    For worker-only mode (A2A server), disable subscribe and remove schedule sections.".into(),
-        });
-    }
-
     // Initialize metrics if enabled
     metrics::init(&config.metrics)?;
 
@@ -67,6 +56,34 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
         event_router.add_source(Box::new(cron_source));
         tracing::info!(tasks = config.schedule.len(), "cron source enabled");
     }
+    let mut mcp_notification_source = if config.watch.is_empty()
+        && config
+            .mcp
+            .values()
+            .all(|mcp| mcp.on_notification.is_empty())
+    {
+        None
+    } else {
+        let mut source = McpNotificationSource::new();
+        for (name, mcp_config) in &config.mcp {
+            if !mcp_config.on_notification.is_empty() {
+                source.register_handler(name, &mcp_config.on_notification);
+            }
+        }
+        for watch in &config.watch {
+            source.register_watch(watch);
+        }
+        tracing::info!(
+            server_handlers = config
+                .mcp
+                .values()
+                .filter(|mcp| !mcp.on_notification.is_empty())
+                .count(),
+            watch_routes = config.watch.len(),
+            "MCP notification source enabled"
+        );
+        Some(source)
+    };
 
     // Initialize SSE source if subscribed
     // Capability set includes both MCP servers and A2A agents
@@ -146,18 +163,39 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
 
     // Spawn task watcher for delegated task completion notifications
     let task_watcher = TaskWatcher::new(ctx.egregore.clone());
-    let (mut task_completion_rx, _watcher_handle) =
-        task_watcher.start(ctx.session_store.clone());
+    let (mut task_completion_rx, _watcher_handle) = task_watcher.start(ctx.session_store.clone());
     tracing::info!("task completion watcher started");
 
-    // Publish initial profile
+    // Publish initial manifest and profile
     let mut runtime_stats = RuntimeStats::new();
+    let manifest = build_manifest(&ctx.identity, &ctx.mcp_pool, &ctx.a2a_pool, config).await;
+    let mut manifest_ref = match ctx.egregore.publish_manifest(&manifest).await {
+        Ok(hash) => Some(hash),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to publish servitor manifest");
+            None
+        }
+    };
+    if let Some(manifest_ref) = manifest_ref.as_deref() {
+        let snapshots =
+            build_environment_snapshots(&ctx.identity, &ctx.mcp_pool, config, manifest_ref).await;
+        for snapshot in snapshots {
+            if let Err(e) = ctx.egregore.publish_environment_snapshot(&snapshot).await {
+                tracing::warn!(
+                    error = %e,
+                    target_id = %snapshot.target_id,
+                    "failed to publish environment snapshot"
+                );
+            }
+        }
+    }
     let profile = build_profile(
         &ctx.identity,
         &ctx.mcp_pool,
         &ctx.a2a_pool,
         config,
         &runtime_stats,
+        manifest_ref.as_deref(),
     )
     .await;
     if let Err(e) = ctx.egregore.publish_profile(&profile).await {
@@ -167,11 +205,14 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
     // Main event loop
     let heartbeat_interval = std::time::Duration::from_secs(config.heartbeat.interval_secs);
     let poll_interval = std::time::Duration::from_millis(100);
+    let mcp_notification_poll_interval = std::time::Duration::from_secs(1);
     let mut last_heartbeat = Instant::now();
+    let mut last_mcp_notification_poll = Instant::now() - mcp_notification_poll_interval;
 
     tracing::info!(
         sources = event_router.source_count(),
         sse = sse_source.is_some(),
+        mcp_notifications = mcp_notification_source.is_some(),
         a2a_server = _a2a_server_handle.is_some(),
         "entering event loop"
     );
@@ -201,13 +242,8 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                             config,
                         ).await {
                             Ok(Some(assigned)) => {
-                                // Safety: LLM is required for SSE mode, validated at startup
-                                let provider = ctx.provider.as_ref()
-                                    .expect("LLM provider required for SSE mode")
-                                    .as_ref();
                                 if let Err(e) = execute_assigned_task(
                                     assigned,
-                                    provider,
                                     &ctx.mcp_pool,
                                     &ctx.a2a_pool,
                                     &ctx.scope_enforcer,
@@ -236,13 +272,8 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
 
                 // Process queued assignments
                 if let Some(assigned) = task_coordinator.take_next_assignment() {
-                    // Safety: LLM is required for SSE mode, validated at startup
-                    let provider = ctx.provider.as_ref()
-                        .expect("LLM provider required for SSE mode")
-                        .as_ref();
                     if let Err(e) = execute_assigned_task(
                         assigned,
-                        provider,
                         &ctx.mcp_pool,
                         &ctx.a2a_pool,
                         &ctx.scope_enforcer,
@@ -258,6 +289,52 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                     }
                 }
 
+                // Poll MCP server notifications on a slower cadence than the main loop.
+                if last_mcp_notification_poll.elapsed() >= mcp_notification_poll_interval {
+                    last_mcp_notification_poll = Instant::now();
+                    if let Some(ref mut source) = mcp_notification_source {
+                        match ctx.mcp_pool.drain_notifications().await {
+                            Ok(notifications) => {
+                                for (server_name, notification) in notifications {
+                                    source.queue_notification(
+                                        &server_name,
+                                        &notification.method,
+                                        notification.params.unwrap_or(serde_json::json!({})),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to drain MCP notifications");
+                            }
+                        }
+                    }
+                }
+
+                // Process MCP notification tasks before other local sources.
+                if let Some(ref mut source) = mcp_notification_source {
+                    if let Some(task) = source.next().await {
+                        tracing::debug!(
+                            hash = %task.hash,
+                            prompt_len = task.prompt.len(),
+                            "processing task from MCP notification source"
+                        );
+                        runtime_stats.record_task_offer();
+
+                        handle_event_router_task(
+                            task,
+                            &ctx.authority,
+                            &ctx.identity,
+                            &ctx.egregore,
+                            &mut runtime_stats,
+                            &ctx.mcp_pool,
+                            &ctx.a2a_pool,
+                            &ctx.scope_enforcer,
+                            config,
+                        ).await;
+                        continue;
+                    }
+                }
+
                 // Process event router tasks (cron, etc.)
                 if let Some((source_idx, task)) = event_router.poll().await {
                     tracing::debug!(
@@ -268,17 +345,12 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                     );
                     runtime_stats.record_task_offer();
 
-                    // Safety: LLM is required for cron/SSE tasks, validated at startup
-                    let provider = ctx.provider.as_ref()
-                        .expect("LLM provider required for event router tasks")
-                        .as_ref();
                     handle_event_router_task(
                         task,
                         &ctx.authority,
                         &ctx.identity,
                         &ctx.egregore,
                         &mut runtime_stats,
-                        provider,
                         &ctx.mcp_pool,
                         &ctx.a2a_pool,
                         &ctx.scope_enforcer,
@@ -288,6 +360,35 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
 
                 // Check heartbeat
                 if last_heartbeat.elapsed() >= heartbeat_interval {
+                    // Rebuild and republish manifest so capabilities stay current
+                    let fresh_manifest = build_manifest(
+                        &ctx.identity, &ctx.mcp_pool, &ctx.a2a_pool, config,
+                    ).await;
+                    match ctx.egregore.publish_manifest(&fresh_manifest).await {
+                        Ok(hash) => { manifest_ref = Some(hash); }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "failed to republish manifest");
+                        }
+                    }
+
+                    if let Some(ref current_ref) = manifest_ref {
+                        let snapshots = build_environment_snapshots(
+                            &ctx.identity,
+                            &ctx.mcp_pool,
+                            config,
+                            current_ref,
+                        )
+                        .await;
+                        for snapshot in snapshots {
+                            if let Err(e) = ctx.egregore.publish_environment_snapshot(&snapshot).await {
+                                tracing::debug!(
+                                    error = %e,
+                                    target_id = %snapshot.target_id,
+                                    "failed to publish environment snapshot"
+                                );
+                            }
+                        }
+                    }
                     handle_heartbeat(
                         &ctx.identity,
                         &ctx.mcp_pool,
@@ -295,6 +396,7 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                         config,
                         &runtime_stats,
                         &ctx.egregore,
+                        manifest_ref.as_deref(),
                         &mut last_heartbeat,
                     ).await;
                 }

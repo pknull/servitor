@@ -14,7 +14,8 @@ pub mod sse;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use crate::egregore::Task;
+use crate::config::ToolCallTemplate;
+use crate::egregore::{PlannedToolCall, Task};
 
 /// Trait for event sources that yield tasks.
 #[async_trait]
@@ -90,17 +91,32 @@ impl Default for EventRouter {
     }
 }
 
-/// Create a task from a scheduled task definition.
-pub fn task_from_schedule(
+/// Create a task from a structured task template.
+pub fn task_from_template(
     name: &str,
-    prompt: &str,
+    prompt: Option<&str>,
+    tool_calls: &[ToolCallTemplate],
     context: HashMap<String, serde_json::Value>,
 ) -> Task {
     use sha2::{Digest, Sha256};
 
+    let rendered_prompt = prompt
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Execute structured task '{name}'"));
+    let planned_tool_calls: Vec<PlannedToolCall> = tool_calls
+        .iter()
+        .map(|call| PlannedToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        })
+        .collect();
+    let tool_calls_json = serde_json::to_vec(&planned_tool_calls).unwrap_or_default();
+
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
-    hasher.update(prompt.as_bytes());
+    hasher.update(rendered_prompt.as_bytes());
+    hasher.update(&tool_calls_json);
     hasher.update(chrono::Utc::now().timestamp().to_le_bytes());
     let hash = hasher.finalize();
     let hash_str: String = hash.iter().map(|b| format!("{b:02x}")).collect();
@@ -110,9 +126,9 @@ pub fn task_from_schedule(
         id: None,
         hash: hash_str,
         task_type: None,
-        request: Some(prompt.to_string()),
+        request: Some(rendered_prompt.clone()),
         requestor: None,
-        prompt: prompt.to_string(),
+        prompt: rendered_prompt,
         required_caps: vec![],
         parent_id: None,
         context,
@@ -121,6 +137,7 @@ pub fn task_from_schedule(
         timeout_secs: None,
         author: None,
         keeper: None,
-        tool_calls: vec![],
+        tool_calls: planned_tool_calls,
+        depends_on: vec![],
     }
 }

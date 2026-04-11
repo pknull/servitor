@@ -184,6 +184,7 @@ mod tests {
             author: None,
             keeper: None,
             tool_calls: vec![],
+            depends_on: vec![],
         };
         assert!(source.matches_capabilities(&task1));
 
@@ -205,6 +206,7 @@ mod tests {
             author: None,
             keeper: None,
             tool_calls: vec![],
+            depends_on: vec![],
         };
         assert!(source.matches_capabilities(&task2));
 
@@ -226,6 +228,7 @@ mod tests {
             author: None,
             keeper: None,
             tool_calls: vec![],
+            depends_on: vec![],
         };
         assert!(!source.matches_capabilities(&task3));
     }

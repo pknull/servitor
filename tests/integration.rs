@@ -2,9 +2,7 @@
 
 use chrono::Utc;
 use servitor::config::Config;
-use servitor::egregore::messages::{
-    Attestation, PlannedToolCall, Task, TaskPlan, TaskScopeOverride, TaskStatus,
-};
+use servitor::egregore::messages::{Task, TaskScopeOverride, TaskStatus};
 use servitor::identity::Identity;
 use servitor::mcp::McpPool;
 use servitor::scope::ScopeEnforcer;
@@ -19,24 +17,16 @@ data_dir = "/tmp/servitor-test"
 [egregore]
 api_url = "http://127.0.0.1:7654"
 
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
-
 [mcp.test]
 transport = "stdio"
 command = "echo"
 scope.allow = ["*"]
 
 [agent]
-max_turns = 10
 timeout_secs = 60
 "#;
 
     let config = Config::from_str(toml).unwrap();
-    let llm = config.llm.as_ref().expect("LLM should be configured");
-    assert_eq!(llm.provider, "anthropic");
     assert_eq!(config.mcp.len(), 1);
     assert!(config.mcp.contains_key("test"));
     assert_eq!(config.task.offer_ttl_secs, 300);
@@ -116,6 +106,7 @@ fn task_message_construction() {
         author: None,
         keeper: None,
         tool_calls: vec![],
+        depends_on: vec![],
     };
 
     let json = serde_json::to_string(&task).unwrap();
@@ -157,7 +148,6 @@ fn attestation_signing() {
         result: Some(serde_json::json!({ "answer": 42 })),
         error: None,
         duration_seconds: Some(1),
-        plan_hash: Some("plan-123".to_string()),
         attestation,
         trace_id: None,
     };
@@ -175,46 +165,6 @@ fn attestation_signing() {
     assert!(json.contains("task_result"));
     assert!(json.contains("attestation"));
     assert!(json.contains("signature"));
-    assert!(json.contains("plan-123"));
-}
-
-/// Test task plan signing in plan-first/dry-run flows.
-#[test]
-fn task_plan_signing() {
-    let identity = Identity::generate();
-    let plan_hash = "cafebabe123456";
-    let signature = identity.sign_hash(plan_hash);
-
-    let plan = TaskPlan {
-        msg_type: "task_plan".to_string(),
-        correlation_id: "corr-plan-1".to_string(),
-        task_hash: "task-xyz".to_string(),
-        plan_hash: plan_hash.to_string(),
-        summary: "Read the directory, then answer.".to_string(),
-        stop_reason: "tool_use".to_string(),
-        tool_calls: vec![PlannedToolCall {
-            id: "toolu_plan_1".to_string(),
-            name: "shell_execute".to_string(),
-            arguments: serde_json::json!({ "command": "pwd" }),
-        }],
-        attestation: Attestation {
-            servitor_id: identity.public_id(),
-            signature: signature.clone(),
-            timestamp: Utc::now(),
-        },
-    };
-
-    let valid = plan
-        .attestation
-        .servitor_id
-        .verify(plan_hash.as_bytes(), &signature)
-        .unwrap();
-    assert!(valid);
-
-    let json = serde_json::to_string_pretty(&plan).unwrap();
-    assert!(json.contains("task_plan"));
-    assert!(json.contains("tool_calls"));
-    assert!(json.contains("shell_execute"));
 }
 
 /// Test trace linkage on task results.
@@ -236,7 +186,6 @@ fn task_result_trace_id_roundtrip() {
         result: Some(serde_json::json!({ "text": "ok" })),
         error: None,
         duration_seconds: Some(1),
-        plan_hash: None,
         attestation: Attestation {
             servitor_id: identity.public_id(),
             signature,
@@ -287,44 +236,5 @@ fn trace_span_serialization() {
     assert_eq!(json["events"][0]["name"], "image_pulled");
 }
 
-/// Test provider capabilities structure.
-#[test]
-fn provider_capabilities() {
-    use servitor::agent::provider::ProviderCapabilities;
-
-    let caps = ProviderCapabilities {
-        supports_tools: true,
-        supports_vision: true,
-        supports_streaming: false,
-        max_tokens: Some(4096),
-    };
-
-    assert!(caps.supports_tools);
-    assert_eq!(caps.max_tokens, Some(4096));
-}
-
-/// Test message construction for agent context.
-#[test]
-fn agent_context() {
-    use servitor::agent::{ContentBlock, ConversationContext};
-
-    let mut ctx = ConversationContext::new();
-
-    ctx.add_user_message("Hello, execute a task");
-    ctx.add_assistant_message(vec![
-        ContentBlock::text("I'll help with that."),
-        ContentBlock::tool_use(
-            "call_1",
-            "shell_execute",
-            serde_json::json!({"command": "ls"}),
-        ),
-    ]);
-    ctx.add_tool_results(vec![ContentBlock::tool_result(
-        "call_1",
-        "file1.txt\nfile2.txt",
-        false,
-    )]);
-
-    assert_eq!(ctx.messages().len(), 3);
-    assert_eq!(ctx.turn_count(), 1);
-}
+// LLM-specific tests removed: provider_capabilities, agent_context
+// Servitors are now pure tool executors — no LLM provider or conversation context.

@@ -106,6 +106,7 @@ skills = ["assign:*"]
             keeper: None,
             scope_override: None,
             tool_calls: vec![],
+            depends_on: vec![],
         }
     }
 

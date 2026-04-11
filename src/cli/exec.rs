@@ -1,30 +1,21 @@
 //! Direct task execution command.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use crate::a2a::A2aPool;
-use crate::agent::{create_provider, AgentExecutor};
 use crate::authority::{authorize_local_exec, load_runtime_authority};
 use crate::config::Config;
-use crate::egregore::EgregoreClient;
+use crate::egregore::{EgregoreClient, PlannedToolCall, Task};
 use crate::error::{Result, ServitorError};
 use crate::identity::Identity;
 use crate::mcp::McpPool;
 use crate::scope::ScopeEnforcer;
 
-/// Execute a task directly (for testing/development).
+/// Execute a task directly with pre-planned tool calls.
 ///
-/// This bypasses the egregore network and executes a task immediately
-/// using the local MCP server pool and LLM provider.
-pub async fn run_exec(
-    config: &Config,
-    prompt: &str,
-    insecure: bool,
-    dry_run: bool,
-    plan_first: bool,
-) -> Result<()> {
+/// Accepts a JSON string containing tool_calls for immediate execution
+/// against the local MCP server pool. No LLM reasoning is involved.
+pub async fn run_exec(config: &Config, input: &str, insecure: bool) -> Result<()> {
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
@@ -34,11 +25,23 @@ pub async fn run_exec(
 
     tracing::info!(id = %identity.public_id(), "executing task");
 
-    // Initialize components - exec mode requires LLM
-    let llm_config = config.llm.as_ref().ok_or_else(|| ServitorError::Config {
-        reason: "exec mode requires [llm] configuration for reasoning".into(),
-    })?;
-    let provider = create_provider(llm_config)?;
+    // Parse tool calls from JSON input
+    let tool_calls: Vec<PlannedToolCall> =
+        serde_json::from_str(input).map_err(|e| ServitorError::Config {
+            reason: format!(
+                "exec requires JSON array of tool calls, e.g. \
+                 '[{{\"name\": \"shell__execute\", \"arguments\": {{\"command\": \"ls\"}}}}]'. \
+                 Parse error: {}",
+                e
+            ),
+        })?;
+
+    if tool_calls.is_empty() {
+        return Err(ServitorError::Config {
+            reason: "tool_calls array must not be empty".into(),
+        });
+    }
+
     let mut mcp_pool = McpPool::from_config(config)?;
     mcp_pool.initialize_all().await?;
 
@@ -63,15 +66,15 @@ pub async fn run_exec(
         scope_enforcer.add_policy(name, &a2a_config.scope)?;
     }
 
-    // Build a task
-    let task = crate::egregore::Task {
+    // Build task with pre-planned tool calls
+    let task = Task {
         msg_type: "task".to_string(),
         id: None,
-        hash: format!("{:x}", md5_hash(prompt)),
+        hash: task_hash(&tool_calls),
         task_type: None,
-        request: Some(prompt.to_string()),
+        request: None,
         requestor: None,
-        prompt: prompt.to_string(),
+        prompt: format!("exec: {} tool call(s)", tool_calls.len()),
         required_caps: vec![],
         parent_id: None,
         context: std::collections::HashMap::new(),
@@ -79,45 +82,22 @@ pub async fn run_exec(
         priority: 0,
         timeout_secs: Some(config.agent.timeout_secs),
         author: None,
-        keeper: None,
-        tool_calls: vec![],
+        keeper: keeper_name,
+        tool_calls,
+        depends_on: vec![],
     };
 
-    let executor = AgentExecutor::new(
-        provider.as_ref(),
+    let result = crate::agent::direct::execute_direct(
+        &task,
         &mcp_pool,
         &scope_enforcer,
         &identity,
         &config.agent,
+        Some(&egregore),
+        Some(&authority),
+        task.keeper.as_deref(),
     )
-    .with_egregore(&egregore)
-    .with_a2a_pool(&a2a_pool)
-    .with_authority(&authority, keeper_name);
-
-    let mut published_plan_hash = None;
-
-    if dry_run || plan_first {
-        let plan = executor.plan(&task).await?;
-        println!(
-            "Plan: {}",
-            serde_json::to_string_pretty(&plan).unwrap_or_default()
-        );
-
-        if should_publish_plan(plan_first) {
-            let published_hash = egregore.publish_plan(&plan).await?;
-            println!("Plan published: {}", published_hash);
-            published_plan_hash = Some(plan.plan_hash.clone());
-        }
-
-        if dry_run {
-            mcp_pool.shutdown_all().await?;
-            return Ok(());
-        }
-    }
-
-    let result = executor
-        .execute_with_plan_hash(&task, published_plan_hash)
-        .await?;
+    .await?;
 
     // Print result
     println!("Status: {:?}", result.status);
@@ -130,9 +110,6 @@ pub async fn run_exec(
     if let Some(ref e) = result.error {
         println!("Error: {}", e);
     }
-    if let Some(ref plan_hash) = result.plan_hash {
-        println!("Plan hash: {}", plan_hash);
-    }
 
     // Cleanup
     mcp_pool.shutdown_all().await?;
@@ -140,29 +117,20 @@ pub async fn run_exec(
     Ok(())
 }
 
-/// Check if we should publish the plan to egregore.
-fn should_publish_plan(plan_first: bool) -> bool {
-    plan_first
-}
+/// Generate a hash for a set of tool calls.
+fn task_hash(tool_calls: &[PlannedToolCall]) -> String {
+    use sha2::{Digest, Sha256};
 
-/// Simple hash for task ID generation in exec mode.
-fn md5_hash(s: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dry_run_keeps_plan_local() {
-        assert!(!should_publish_plan(false));
+    let mut hasher = Sha256::new();
+    for call in tool_calls {
+        hasher.update(call.name.as_bytes());
+        hasher.update(
+            serde_json::to_string(&call.arguments)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
     }
-
-    #[test]
-    fn plan_first_publishes_plan() {
-        assert!(should_publish_plan(true));
-    }
+    hasher.update(chrono::Utc::now().timestamp().to_le_bytes());
+    let hash = hasher.finalize();
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
