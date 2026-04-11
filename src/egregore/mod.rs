@@ -15,5 +15,5 @@ pub mod publish;
 pub use context::ConversationTurn;
 pub use hook::{parse_message, receive_message};
 pub use messages::*;
-pub use profile::build_profile;
+pub use profile::{build_environment_snapshots, build_manifest, build_profile};
 pub use publish::EgregoreClient;

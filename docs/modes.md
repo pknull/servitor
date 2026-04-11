@@ -1,359 +1,94 @@
 # Servitor Modes
 
-Servitor can run in different modes depending on configuration. Each mode enables different capabilities by including or omitting config sections.
+Servitor is an executor. Its runtime modes change where tasks come from and where results go, but they do not change the core role: execute pre-planned work, enforce authority and scope, publish results.
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                        Servitor                              │
 │                                                              │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
-│  │   LLM    │  │ Egregore │  │   A2A    │  │   MCP    │    │
-│  │Reasoning │  │  Client  │  │Server/Cli│  │   Pool   │    │
+│  │ Egregore │  │   A2A    │  │   MCP    │  │Authority │    │
+│  │  Client  │  │Server/Cli│  │   Pool   │  │ + Scope  │    │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
-│       ▲              ▲             ▲             ▲          │
-│       │              │             │             │          │
-│       └──────────────┴─────────────┴─────────────┘          │
-│                    Config-driven                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Each component is optional. Configuration determines which are active.
-
-## Dual Execution Model
-
-Servitor has two execution paths. The task format decides which is used:
-
-**Direct tool call (no LLM):** The task specifies exactly which tool to call with what arguments. Servitor executes immediately — no LLM invocation, no reasoning cost, instant response. Use this when Familiar (or another agent) has already done the planning.
-
-```json
-{
-  "type": "task",
-  "tool_call": { "server": "systemctl", "tool": "restart", "args": { "service": "nginx" } }
-}
-```
-
-**Reasoning task (with LLM):** The task is a natural language prompt. Servitor engages its LLM to reason about which tools to use, in what order, and how to interpret results. Use this when the servitor needs local context to figure out the plan.
-
-```json
-{
-  "type": "task",
-  "prompt": "Why is system 12 having resource spikes? Investigate and report."
-}
-```
-
-**The principle:** Don't burn LLM tokens for what's already been decided. Familiar does the thinking when it can. Servitor thinks only when it must — when it has local context that Familiar doesn't.
-
 ## Mode Summary
 
-| Mode | LLM | Egregore | A2A Server | A2A Client | MCP | Use Case |
-|------|-----|----------|------------|------------|-----|----------|
-| Full Agent | ✓ | ✓ | ✓ | ✓ | ✓ | Reasoning + execution |
-| Personal Agent | ✓ | ✗ | ✗ | ✗ | ✓ | Local assistant |
-| Worker | ✗ | ✗ | ✓ | ✗ | ✓ | Direct tool execution only |
-| Coordinator | ✗ | ✓ | ✓ | ✓ | ✗ | Route tasks |
-| Gateway | ✗ | ✓ | ✓ | ✗ | ✗ | Egregore ↔ A2A bridge |
+| Mode | Egregore | A2A Server | A2A Client | MCP | Use Case |
+|------|----------|------------|------------|-----|----------|
+| Daemon executor | ✓ | optional | optional | ✓ | Normal network-connected executor |
+| Local direct exec | optional | ✗ | optional | ✓ | One-shot execution of structured tool calls |
+| Worker | ✗ | ✓ | ✗ | ✓ | Capability endpoint for external agents |
+| Coordinator | ✓ | ✓ | ✓ | optional | Routes work to external workers |
+| Gateway | ✓ | ✓ | ✗ | ✗ | Minimal feed-to-A2A bridge |
 
-## Mode 1: Full Agent
+## Mode 1: Daemon Executor
 
-The complete Servitor configuration. Can reason about tasks, subscribe to egregore feeds, delegate to A2A agents, and execute local tools.
+`servitor run`
 
-**When to use:**
+Use when Servitor should:
 
-- Primary orchestration agent
-- Needs to interpret ambiguous requests
-- Participates in egregore network
-- Coordinates multiple workers
+- subscribe to Egregore tasks over SSE
+- publish profile and heartbeat data
+- execute local MCP-backed tasks
+- optionally delegate to configured A2A agents
 
-**Data flow:**
+This is the standard networked mode.
 
-```
-Egregore ──SSE──► Servitor ──A2A──► Workers
-    ▲                │
-    └──attestation───┘
-```
+## Mode 2: Local Direct Exec
 
-**Configuration:**
+`servitor exec '<json tool calls>'`
 
-```toml
-[identity]
-data_dir = "/var/lib/servitor"
+Use when you already know the exact tool calls and want Servitor to execute them locally under its normal authority and scope checks.
 
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+Example:
 
-[egregore]
-api_url = "http://localhost:7654"
-subscribe = true
-
-[agent]
-max_turns = 10
-timeout_secs = 300
-
-[a2a_server]
-enabled = true
-bind = "0.0.0.0:8765"
-name = "orchestrator"
-description = "Primary orchestration agent"
-
-[a2a.shell-worker]
-url = "http://shell-worker:8765"
-timeout_secs = 60
-
-[a2a.browser-worker]
-url = "http://browser-worker:8765"
-timeout_secs = 120
-
-[mcp.filesystem]
-command = ["mcp-filesystem-server", "/data"]
+```bash
+servitor exec '[{"name":"shell__execute","arguments":{"command":"date"}}]'
 ```
 
-## Mode 2: Personal Agent
-
-Local assistant with LLM reasoning and tools. No network participation - just direct interaction via CLI or HTTP.
-
-**When to use:**
-
-- Local development assistant
-- Single-user scenarios
-- No need for distributed coordination
-
-**Data flow:**
-
-```
-User ──CLI/HTTP──► Servitor ──MCP──► Tools
-```
-
-**Configuration:**
-
-```toml
-[identity]
-data_dir = "~/.servitor"
-
-[llm]
-provider = "ollama"
-base_url = "http://localhost:11434/v1"
-model = "llama3.2:8b"
-
-[agent]
-max_turns = 20
-timeout_secs = 600
-
-[mcp.shell]
-command = ["mcp-shell-server"]
-env = { ALLOW_COMMANDS = "git,npm,cargo,docker" }
-
-[mcp.filesystem]
-command = ["mcp-filesystem-server", "."]
-```
-
-No `[egregore]`, `[a2a_server]`, or `[a2a.*]` sections.
+This mode does not do task planning.
 
 ## Mode 3: Worker
 
-Headless executor. Receives structured tasks via A2A, executes using MCP tools, returns results. No reasoning - just execution.
+Use when Servitor should expose execution capabilities to external agents over A2A without joining the Egregore task flow.
 
-**When to use:**
+Characteristics:
 
-- Capability endpoint in agent cluster
-- Tasks are already structured (no interpretation needed)
-- Horizontal scaling of specific capabilities
-
-**Data flow:**
-
-```
-A2A Request ──► Worker ──MCP──► Tool
-                  │
-A2A Response ◄───┘
-```
-
-**Configuration:**
-
-```toml
-[a2a_server]
-enabled = true
-bind = "0.0.0.0:8765"
-name = "shell-worker"
-description = "Executes shell commands"
-task_timeout_secs = 120
-max_concurrent_tasks = 10
-
-[mcp.shell]
-command = ["mcp-shell-server"]
-env = { ALLOW_COMMANDS = "echo,ls,pwd,date,hostname,git,npm" }
-
-[mcp.shell.scope]
-allow = ["*"]
-```
-
-No `[llm]`, `[egregore]`, or `[a2a.*]` client sections.
-
-**Authority (optional):**
-
-```toml
-# authority.toml - if access control needed
-[[keeper]]
-name = "internal"
-http_token = "*"  # Accept any bearer token (internal cluster)
-allow_skills = ["shell_*"]
-```
+- no user-facing conversation
+- no planning
+- receives structured work and executes it
 
 ## Mode 4: Coordinator
 
-Routes tasks to capable workers. Subscribes to egregore for task sourcing, delegates via A2A, publishes attestations. No local execution.
+Use when Servitor should subscribe to Egregore tasks, apply routing logic, and delegate execution to external A2A workers.
 
-**When to use:**
+Characteristics:
 
-- Central routing for worker cluster
-- Egregore integration without local tools
-- Task distribution based on capabilities
-
-**Data flow:**
-
-```
-Egregore ──SSE──► Coordinator ──A2A──► Worker A
-    ▲                   │
-    │                   ├──A2A──► Worker B
-    │                   │
-    └───attestation─────┘
-```
-
-**Configuration:**
-
-```toml
-[identity]
-data_dir = "/var/lib/servitor"
-
-[egregore]
-api_url = "http://egregore:7654"
-subscribe = true
-
-[a2a_server]
-enabled = true
-bind = "0.0.0.0:8765"
-name = "coordinator"
-description = "Task router for worker cluster"
-
-[a2a.shell-worker]
-url = "http://shell-worker:8765"
-timeout_secs = 60
-[a2a.shell-worker.auth]
-type = "bearer"
-token_env = "SHELL_WORKER_TOKEN"
-
-[a2a.docker-worker]
-url = "http://docker-worker:8765"
-timeout_secs = 120
-[a2a.docker-worker.auth]
-type = "bearer"
-token_env = "DOCKER_WORKER_TOKEN"
-
-[a2a.browser-worker]
-url = "http://browser-worker:8765"
-timeout_secs = 300
-[a2a.browser-worker.auth]
-type = "bearer"
-token_env = "BROWSER_WORKER_TOKEN"
-```
-
-No `[llm]` or `[mcp.*]` sections.
+- low local execution surface
+- useful as a routing node
+- still publishes feed-visible outcomes and profiles
 
 ## Mode 5: Gateway
 
-Bridges egregore network to A2A endpoint. Receives tasks from egregore, exposes them via A2A server for external agents to claim.
+Use when you need the smallest Servitor footprint that still bridges Egregore task sourcing to an A2A boundary.
 
-**When to use:**
+Characteristics:
 
-- Expose egregore tasks to A2A-only agents
-- Bridge between networks
-- Protocol translation layer
+- little or no local MCP execution
+- no planning
+- primarily moves work between transports
 
-**Data flow:**
+## Configuration Guidance
 
-```
-Egregore ──SSE──► Gateway ◄──A2A──► External Agent
-    ▲                │
-    └──attestation───┘
-```
+- `[mcp.*]` is required for local execution capability
+- `[a2a_server]` enables inbound A2A task handling
+- `[a2a.*]` enables outbound delegation to external agents
+- `[egregore] subscribe = true` enables SSE-fed network participation
+- `[heartbeat]` controls profile publication cadence
+- `[agent] publish_trace_spans = true` enables feed-visible execution traces
 
-**Configuration:**
-
-```toml
-[identity]
-data_dir = "/var/lib/servitor"
-
-[egregore]
-api_url = "http://egregore:7654"
-subscribe = true
-
-[a2a_server]
-enabled = true
-bind = "0.0.0.0:8765"
-name = "egregore-gateway"
-description = "Egregore to A2A bridge"
-```
-
-No `[llm]`, `[mcp.*]`, or `[a2a.*]` client sections.
-
-## Deployment Patterns
-
-### Pattern A: Single Agent
-
-```
-User ──► Servitor (Personal Agent mode)
-```
-
-### Pattern B: Agent + Workers
-
-```
-User ──► Servitor (Full Agent) ──A2A──► Workers
-```
-
-### Pattern C: Egregore Network
-
-```
-                    ┌──► Worker A
-Egregore ──► Coordinator ──► Worker B
-                    └──► Worker C
-```
-
-### Pattern D: Federated
-
-```
-Egregore A ◄──gossip──► Egregore B
-    │                       │
-    ▼                       ▼
-Servitor A              Servitor B
-    │                       │
-    ▼                       ▼
-Workers A               Workers B
-```
-
-## Implementation Status
-
-| Mode | Config Support | Runtime Support | Tested |
-|------|----------------|-----------------|--------|
-| Full Agent | ✓ | ✓ | ✓ |
-| Personal Agent | ✓ | ✓ | ✓ |
-| Worker | ✓ | ✓ | ✓ |
-| Coordinator | ✓ | Partial | ✗ |
-| Gateway | ✓ | Partial | ✗ |
-
-All config sections are now optional:
-
-- `[llm]` - Only required for modes that use LLM reasoning (exec, hook, daemon with SSE/Discord/cron)
-- `[identity]` - Defaults to `~/.servitor`, auto-generates keys if missing
-- All other sections have sensible defaults
-
-## Next Steps
-
-To fully support all modes:
-
-1. ~~Make `[llm]` section optional in config schema~~ ✓ Done
-2. Make `[identity]` optional (auto-generate transient keys in memory)
-3. Add mode detection based on which sections are present
-4. Add health checks appropriate to each mode
-5. Document authority patterns for each mode
+If you need planning, conversation, or user interaction, use Familiar. Servitor stays the executor.

@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::a2a::A2aPool;
-use crate::agent::AgentExecutor;
 use crate::authority::{Authority, PersonId};
 use crate::config::Config;
 use crate::egregore::{
@@ -174,12 +173,13 @@ pub async fn maybe_accept_assignment(
 }
 
 /// Execute an assigned task with timeout and SSE message handling.
+///
+/// Uses direct execution only — tasks must have pre-planned tool_calls.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_assigned_task(
     assigned: AssignmentDecision,
-    provider: &dyn crate::agent::provider::Provider,
     mcp_pool: &McpPool,
-    a2a_pool: &A2aPool,
+    _a2a_pool: &A2aPool,
     scope_enforcer: &ScopeEnforcer,
     identity: &Identity,
     authority: &Authority,
@@ -193,15 +193,34 @@ pub async fn execute_assigned_task(
     let servitor_id = identity.public_id();
     let eta_seconds = assigned.started.eta_seconds;
 
+    // Reject tasks without pre-planned tool calls
+    if !assigned.task.is_direct() {
+        let failed = TaskFailed::new(
+            task_id.clone(),
+            servitor_id.clone(),
+            TaskFailureReason::ExecutionError,
+            Some("Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.".into()),
+        );
+        egregore.publish_failed(&failed).await?;
+        let _ = task_coordinator.finish_execution(&task_id);
+        return Ok(());
+    }
+
     egregore.publish_started(&assigned.started).await?;
 
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     let deadline = Instant::now() + Duration::from_secs(eta_seconds);
-    let executor = AgentExecutor::new(provider, mcp_pool, scope_enforcer, identity, &config.agent)
-        .with_egregore(egregore)
-        .with_a2a_pool(a2a_pool)
-        .with_authority(authority, assigned.task.keeper.clone());
-    let execution = executor.execute(&assigned.task);
+
+    let execution = crate::agent::direct::execute_direct(
+        &assigned.task,
+        mcp_pool,
+        scope_enforcer,
+        identity,
+        &config.agent,
+        Some(egregore),
+        Some(authority),
+        assigned.task.keeper.as_deref(),
+    );
     tokio::pin!(execution);
 
     loop {

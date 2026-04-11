@@ -14,10 +14,6 @@ pub struct Config {
     #[serde(default)]
     pub egregore: EgregoreConfig,
 
-    /// LLM provider configuration (optional for worker/coordinator modes).
-    #[serde(default)]
-    pub llm: Option<LlmConfig>,
-
     /// MCP server configurations.
     #[serde(default)]
     pub mcp: HashMap<String, McpServerConfig>,
@@ -41,6 +37,10 @@ pub struct Config {
     /// Heartbeat configuration.
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
+
+    /// Planner-facing executor metadata published in profile/manifest messages.
+    #[serde(default)]
+    pub profile: ProfileConfig,
 
     /// Scheduled tasks.
     #[serde(default)]
@@ -122,39 +122,19 @@ fn default_group_heartbeat() -> u64 {
     10
 }
 
-/// LLM provider configuration.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LlmConfig {
-    /// Provider type: "anthropic", "openai", "ollama", "openai-compat", "codex", "claude-code".
-    pub provider: String,
+/// Structured tool call template used by schedules and notification handlers.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ToolCallTemplate {
+    /// Prefixed MCP or A2A tool name.
+    pub name: String,
 
-    /// Model identifier.
-    pub model: String,
+    /// Arguments to pass when the task is emitted.
+    #[serde(default = "default_tool_call_arguments")]
+    pub arguments: serde_json::Value,
+}
 
-    /// Environment variable containing API key.
-    #[serde(default)]
-    pub api_key_env: Option<String>,
-
-    /// Base URL for OpenAI-compatible providers.
-    #[serde(default)]
-    pub base_url: Option<String>,
-
-    /// Path to OAuth token file (for codex provider).
-    /// Supports OpenClaw's auth-profiles.json format.
-    #[serde(default)]
-    pub token_file: Option<String>,
-
-    /// OAuth profile name to use (default: "openai-codex:default").
-    #[serde(default)]
-    pub oauth_profile: Option<String>,
-
-    /// Maximum tokens to generate.
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-
-    /// Temperature for sampling.
-    #[serde(default)]
-    pub temperature: Option<f32>,
+fn default_tool_call_arguments() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 /// MCP server configuration.
@@ -187,9 +167,9 @@ pub struct McpServerConfig {
     #[serde(default = "default_mcp_timeout")]
     pub timeout_secs: u64,
 
-    /// Task template for notifications (supports {{notification}} interpolation).
+    /// Structured tool calls to emit for notifications.
     #[serde(default)]
-    pub on_notification: Option<String>,
+    pub on_notification: Vec<ToolCallTemplate>,
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -262,17 +242,9 @@ pub struct ScopeConfig {
 /// Agent execution parameters.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentConfig {
-    /// Maximum turns (LLM round-trips) per task.
-    #[serde(default = "default_max_turns")]
-    pub max_turns: u32,
-
     /// Task timeout in seconds.
     #[serde(default = "default_task_timeout")]
     pub timeout_secs: u64,
-
-    /// System prompt prefix.
-    #[serde(default)]
-    pub system_prompt: Option<String>,
 
     /// Publish detailed trace spans for task and tool execution.
     #[serde(default)]
@@ -282,16 +254,10 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_turns: default_max_turns(),
             timeout_secs: default_task_timeout(),
-            system_prompt: None,
             publish_trace_spans: false,
         }
     }
-}
-
-fn default_max_turns() -> u32 {
-    50
 }
 
 fn default_task_timeout() -> u64 {
@@ -388,6 +354,52 @@ fn default_heartbeat_interval() -> u64 {
     300
 }
 
+/// Planner-facing executor metadata.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ProfileConfig {
+    /// Low-cardinality placement roles such as "staging" or "docker-host".
+    #[serde(default)]
+    pub roles: Vec<String>,
+
+    /// Small stable key/value labels used for placement or filtering.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+
+    /// Operator-curated deployment targets exposed by this servitor.
+    #[serde(default)]
+    pub targets: Vec<DeploymentTargetConfig>,
+}
+
+/// Planner-facing deployment target summary.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeploymentTargetConfig {
+    /// Stable target identifier used by planners.
+    pub target_id: String,
+
+    /// Target kind, for example "docker_compose_project".
+    pub kind: String,
+
+    /// Optional short operator-facing description.
+    #[serde(default)]
+    pub summary: Option<String>,
+
+    /// Optional target-specific roles such as "web" or "staging".
+    #[serde(default)]
+    pub roles: Vec<String>,
+
+    /// Snapshot freshness horizon in seconds.
+    #[serde(default = "default_snapshot_ttl_secs")]
+    pub snapshot_ttl_secs: u64,
+
+    /// Optional MCP probe calls used to build environment_snapshot state.
+    #[serde(default)]
+    pub snapshot_tool_calls: Vec<ToolCallTemplate>,
+}
+
+fn default_snapshot_ttl_secs() -> u64 {
+    120
+}
+
 /// Scheduled task configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScheduledTask {
@@ -397,8 +409,13 @@ pub struct ScheduledTask {
     /// Cron expression.
     pub cron: String,
 
-    /// Task prompt.
-    pub task: String,
+    /// Optional human-readable prompt stored with the generated task.
+    #[serde(default)]
+    pub prompt: Option<String>,
+
+    /// Structured tool calls to execute when the schedule fires.
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallTemplate>,
 
     /// Whether to publish result to egregore.
     #[serde(default)]
@@ -425,8 +442,13 @@ pub struct WatchConfig {
     #[serde(default)]
     pub filter: HashMap<String, serde_json::Value>,
 
-    /// Task prompt (supports {{event.field}} interpolation).
-    pub task: String,
+    /// Optional human-readable prompt stored with the generated task.
+    #[serde(default)]
+    pub prompt: Option<String>,
+
+    /// Structured tool calls to execute for matching notifications.
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallTemplate>,
 
     /// Notification channel.
     #[serde(default)]

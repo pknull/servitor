@@ -8,13 +8,7 @@ data_dir = "/var/lib/servitor"
 api_url = "http://egregore-2:7654"
 subscribe = true
 
-[llm]
-provider = "ollama"
-base_url = "http://ollama:11434/v1"
-model = "llama3.2:3b"
-
 [agent]
-max_turns = 10
 timeout_secs = 120
 publish_trace_spans = true
 

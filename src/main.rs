@@ -39,18 +39,10 @@ enum Commands {
         hook: bool,
     },
 
-    /// Execute a task directly (for testing)
+    /// Execute pre-planned tool calls directly (for testing)
     Exec {
-        /// Plan the intended tool calls, validate them, and do not execute anything
-        #[arg(long, conflicts_with = "plan_first")]
-        dry_run: bool,
-
-        /// Plan and validate tool calls before starting execution
-        #[arg(long)]
-        plan_first: bool,
-
-        /// Task prompt
-        prompt: String,
+        /// JSON array of tool calls, e.g. '[{"name":"shell__execute","arguments":{"command":"ls"}}]'
+        tool_calls_json: String,
     },
 
     /// Show identity and capabilities
@@ -99,11 +91,9 @@ async fn main() -> Result<()> {
                 run_daemon(&config, cli.insecure).await
             }
         }
-        Some(Commands::Exec {
-            dry_run,
-            plan_first,
-            prompt,
-        }) => run_exec(&config, &prompt, cli.insecure, dry_run, plan_first).await,
+        Some(Commands::Exec { tool_calls_json }) => {
+            run_exec(&config, &tool_calls_json, cli.insecure).await
+        }
         Some(Commands::Info) => run_info(&config, cli.insecure).await,
         Some(Commands::Init { force }) => run_init(&config, force).await,
         None => {
@@ -221,60 +211,25 @@ skills = ["*"]
         assert!(matches!(err, servitor::ServitorError::Unauthorized { .. }));
     }
     #[test]
-    fn exec_dry_run_flag_parses() {
-        let cli = Cli::try_parse_from(["servitor", "exec", "--dry-run", "inspect files"]).unwrap();
-        match cli.command {
-            Some(Commands::Exec {
-                dry_run,
-                plan_first,
-                prompt,
-            }) => {
-                assert!(dry_run);
-                assert!(!plan_first);
-                assert_eq!(prompt, "inspect files");
-            }
-            _ => panic!("expected exec command"),
-        }
-    }
-
-    #[test]
-    fn exec_plan_first_flag_parses() {
-        let cli =
-            Cli::try_parse_from(["servitor", "exec", "--plan-first", "inspect files"]).unwrap();
-        match cli.command {
-            Some(Commands::Exec {
-                dry_run,
-                plan_first,
-                prompt,
-            }) => {
-                assert!(!dry_run);
-                assert!(plan_first);
-                assert_eq!(prompt, "inspect files");
-            }
-            _ => panic!("expected exec command"),
-        }
-    }
-
-    #[test]
-    fn exec_plan_flags_conflict() {
-        let result = Cli::try_parse_from([
+    fn exec_accepts_tool_calls_json() {
+        let cli = Cli::try_parse_from([
             "servitor",
             "exec",
-            "--dry-run",
-            "--plan-first",
-            "inspect files",
-        ]);
-        assert!(result.is_err());
+            r#"[{"name":"shell__execute","arguments":{"command":"ls"}}]"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Exec { tool_calls_json }) => {
+                assert!(tool_calls_json.contains("shell__execute"));
+            }
+            _ => panic!("expected exec command"),
+        }
     }
 
     #[tokio::test]
     async fn build_profile_includes_runtime_monitoring_data() {
         let config = Config::from_str(
             r#"
-[llm]
-provider = "ollama"
-model = "llama3.3:70b"
-
 [heartbeat]
 interval_secs = 15
 include_runtime_monitoring = true
@@ -295,7 +250,15 @@ scope.allow = ["execute:/tmp/*"]
         runtime_stats.start_task();
         runtime_stats.finish_task(true, Some("test"));
 
-        let profile = build_profile(&identity, &mcp_pool, &a2a_pool, &config, &runtime_stats).await;
+        let profile = build_profile(
+            &identity,
+            &mcp_pool,
+            &a2a_pool,
+            &config,
+            &runtime_stats,
+            Some("manifest-hash"),
+        )
+        .await;
         assert_eq!(profile.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(profile.heartbeat_interval_ms, 15000);
         assert_eq!(profile.uptime_secs, 42);
@@ -309,6 +272,7 @@ scope.allow = ["execute:/tmp/*"]
         assert_eq!(profile.mcp_servers[0].name, "shell");
         assert_eq!(profile.mcp_servers[0].transport, "stdio");
         assert_eq!(profile.scopes["shell"].allow, vec!["execute:/tmp/*"]);
+        assert_eq!(profile.manifest_ref.as_deref(), Some("manifest-hash"));
         assert_eq!(
             profile.mcp_servers[0].status,
             servitor::egregore::McpServerHealth::Unavailable
@@ -319,10 +283,6 @@ scope.allow = ["execute:/tmp/*"]
     async fn build_profile_omits_runtime_monitoring_data_by_default() {
         let config = Config::from_str(
             r#"
-[llm]
-provider = "ollama"
-model = "llama3.3:70b"
-
 [heartbeat]
 interval_secs = 15
 
@@ -338,12 +298,21 @@ scope.allow = ["execute:/tmp/*"]
         let a2a_pool = A2aPool::new();
         let runtime_stats = RuntimeStats::new();
 
-        let profile = build_profile(&identity, &mcp_pool, &a2a_pool, &config, &runtime_stats).await;
+        let profile = build_profile(
+            &identity,
+            &mcp_pool,
+            &a2a_pool,
+            &config,
+            &runtime_stats,
+            None,
+        )
+        .await;
         assert_eq!(profile.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(profile.uptime_secs, 0);
         assert!(profile.mcp_servers.is_empty());
         assert_eq!(profile.load, ServitorLoad::default());
         assert_eq!(profile.stats, ServitorStats::default());
         assert!(profile.last_task_ts.is_none());
+        assert!(profile.manifest_ref.is_none());
     }
 }

@@ -1,22 +1,10 @@
-//! Agent execution layer.
+//! Agent execution layer — direct tool call execution only.
 //!
-//! Provides the core task execution loop:
-//! - LLM provider abstraction (Anthropic, OpenAI-compatible)
-//! - Conversation context management
-//! - Tool use → execute → feed back cycle
+//! Servitors execute pre-planned tool calls against MCP servers.
+//! All reasoning and task decomposition is handled by familiar.
 
-pub mod context;
 pub mod direct;
-pub mod injection;
-pub mod r#loop;
-pub mod providers;
+pub mod output_defense;
 pub mod sanitize;
 
-// Re-export for backward compatibility
-pub mod provider {
-    pub use super::providers::*;
-}
-
-pub use context::ConversationContext;
-pub use providers::{create_provider, ChatResponse, ContentBlock, Message, Provider, Role};
-pub use r#loop::AgentExecutor;
+pub use direct::execute_direct;

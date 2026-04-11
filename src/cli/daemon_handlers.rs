@@ -6,11 +6,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::a2a::A2aPool;
-use crate::agent::provider::Provider;
-use crate::agent::AgentExecutor;
 use crate::authority::{AuthRequest, Authority, PersonId};
 use crate::config::Config;
-use crate::egregore::{build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskStatus};
+use crate::egregore::{
+    build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskFailed, TaskFailureReason,
+    TaskStatus,
+};
 use crate::identity::Identity;
 use crate::mcp::McpPool;
 use crate::runtime::{publish_auth_denied_event, RuntimeStats};
@@ -25,9 +26,8 @@ pub async fn handle_event_router_task(
     identity: &Identity,
     egregore: &EgregoreClient,
     runtime_stats: &mut RuntimeStats,
-    provider: &dyn Provider,
     mcp_pool: &McpPool,
-    a2a_pool: &A2aPool,
+    _a2a_pool: &A2aPool,
     scope_enforcer: &ScopeEnforcer,
     config: &Config,
 ) {
@@ -75,32 +75,39 @@ pub async fn handle_event_router_task(
     let claim = TaskClaim::new(task.hash.clone(), identity.public_id(), 180);
     let _ = egregore.publish_claim(&claim).await;
 
-    // Dispatch: direct tool calls bypass LLM, reasoning tasks use the agent loop.
-    let execution_result = if task.is_direct() {
-        tracing::info!(
+    // Direct execution only — tasks must have pre-planned tool_calls
+    if !task.is_direct() {
+        tracing::warn!(
             task_hash = %task.hash,
-            tool_count = task.tool_calls.len(),
-            "dispatching as direct execution"
+            "rejecting task without tool_calls — servitors require pre-planned tool calls"
         );
-        crate::agent::direct::execute_direct(
-            &task,
-            mcp_pool,
-            scope_enforcer,
-            identity,
-            &config.agent,
-            Some(egregore),
-            Some(authority),
-            keeper_name.as_deref(),
-        )
-        .await
-    } else {
-        let executor =
-            AgentExecutor::new(provider, mcp_pool, scope_enforcer, identity, &config.agent)
-                .with_egregore(egregore)
-                .with_a2a_pool(a2a_pool)
-                .with_authority(authority, keeper_name);
-        executor.execute(&task).await
-    };
+        let failed = TaskFailed::new(
+            task.effective_id().to_string(),
+            identity.public_id(),
+            TaskFailureReason::ExecutionError,
+            Some("Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.".into()),
+        );
+        let _ = egregore.publish_failed(&failed).await;
+        runtime_stats.finish_task(false, task.task_type.as_deref());
+        return;
+    }
+
+    tracing::info!(
+        task_hash = %task.hash,
+        tool_count = task.tool_calls.len(),
+        "executing direct tool calls"
+    );
+    let execution_result = crate::agent::direct::execute_direct(
+        &task,
+        mcp_pool,
+        scope_enforcer,
+        identity,
+        &config.agent,
+        Some(egregore),
+        Some(authority),
+        keeper_name.as_deref(),
+    )
+    .await;
 
     match execution_result {
         Ok(result) => {
@@ -141,9 +148,18 @@ pub async fn handle_heartbeat(
     config: &Config,
     runtime_stats: &RuntimeStats,
     egregore: &EgregoreClient,
+    manifest_ref: Option<&str>,
     last_heartbeat: &mut Instant,
 ) {
-    let profile = build_profile(identity, mcp_pool, a2a_pool, config, runtime_stats).await;
+    let profile = build_profile(
+        identity,
+        mcp_pool,
+        a2a_pool,
+        config,
+        runtime_stats,
+        manifest_ref,
+    )
+    .await;
     if let Err(e) = egregore.publish_profile(&profile).await {
         tracing::debug!(error = %e, "heartbeat failed");
     } else {

@@ -4,8 +4,9 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::egregore::messages::{
-    AuthDenied, Notification, ServitorProfile, TaskClaim, TaskFailed, TaskOffer, TaskOfferWithdraw,
-    TaskPlan, TaskResult, TaskStarted, TaskStatusMessage, TraceSpan,
+    AuthDenied, EnvironmentSnapshot, Notification, ServitorManifest, ServitorProfile, TaskClaim,
+    TaskFailed, TaskOffer, TaskOfferWithdraw, TaskResult, TaskStarted, TaskStatusMessage,
+    TraceSpan,
 };
 use crate::error::{Result, ServitorError};
 
@@ -84,6 +85,31 @@ impl EgregoreClient {
         Ok(response.hash)
     }
 
+    /// Publish a planner-facing servitor manifest.
+    pub async fn publish_manifest(&self, manifest: &ServitorManifest) -> Result<String> {
+        let response = self
+            .publish(manifest, &["servitor_manifest"], None, None)
+            .await?;
+        tracing::debug!(hash = %response.hash, "published servitor manifest");
+        Ok(response.hash)
+    }
+
+    /// Publish a planner-facing environment snapshot.
+    pub async fn publish_environment_snapshot(
+        &self,
+        snapshot: &EnvironmentSnapshot,
+    ) -> Result<String> {
+        let response = self
+            .publish(snapshot, &["environment_snapshot"], None, None)
+            .await?;
+        tracing::debug!(
+            hash = %response.hash,
+            target_id = %snapshot.target_id,
+            "published environment snapshot"
+        );
+        Ok(response.hash)
+    }
+
     /// Publish a task claim.
     pub async fn publish_claim(&self, claim: &TaskClaim) -> Result<String> {
         let response = self.publish(claim, &["task_claim"], None, None).await?;
@@ -138,18 +164,6 @@ impl EgregoreClient {
             task_id = %failed.task_id,
             reason = ?failed.reason,
             "published task failed"
-        );
-        Ok(response.hash)
-    }
-
-    /// Publish a task plan attestation.
-    pub async fn publish_plan(&self, plan: &TaskPlan) -> Result<String> {
-        let response = self.publish(plan, &["task_plan"], None, None).await?;
-        tracing::info!(
-            hash = %response.hash,
-            task_hash = %plan.task_hash,
-            plan_hash = %plan.plan_hash,
-            "published task plan"
         );
         Ok(response.hash)
     }

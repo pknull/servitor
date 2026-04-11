@@ -6,8 +6,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::a2a::A2aPool;
-use crate::agent::create_provider;
-use crate::agent::provider::Provider;
 use crate::authority::{load_runtime_authority, Authority};
 use crate::config::Config;
 use crate::egregore::EgregoreClient;
@@ -20,16 +18,15 @@ use crate::session::SessionStore;
 /// Shared runtime context for task execution.
 ///
 /// Encapsulates the common components needed by all CLI commands:
-/// identity, authority, MCP pool, A2A pool, scope enforcer, LLM provider, and session store.
+/// identity, authority, MCP pool, A2A pool, scope enforcer, and session store.
 ///
-/// Provider is optional to support worker/coordinator modes that don't require LLM.
+/// Servitors execute pre-planned tool calls directly — no LLM provider needed.
 pub struct RuntimeContext {
     pub identity: Identity,
     pub authority: Authority,
     pub mcp_pool: McpPool,
     pub a2a_pool: A2aPool,
     pub scope_enforcer: ScopeEnforcer,
-    pub provider: Option<Box<dyn Provider>>,
     pub egregore: EgregoreClient,
     pub session_store: Arc<SessionStore>,
 }
@@ -40,7 +37,6 @@ impl RuntimeContext {
     /// This performs all the shared initialization:
     /// - Load or generate identity
     /// - Load authority (or open mode if insecure)
-    /// - Create LLM provider
     /// - Initialize MCP pool
     /// - Initialize A2A pool
     /// - Configure scope policies
@@ -49,10 +45,6 @@ impl RuntimeContext {
         let identity = Identity::load_or_generate(&identity_dir)?;
         let authority = load_runtime_authority(&identity_dir, insecure)?;
 
-        let provider = match &config.llm {
-            Some(llm_config) => Some(create_provider(llm_config)?),
-            None => None,
-        };
         let mut mcp_pool = McpPool::from_config(config)?;
         mcp_pool.initialize_all().await?;
 
@@ -95,7 +87,6 @@ impl RuntimeContext {
             mcp_pool,
             a2a_pool,
             scope_enforcer,
-            provider,
             egregore,
             session_store,
         })
@@ -104,24 +95,6 @@ impl RuntimeContext {
     /// Shutdown all MCP servers cleanly.
     pub async fn shutdown(&mut self) -> Result<()> {
         self.mcp_pool.shutdown_all().await
-    }
-
-    /// Get the LLM provider, returning an error if not configured.
-    ///
-    /// Use this for commands that require LLM reasoning (exec, hook, daemon with SSE).
-    pub fn require_provider(&self) -> Result<&dyn Provider> {
-        self.provider.as_ref().map(|p| p.as_ref()).ok_or_else(|| {
-            crate::error::ServitorError::Config {
-                reason:
-                    "LLM provider not configured. Add [llm] section to config for reasoning modes."
-                        .into(),
-            }
-        })
-    }
-
-    /// Check if LLM provider is available.
-    pub fn has_provider(&self) -> bool {
-        self.provider.is_some()
     }
 }
 
@@ -133,10 +106,6 @@ mod tests {
     async fn context_creation_fails_without_authority() {
         let config = Config::from_str(
             r#"
-[llm]
-provider = "ollama"
-model = "test"
-
 [identity]
 data_dir = "/tmp/nonexistent-servitor-test"
 "#,
@@ -153,10 +122,6 @@ data_dir = "/tmp/nonexistent-servitor-test"
         let dir = tempfile::tempdir().unwrap();
         let config = Config::from_str(&format!(
             r#"
-[llm]
-provider = "ollama"
-model = "test"
-
 [identity]
 data_dir = "{}"
 "#,

@@ -71,7 +71,9 @@ impl TaskWatcher {
         let (tx, rx) = mpsc::channel(32);
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let handle = TaskWatcherHandle { shutdown: shutdown_tx };
+        let handle = TaskWatcherHandle {
+            shutdown: shutdown_tx,
+        };
 
         tokio::spawn(async move {
             self.run(store, tx, shutdown_rx).await;

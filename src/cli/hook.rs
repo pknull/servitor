@@ -3,11 +3,10 @@
 use std::path::PathBuf;
 
 use crate::a2a::A2aPool;
-use crate::agent::{create_provider, AgentExecutor};
 use crate::authority::{load_runtime_authority, AuthRequest, PersonId};
 use crate::config::Config;
-use crate::egregore::{AuthGate, EgregoreClient, TaskClaim};
-use crate::error::{Result, ServitorError};
+use crate::egregore::{AuthGate, EgregoreClient, TaskClaim, TaskFailed, TaskFailureReason};
+use crate::error::Result;
 use crate::identity::Identity;
 use crate::mcp::McpPool;
 use crate::metrics::{self, AuthDecision};
@@ -16,9 +15,9 @@ use crate::scope::ScopeEnforcer;
 
 /// Run servitor in hook mode (stdin JSON from egregore).
 ///
-/// This mode reads a single task from stdin, executes it, and publishes
-/// the result to the egregore network. Designed to be invoked by the
-/// egregore daemon as a hook handler.
+/// This mode reads a single task from stdin, executes pre-planned tool calls,
+/// and publishes the result to the egregore network. Designed to be invoked
+/// by the egregore daemon as a hook handler.
 pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
     // Load identity
     let identity_dir = PathBuf::from(&config.identity.data_dir);
@@ -78,23 +77,36 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
 
     tracing::debug!(hash = %task.hash, prompt_len = task.prompt.len(), "received task");
 
-    // Initialize components - hook mode requires LLM
-    let llm_config = config.llm.as_ref().ok_or_else(|| ServitorError::Config {
-        reason: "hook mode requires [llm] configuration for reasoning".into(),
-    })?;
-    let provider = create_provider(llm_config)?;
+    // Reject tasks without pre-planned tool calls
+    if !task.is_direct() {
+        tracing::warn!(
+            task_hash = %task.hash,
+            "rejecting task without tool_calls"
+        );
+        let failed = TaskFailed::new(
+            task.effective_id().to_string(),
+            identity.public_id(),
+            TaskFailureReason::ExecutionError,
+            Some("Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.".into()),
+        );
+        egregore.publish_failed(&failed).await?;
+        return Ok(());
+    }
+
+    // Initialize MCP pool
     let mut mcp_pool = McpPool::from_config(config)?;
     mcp_pool.initialize_all().await?;
 
     // Initialize A2A pool
-    let mut a2a_pool = A2aPool::from_config(config).map_err(|e| ServitorError::Config {
-        reason: format!("failed to create A2A pool: {}", e),
-    })?;
+    let mut a2a_pool =
+        A2aPool::from_config(config).map_err(|e| crate::error::ServitorError::Config {
+            reason: format!("failed to create A2A pool: {}", e),
+        })?;
     if !a2a_pool.is_empty() {
         a2a_pool
             .initialize_all()
             .await
-            .map_err(|e| ServitorError::Config {
+            .map_err(|e| crate::error::ServitorError::Config {
                 reason: format!("failed to initialize A2A pool: {}", e),
             })?;
     }
@@ -114,19 +126,18 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
         // Continue anyway — claim is advisory
     }
 
-    // Execute task with context fetching and authority
-    let executor = AgentExecutor::new(
-        provider.as_ref(),
+    // Execute pre-planned tool calls directly
+    let result = crate::agent::direct::execute_direct(
+        &task,
         &mcp_pool,
         &scope_enforcer,
         &identity,
         &config.agent,
+        Some(&egregore),
+        Some(&authority),
+        auth_result.keeper.as_deref(),
     )
-    .with_egregore(&egregore)
-    .with_a2a_pool(&a2a_pool)
-    .with_authority(&authority, auth_result.keeper.clone());
-
-    let result = executor.execute(&task).await?;
+    .await?;
 
     // Publish result
     egregore.publish_result(&result).await?;

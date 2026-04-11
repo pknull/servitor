@@ -9,8 +9,8 @@ use crate::identity::Identity;
 
 /// Show identity and capabilities.
 ///
-/// Displays the servitor identity, authority configuration, LLM provider,
-/// MCP servers, and scheduled tasks.
+/// Displays the servitor identity, authority configuration, MCP servers,
+/// and scheduled tasks.
 pub async fn run_info(config: &Config, insecure: bool) -> Result<()> {
     let identity_dir = PathBuf::from(&config.identity.data_dir);
     let identity = Identity::load_or_generate(&identity_dir)?;
@@ -47,13 +47,6 @@ pub async fn run_info(config: &Config, insecure: bool) -> Result<()> {
     }
     println!();
 
-    if let Some(ref llm) = config.llm {
-        println!("LLM Provider: {}", llm.provider);
-        println!("LLM Model: {}", llm.model);
-    } else {
-        println!("LLM: not configured (worker/coordinator mode)");
-    }
-    println!();
     println!("MCP Servers:");
     for (name, mcp) in &config.mcp {
         println!("  - {} ({})", name, mcp.transport);
@@ -63,8 +56,13 @@ pub async fn run_info(config: &Config, insecure: bool) -> Result<()> {
         if !mcp.scope.block.is_empty() {
             println!("    block: {:?}", mcp.scope.block);
         }
-        if let Some(ref template) = mcp.on_notification {
-            println!("    on_notification: {}", template);
+        if !mcp.on_notification.is_empty() {
+            let tools: Vec<_> = mcp
+                .on_notification
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect();
+            println!("    on_notification tools: {:?}", tools);
         }
     }
     println!();
@@ -76,10 +74,35 @@ pub async fn run_info(config: &Config, insecure: bool) -> Result<()> {
         println!("Scheduled Tasks:");
         for task in &config.schedule {
             println!("  - {} ({})", task.name, task.cron);
-            println!("    task: {}", task.task);
+            if let Some(ref prompt) = task.prompt {
+                println!("    prompt: {}", prompt);
+            }
+            let tools: Vec<_> = task
+                .tool_calls
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect();
+            println!("    tool_calls: {:?}", tools);
             if task.publish {
                 println!("    publish: true");
             }
+        }
+    }
+
+    if !config.watch.is_empty() {
+        println!();
+        println!("Watchers:");
+        for watch in &config.watch {
+            println!("  - {} ({}::{})", watch.name, watch.mcp, watch.event);
+            if let Some(ref prompt) = watch.prompt {
+                println!("    prompt: {}", prompt);
+            }
+            let tools: Vec<_> = watch
+                .tool_calls
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect();
+            println!("    tool_calls: {:?}", tools);
         }
     }
 

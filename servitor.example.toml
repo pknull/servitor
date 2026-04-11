@@ -18,47 +18,9 @@ subscribe = false
 # name = "workers"
 # heartbeat_interval_secs = 5
 
-[llm]
-# Provider: "anthropic", "openai", "ollama", "openai-compat", "codex", "claude-code"
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
-
-# Optional: max_tokens = 4096
-# Optional: temperature = 0.7
-
-# Alternative: Ollama (local inference)
-# [llm]
-# provider = "ollama"
-# base_url = "http://localhost:11434/v1"
-# model = "llama3.3:70b"
-
-# Alternative: OpenAI-compatible endpoint
-# [llm]
-# provider = "openai-compat"
-# base_url = "https://openrouter.ai/api/v1"
-# model = "anthropic/claude-3.5-sonnet"
-# api_key_env = "OPENROUTER_API_KEY"
-
-# Alternative: Codex OAuth provider
-# [llm]
-# provider = "codex"
-# model = "gpt-5-codex"
-# token_file = "~/.codex/auth.json"
-# oauth_profile = "openai-codex:default"
-
-# Alternative: Claude Code provider
-# [llm]
-# provider = "claude-code"
-# model = "claude-sonnet-4-20250514"
-
 [agent]
-# Maximum LLM turns per task
-max_turns = 50
 # Task timeout in seconds
 timeout_secs = 300
-# Optional: Custom system prompt prefix
-# system_prompt = "You are a helpful assistant."
 # Optional: publish trace_span messages for task and tool execution
 publish_trace_spans = false
 
@@ -81,6 +43,22 @@ ping_timeout_secs = 30
 interval_secs = 10
 # Optional: include runtime monitoring fields like uptime, MCP health, and task counters
 include_runtime_monitoring = false
+
+[profile]
+# Low-cardinality placement roles and labels included in servitor_profile
+roles = ["docker-host", "staging"]
+labels = { env = "staging", site = "lab-a" }
+
+# Optional deployment targets surfaced in servitor_manifest
+# [[profile.targets]]
+# target_id = "staging-web"
+# kind = "docker_compose_project"
+# summary = "Primary staging web stack"
+# roles = ["staging", "web"]
+# snapshot_ttl_secs = 120
+# snapshot_tool_calls = [
+#   { name = "shell__execute", arguments = { command = "docker compose -p staging-web ps --format json" } }
+# ]
 
 [metrics]
 # Enable Prometheus metrics endpoint
@@ -111,8 +89,10 @@ timeout_secs = 60
 # Scope enforcement
 scope.allow = ["execute:~/scripts/*", "read:*"]
 scope.block = ["execute:/etc/*", "execute:rm *", "execute:sudo *"]
-# Optional: Convert MCP notifications to tasks
-# on_notification = "Handle event: {{notification}}"
+# Optional: Convert MCP notifications to structured tasks
+# on_notification = [
+#   { name = "shell__execute", arguments = { command = "echo {{notification}}" } }
+# ]
 
 [mcp.docker]
 transport = "stdio"
@@ -133,14 +113,21 @@ scope.block = ["container_lifecycle:traefik", "container_lifecycle:portainer"]
 # [[schedule]]
 # name = "daily-email-check"
 # cron = "0 0 9 * * *"           # 9:00 AM daily (sec min hr day mon dow)
-# task = "Check my email and summarize anything important"
+# prompt = "Check my email and summarize anything important"
+# tool_calls = [
+#   { name = "email__list_messages", arguments = { mailbox = "inbox", unread_only = true } },
+#   { name = "email__summarize_thread_set", arguments = { label = "daily-review" } }
+# ]
 # publish = true                  # Publish result to egregore
 # notify = "egregore:channel:inbox-alerts"
 
 # [[schedule]]
 # name = "hourly-backup-check"
 # cron = "0 0 * * * *"           # Every hour at :00
-# task = "Verify backup status and report any failures"
+# prompt = "Verify backup status and report any failures"
+# tool_calls = [
+#   { name = "shell__execute", arguments = { command = "/usr/local/bin/check-backups" } }
+# ]
 # publish = false
 
 # Event watchers
@@ -149,5 +136,8 @@ scope.block = ["container_lifecycle:traefik", "container_lifecycle:portainer"]
 # mcp = "email"
 # event = "new_message"
 # filter = { priority = "high" }
-# task = "Summarize this email: {{event.body}}"
+# prompt = "Summarize this email notification"
+# tool_calls = [
+#   { name = "email__summarize_message", arguments = { message = "{{notification}}" } }
+# ]
 # notify = "egregore:channel:inbox-alerts"

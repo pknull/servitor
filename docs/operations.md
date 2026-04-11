@@ -29,11 +29,13 @@ it as local policy, not feed-replicated state.
 
 ### `servitor exec`
 
-Runs one task locally.
+Runs one structured task locally from a JSON array of pre-planned tool calls.
 
-- `--dry-run`: plan and validate tool calls locally, do not execute, do not
-  publish `task_plan`
-- `--plan-first`: publish a signed `task_plan`, then execute
+Example:
+
+```bash
+servitor exec '[{"name":"shell__execute","arguments":{"command":"hostname"}}]'
+```
 
 ### `servitor run`
 
@@ -41,9 +43,8 @@ Starts the daemon. Depending on configuration, it can:
 
 - subscribe to egregore SSE tasks
 - publish heartbeats
-- listen for Discord messages
 - run scheduled tasks
-- translate MCP notifications into tasks
+- poll MCP servers for notifications and route them into structured tasks
 
 ### `servitor run --hook`
 
@@ -74,17 +75,17 @@ These settings publish more feed data and should be turned on deliberately.
 
 ## Scheduling and Watchers
 
-`[[schedule]]` creates time-based tasks. `[[watch]]` turns MCP notifications
-into tasks using a templated prompt.
-
-Both paths execute through the same scoped MCP and authority machinery as other
-tasks, and both can emit notifications if configured.
+`[[schedule]]` creates time-based tasks from structured `tool_calls`.
+`[[watch]]` and `mcp.*.on_notification` use the same structured template shape
+for stdio MCP notifications.
 
 ## Egregore Integration
 
 Daemon mode consumes egregore SSE and publishes:
 
 - `servitor_profile`
+- `servitor_manifest`
+- `environment_snapshot`
 - `task_offer`
 - `task_started`
 - `task_status`

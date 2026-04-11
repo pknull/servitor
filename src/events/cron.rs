@@ -6,16 +6,17 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 
-use crate::config::ScheduledTask;
+use crate::config::{ScheduledTask, ToolCallTemplate};
 use crate::egregore::Task;
 use crate::error::{Result, ServitorError};
-use crate::events::{task_from_schedule, EventSource};
+use crate::events::{task_from_template, EventSource};
 
 /// Scheduled task with parsed cron expression.
 struct ScheduledEntry {
     name: String,
     schedule: Schedule,
-    task_prompt: String,
+    prompt: Option<String>,
+    tool_calls: Vec<ToolCallTemplate>,
     publish: bool,
     notify: Option<String>,
     next_run: DateTime<Utc>,
@@ -37,7 +38,8 @@ impl ScheduledEntry {
         Ok(Self {
             name: config.name.clone(),
             schedule,
-            task_prompt: config.task.clone(),
+            prompt: config.prompt.clone(),
+            tool_calls: config.tool_calls.clone(),
             publish: config.publish,
             notify: config.notify.clone(),
             next_run,
@@ -92,7 +94,12 @@ impl CronSource {
                     context.insert("notify".to_string(), serde_json::json!(notify));
                 }
 
-                let task = task_from_schedule(&entry.name, &entry.task_prompt, context);
+                let task = task_from_template(
+                    &entry.name,
+                    entry.prompt.as_deref(),
+                    &entry.tool_calls,
+                    context,
+                );
                 due_tasks.push(task);
 
                 entry.update_next_run();
@@ -136,7 +143,11 @@ mod tests {
         let task = ScheduledTask {
             name: "test".to_string(),
             cron: "0 * * * * *".to_string(), // Every minute
-            task: "Test task".to_string(),
+            prompt: Some("Test task".to_string()),
+            tool_calls: vec![ToolCallTemplate {
+                name: "shell__execute".to_string(),
+                arguments: serde_json::json!({"command": "echo test"}),
+            }],
             publish: false,
             notify: None,
         };
@@ -150,7 +161,11 @@ mod tests {
         let task = ScheduledTask {
             name: "test".to_string(),
             cron: "not a cron".to_string(),
-            task: "Test task".to_string(),
+            prompt: Some("Test task".to_string()),
+            tool_calls: vec![ToolCallTemplate {
+                name: "shell__execute".to_string(),
+                arguments: serde_json::json!({"command": "echo test"}),
+            }],
             publish: false,
             notify: None,
         };
@@ -164,7 +179,11 @@ mod tests {
         let task = ScheduledTask {
             name: "test".to_string(),
             cron: "0 0 * * * *".to_string(), // Every hour
-            task: "Test task".to_string(),
+            prompt: Some("Test task".to_string()),
+            tool_calls: vec![ToolCallTemplate {
+                name: "shell__execute".to_string(),
+                arguments: serde_json::json!({"command": "echo test"}),
+            }],
             publish: false,
             notify: None,
         };

@@ -14,5 +14,6 @@ Important current-state notes:
   public HTTP control plane.
 - `egregore.group` and `comms.http` are parsed config sections but are not
   wired into the runtime on this branch.
-- `task_claim` still exists for direct, hook, cron, and watcher executions, but
+- `task_claim` still exists for direct, hook, cron, and MCP notification
+  executions, but
   coordinated SSE work uses the newer offer/assign lifecycle.

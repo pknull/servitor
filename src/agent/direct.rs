@@ -112,10 +112,7 @@ pub async fn execute_direct(
             Ok(output) => {
                 let text = output.text_content();
                 if output.is_error {
-                    let error_msg = format!(
-                        "tool '{}' returned error: {}",
-                        planned.name, text
-                    );
+                    let error_msg = format!("tool '{}' returned error: {}", planned.name, text);
                     tracing::warn!(tool = %planned.name, "direct call returned error");
                     return build_error_result(
                         task,
@@ -164,13 +161,29 @@ pub async fn execute_direct(
     });
 
     let elapsed = execution_start.elapsed().as_secs();
-    let task_result = build_signed_result(task, identity, TaskStatus::Success, Some(result_value), None, trace_id.clone(), Some(elapsed))?;
+    let task_result = build_signed_result(
+        task,
+        identity,
+        TaskStatus::Success,
+        Some(result_value),
+        None,
+        trace_id.clone(),
+        Some(elapsed),
+    )?;
 
     // Publish root trace span
     if let (Some(trace_id), Some(root_span_id), Some(started_at)) =
         (&trace_id, &root_span_id, trace_started_at)
     {
-        publish_root_span(egregore, task, trace_id, root_span_id, started_at, &task_result).await;
+        publish_root_span(
+            egregore,
+            task,
+            trace_id,
+            root_span_id,
+            started_at,
+            &task_result,
+        )
+        .await;
     }
 
     Ok(task_result)
@@ -218,10 +231,7 @@ fn validate_direct_call(
         )
         .map_err(|error| match error {
             ServitorError::ScopeViolation { reason } => ServitorError::ScopeViolation {
-                reason: format!(
-                    "direct task '{}' scope violation: {}",
-                    task.hash, reason
-                ),
+                reason: format!("direct task '{}' scope violation: {}", task.hash, reason),
             },
             other => other,
         })?;
@@ -252,7 +262,6 @@ fn build_signed_result(
         result,
         error,
         duration_seconds,
-        plan_hash: None,
         attestation: Attestation {
             servitor_id: identity.public_id(),
             signature,

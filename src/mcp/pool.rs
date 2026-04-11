@@ -11,7 +11,7 @@ use crate::config::{Config, McpServerConfig};
 use crate::egregore::{McpServerHealth, McpServerStatus};
 use crate::error::{Result, ServitorError};
 use thallus_core::mcp::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
-use thallus_core::mcp::client::{McpClient, ToolDefinition};
+use thallus_core::mcp::client::{McpClient, McpNotification, ToolDefinition};
 use thallus_core::mcp::http::HttpMcpClient;
 use thallus_core::mcp::stdio::StdioMcpClient;
 
@@ -254,6 +254,23 @@ impl McpPool {
         self.clients.keys().cloned().collect()
     }
 
+    /// Drain pending notifications observed from MCP servers.
+    pub async fn drain_notifications(&self) -> Result<Vec<(String, McpNotification)>> {
+        let mut notifications = Vec::new();
+
+        for (name, client) in &self.clients {
+            let client = client.read().await;
+            let server_notifications = client.drain_notifications().await?;
+            notifications.extend(
+                server_notifications
+                    .into_iter()
+                    .map(|notification| (name.clone(), notification)),
+            );
+        }
+
+        Ok(notifications)
+    }
+
     /// Get a health snapshot for each configured MCP server.
     ///
     /// Considers both ping results and circuit breaker state.
@@ -425,7 +442,9 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use thallus_core::mcp::client::{InitializeResult, ServerCapabilities, ServerInfo, ToolCallResult};
+    use thallus_core::mcp::client::{
+        InitializeResult, McpNotification, ServerCapabilities, ServerInfo, ToolCallResult,
+    };
 
     struct FakeClient {
         calls: Arc<AtomicUsize>,
@@ -459,6 +478,10 @@ mod tests {
 
         async fn ping(&self) -> thallus_core::Result<()> {
             Ok(())
+        }
+
+        async fn drain_notifications(&self) -> thallus_core::Result<Vec<McpNotification>> {
+            Ok(vec![])
         }
 
         async fn shutdown(&mut self) -> thallus_core::Result<()> {
@@ -549,10 +572,6 @@ mod tests {
     async fn configured_servers_report_unavailable_before_initialization() {
         let config = Config::from_str(
             r#"
-[llm]
-provider = "ollama"
-model = "llama3.3:70b"
-
 [mcp.shell]
 transport = "stdio"
 command = "nonexistent-mcp-server"

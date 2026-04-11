@@ -11,9 +11,8 @@ impl Config {
     /// Create a minimal default configuration for testing or fallback.
     ///
     /// This configuration uses sensible defaults for local development:
-    /// - Anthropic provider with claude-sonnet model
     /// - Local egregore at 127.0.0.1:7654
-    /// - Standard agent limits (50 turns, 300s timeout)
+    /// - Standard executor timeout and task lifecycle settings
     pub fn minimal_defaults() -> Result<Self> {
         let toml = r#"
 [identity]
@@ -23,13 +22,7 @@ data_dir = "~/.servitor"
 api_url = "http://127.0.0.1:7654"
 subscribe = false
 
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
-
 [agent]
-max_turns = 50
 timeout_secs = 300
 
 [task]
@@ -43,6 +36,9 @@ ping_timeout_secs = 30
 [heartbeat]
 interval_secs = 300
 include_runtime_monitoring = false
+
+[profile]
+roles = ["executor"]
 "#;
         Self::from_str(toml)
     }
@@ -67,51 +63,6 @@ include_runtime_monitoring = false
 
     /// Validate configuration.
     fn validate(&self) -> Result<()> {
-        // Validate LLM provider (if configured)
-        if let Some(ref llm) = self.llm {
-            match llm.provider.as_str() {
-                "anthropic" => {
-                    if llm.api_key_env.is_none() {
-                        return Err(ServitorError::Config {
-                            reason: "anthropic provider requires api_key_env".into(),
-                        });
-                    }
-                }
-                "openai" => {
-                    if llm.api_key_env.is_none() {
-                        return Err(ServitorError::Config {
-                            reason: "openai provider requires api_key_env".into(),
-                        });
-                    }
-                }
-                "ollama" => {
-                    // Ollama doesn't require API key
-                }
-                "openai-compat" => {
-                    if llm.base_url.is_none() {
-                        return Err(ServitorError::Config {
-                            reason: "openai-compat provider requires base_url".into(),
-                        });
-                    }
-                }
-                "codex" => {
-                    if llm.token_file.is_none() {
-                        return Err(ServitorError::Config {
-                            reason: "codex provider requires token_file".into(),
-                        });
-                    }
-                }
-                "claude-code" | "mock" => {
-                    // No additional config validation needed.
-                }
-                other => {
-                    return Err(ServitorError::Config {
-                        reason: format!("unknown LLM provider: {}", other),
-                    });
-                }
-            }
-        }
-
         // Validate MCP server configs
         for (name, mcp) in &self.mcp {
             match mcp.transport.as_str() {
@@ -141,6 +92,20 @@ include_runtime_monitoring = false
                     });
                 }
             }
+
+            validate_optional_tool_calls(
+                &format!("mcp.{}.on_notification", name),
+                &mcp.on_notification,
+            )?;
+
+            if !mcp.on_notification.is_empty() && mcp.transport != "stdio" {
+                return Err(ServitorError::Config {
+                    reason: format!(
+                        "mcp.{}.on_notification currently requires stdio transport",
+                        name
+                    ),
+                });
+            }
         }
 
         // Validate scheduled tasks
@@ -153,6 +118,60 @@ include_runtime_monitoring = false
                     ),
                 });
             }
+
+            validate_tool_calls(&format!("schedule '{}'", task.name), &task.tool_calls)?;
+        }
+
+        // Validate watcher tasks
+        for watch in &self.watch {
+            validate_tool_calls(&format!("watch '{}'", watch.name), &watch.tool_calls)?;
+            let mcp = self
+                .mcp
+                .get(&watch.mcp)
+                .ok_or_else(|| ServitorError::Config {
+                    reason: format!(
+                        "watch '{}' references unknown MCP server '{}'",
+                        watch.name, watch.mcp
+                    ),
+                })?;
+            if mcp.transport != "stdio" {
+                return Err(ServitorError::Config {
+                    reason: format!(
+                        "watch '{}' requires stdio MCP transport for server '{}'",
+                        watch.name, watch.mcp
+                    ),
+                });
+            }
+        }
+
+        let mut target_ids = std::collections::HashSet::new();
+        for target in &self.profile.targets {
+            if target.target_id.trim().is_empty() {
+                return Err(ServitorError::Config {
+                    reason: "profile.targets[].target_id requires a non-empty value".into(),
+                });
+            }
+            if target.kind.trim().is_empty() {
+                return Err(ServitorError::Config {
+                    reason: format!(
+                        "profile target '{}' requires a non-empty kind",
+                        target.target_id
+                    ),
+                });
+            }
+            if !target_ids.insert(target.target_id.clone()) {
+                return Err(ServitorError::Config {
+                    reason: format!(
+                        "profile.targets contains duplicate target_id '{}'",
+                        target.target_id
+                    ),
+                });
+            }
+
+            validate_optional_tool_calls(
+                &format!("profile target '{}'.snapshot_tool_calls", target.target_id),
+                &target.snapshot_tool_calls,
+            )?;
         }
 
         Ok(())
@@ -180,6 +199,32 @@ fn expand_path(path: &str) -> String {
         .unwrap_or_else(|_| path.to_string())
 }
 
+fn validate_tool_calls(label: &str, tool_calls: &[ToolCallTemplate]) -> Result<()> {
+    if tool_calls.is_empty() {
+        return Err(ServitorError::Config {
+            reason: format!("{label} requires at least one tool_call"),
+        });
+    }
+
+    for (index, call) in tool_calls.iter().enumerate() {
+        if call.name.trim().is_empty() {
+            return Err(ServitorError::Config {
+                reason: format!("{label} tool_call[{index}] requires a non-empty name"),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_optional_tool_calls(label: &str, tool_calls: &[ToolCallTemplate]) -> Result<()> {
+    if tool_calls.is_empty() {
+        return Ok(());
+    }
+
+    validate_tool_calls(label, tool_calls)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,21 +232,16 @@ mod tests {
     #[test]
     fn parse_minimal_config() {
         let toml = r#"
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+[agent]
+timeout_secs = 120
 "#;
         let config = Config::from_str(toml).unwrap();
-        let llm = config.llm.as_ref().expect("LLM should be configured");
-        assert_eq!(llm.provider, "anthropic");
-        assert_eq!(llm.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.agent.timeout_secs, 120);
         assert_eq!(config.heartbeat.interval_secs, 300);
     }
 
     #[test]
-    fn parse_worker_config_no_llm() {
-        // Worker mode: A2A server + MCP tools, no LLM reasoning
+    fn parse_executor_config() {
         let toml = r#"
 [a2a_server]
 enabled = true
@@ -213,7 +253,6 @@ transport = "stdio"
 command = "mcp-server-shell"
 "#;
         let config = Config::from_str(toml).unwrap();
-        assert!(config.llm.is_none());
         assert!(config
             .a2a_server
             .as_ref()
@@ -231,20 +270,16 @@ data_dir = "~/.servitor"
 api_url = "http://127.0.0.1:7654"
 subscribe = true
 
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
-
 [mcp.shell]
 transport = "stdio"
 command = "mcp-server-shell"
 scope.allow = ["execute:~/scripts/*"]
 scope.block = ["execute:/etc/*"]
-on_notification = "Handle event: {{notification}}"
+on_notification = [
+  { name = "shell__execute", arguments = { command = "echo {{notification}}" } }
+]
 
 [agent]
-max_turns = 50
 timeout_secs = 300
 
 [task]
@@ -258,10 +293,27 @@ ping_timeout_secs = 30
 [heartbeat]
 interval_secs = 10
 
+[profile]
+roles = ["docker-host", "staging"]
+labels = { env = "staging", site = "lab-a" }
+
+[[profile.targets]]
+target_id = "staging-web"
+kind = "docker_compose_project"
+summary = "Primary staging stack"
+roles = ["staging", "web"]
+snapshot_ttl_secs = 120
+snapshot_tool_calls = [
+  { name = "shell__execute", arguments = { command = "docker compose -p staging-web ps --format json" } }
+]
+
 [[schedule]]
 name = "test-task"
 cron = "0 * * * * *"
-task = "Test task"
+prompt = "Test task"
+tool_calls = [
+  { name = "shell__execute", arguments = { command = "echo test" } }
+]
 publish = true
 "#;
         let config = Config::from_str(toml).unwrap();
@@ -270,26 +322,20 @@ publish = true
         assert!(config.egregore.subscribe);
         assert_eq!(config.schedule.len(), 1);
         assert_eq!(config.task.offer_ttl_secs, 300);
-    }
-
-    #[test]
-    fn reject_missing_api_key() {
-        let toml = r#"
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-"#;
-        let result = Config::from_str(toml);
-        assert!(result.is_err());
+        assert_eq!(config.profile.roles, vec!["docker-host", "staging"]);
+        assert_eq!(
+            config.profile.labels.get("env").map(String::as_str),
+            Some("staging")
+        );
+        assert_eq!(config.profile.targets.len(), 1);
+        assert_eq!(config.profile.targets[0].target_id, "staging-web");
+        assert_eq!(config.profile.targets[0].snapshot_ttl_secs, 120);
+        assert_eq!(config.profile.targets[0].snapshot_tool_calls.len(), 1);
     }
 
     #[test]
     fn reject_stdio_without_command() {
         let toml = r#"
-[llm]
-provider = "ollama"
-model = "llama3.3:70b"
-
 [mcp.shell]
 transport = "stdio"
 "#;
@@ -300,16 +346,60 @@ transport = "stdio"
     #[test]
     fn reject_invalid_cron() {
         let toml = r#"
-[llm]
-provider = "ollama"
-model = "llama3.3:70b"
-
 [[schedule]]
 name = "bad-cron"
 cron = "not a cron expression"
-task = "Test"
+tool_calls = [
+  { name = "shell__execute", arguments = { command = "echo test" } }
+]
 "#;
         let result = Config::from_str(toml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_schedule_without_tool_calls() {
+        let toml = r#"
+[[schedule]]
+name = "missing-tool-calls"
+cron = "0 * * * * *"
+"#;
+        let result = Config::from_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_watch_unknown_server() {
+        let toml = r#"
+[[watch]]
+name = "bad-watch"
+mcp = "missing"
+event = "file_changed"
+tool_calls = [
+  { name = "shell__execute", arguments = { command = "echo test" } }
+]
+"#;
+        let result = Config::from_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_duplicate_profile_targets() {
+        let toml = r#"
+[profile]
+[[profile.targets]]
+target_id = "staging-web"
+kind = "docker_compose_project"
+
+[[profile.targets]]
+target_id = "staging-web"
+kind = "docker_compose_project"
+"#;
+        let result = Config::from_str(toml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate target_id 'staging-web'"));
     }
 }
