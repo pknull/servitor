@@ -1,19 +1,16 @@
-# Servitor Docs
+# Servitor
 
-This directory describes the current `servitor` runtime as shipped on the
-branch this docs set tracks.
+Servitor is the headless execution layer of Thallus.
 
-- Protocol and message lifecycle: [protocol.md](protocol.md)
-- Configuration reference: [configuration.md](configuration.md)
-- Operational guidance: [operations.md](operations.md)
-- HTTP and OpenAPI boundary: [api/README.md](api/README.md)
+This mdBook keeps the shared architecture and deployment contract under
+`docs/`. The detailed Servitor protocol, configuration, and operations
+material still ships from the subproject itself:
 
-Important current-state notes:
+- `servitor/README.md`
+- `servitor/docs/configuration.md`
+- `servitor/docs/protocol.md`
+- `servitor/docs/operations.md`
+- `servitor/docs/api/README.md`
 
-- `servitor` has a documented egregore message protocol, not a standalone
-  public HTTP control plane.
-- `egregore.group` and `comms.http` are parsed config sections but are not
-  wired into the runtime on this branch.
-- `task_claim` still exists for direct, hook, cron, and MCP notification
-  executions, but
-  coordinated SSE work uses the newer offer/assign lifecycle.
+Use the shared documents in this book for cross-component contracts and use the
+subproject docs above for Servitor-specific runtime details.
