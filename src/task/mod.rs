@@ -12,7 +12,7 @@ pub use state::{
 };
 
 use crate::authority::{AuthRequest, AuthResult, Authority, PersonId};
-use crate::egregore::Task;
+use crate::egregore::{EgregoreMessage, Task};
 use crate::identity::PublicId;
 
 /// Build the request authorization skill string for a task.
@@ -23,6 +23,27 @@ pub fn request_skill(task: &Task) -> String {
 /// Build the assignment authorization skill string for a task.
 pub fn assign_skill(task: &Task) -> String {
     format!("assign:{}", task.effective_task_type())
+}
+
+/// Copy top-level message trace identifiers into task context when absent.
+pub fn inherit_trace_context(task: &mut Task, message: &EgregoreMessage) {
+    if !task.context.contains_key("trace_id") {
+        if let Some(trace_id) = &message.trace_id {
+            task.context.insert(
+                "trace_id".to_string(),
+                serde_json::Value::String(trace_id.clone()),
+            );
+        }
+    }
+
+    if !task.context.contains_key("span_id") {
+        if let Some(span_id) = &message.span_id {
+            task.context.insert(
+                "span_id".to_string(),
+                serde_json::Value::String(span_id.clone()),
+            );
+        }
+    }
 }
 
 /// Check whether a requestor is allowed to ask for this task type.
@@ -60,6 +81,7 @@ pub fn authorize_assignment(
 mod tests {
     use super::*;
     use crate::authority::AuthorityConfig;
+    use chrono::Utc;
 
     fn test_authority() -> Authority {
         Authority::from_config(
@@ -138,5 +160,33 @@ skills = ["assign:*"]
         let stranger =
             PublicId("@CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=.ed25519".to_string());
         assert!(!authorize_assignment(&auth, &stranger, requestor, &task));
+    }
+
+    #[test]
+    fn inherit_trace_context_copies_message_trace_fields() {
+        let mut task = test_task();
+        let message = EgregoreMessage {
+            author: PublicId("@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519".to_string()),
+            sequence: 1,
+            timestamp: Utc::now(),
+            content: None,
+            hash: "hash-1".to_string(),
+            signature: "sig".to_string(),
+            tags: vec![],
+            relates: None,
+            trace_id: Some("trace-123".to_string()),
+            span_id: Some("span-456".to_string()),
+        };
+
+        inherit_trace_context(&mut task, &message);
+
+        assert_eq!(
+            task.context.get("trace_id").and_then(|v| v.as_str()),
+            Some("trace-123")
+        );
+        assert_eq!(
+            task.context.get("span_id").and_then(|v| v.as_str()),
+            Some("span-456")
+        );
     }
 }

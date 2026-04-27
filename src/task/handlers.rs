@@ -17,8 +17,9 @@ use crate::mcp::McpPool;
 use crate::runtime::publish_auth_denied_event;
 use crate::scope::ScopeEnforcer;
 use crate::task::{
-    assign_skill, authorize_assignment, authorize_offer_request, request_skill,
-    task_matches_capabilities, AssignmentDecision, TaskCoordinator, TaskLifecycleEvent,
+    assign_skill, authorize_assignment, authorize_offer_request, inherit_trace_context,
+    request_skill, task_matches_capabilities, AssignmentDecision, TaskCoordinator,
+    TaskLifecycleEvent,
 };
 
 /// Process an SSE message and potentially return an assignment decision.
@@ -34,6 +35,7 @@ pub async fn process_sse_message(
     if let Some(mut task) = message.as_task() {
         task.author = Some(message.author.0.clone());
         task.normalize(Some(&message.author));
+        inherit_trace_context(&mut task, message);
 
         if !task_matches_capabilities(&task, capability_set) {
             return Ok(None);
@@ -76,10 +78,13 @@ pub async fn process_sse_message(
 
         task.keeper = auth_result.keeper;
 
+        let task_trace_id = task.context_trace_id();
         let offer = task_coordinator
             .register_offer(task, requestor, capability_set.iter().cloned().collect())
             .offer;
-        egregore.publish_offer(&offer).await?;
+        egregore
+            .publish_offer_with_trace(&offer, task_trace_id.as_deref(), None)
+            .await?;
 
         return Ok(None);
     }
@@ -192,6 +197,7 @@ pub async fn execute_assigned_task(
     let task_id = assigned.task.effective_id().to_string();
     let servitor_id = identity.public_id();
     let eta_seconds = assigned.started.eta_seconds;
+    let task_trace_id = assigned.task.context_trace_id();
 
     // Reject tasks without pre-planned tool calls
     if !assigned.task.is_direct() {
@@ -201,12 +207,16 @@ pub async fn execute_assigned_task(
             TaskFailureReason::ExecutionError,
             Some("Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.".into()),
         );
-        egregore.publish_failed(&failed).await?;
+        egregore
+            .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+            .await?;
         let _ = task_coordinator.finish_execution(&task_id);
         return Ok(());
     }
 
-    egregore.publish_started(&assigned.started).await?;
+    egregore
+        .publish_started_with_trace(&assigned.started, task_trace_id.as_deref(), None)
+        .await?;
 
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     let deadline = Instant::now() + Duration::from_secs(eta_seconds);
@@ -243,7 +253,9 @@ pub async fn execute_assigned_task(
                             TaskFailureReason::ExecutionError,
                             Some(error.to_string()),
                         );
-                        egregore.publish_failed(&failed).await?;
+                        egregore
+                            .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+                            .await?;
                     }
                 }
                 return Ok(());
@@ -257,7 +269,9 @@ pub async fn execute_assigned_task(
                         TaskFailureReason::Timeout,
                         Some(format!("task exceeded {}s execution timeout", eta_seconds)),
                     );
-                    egregore.publish_failed(&failed).await?;
+                    egregore
+                        .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+                        .await?;
                     return Ok(());
                 }
 
@@ -272,7 +286,9 @@ pub async fn execute_assigned_task(
                                     Some(remaining),
                                     Some("Task is still running.".to_string()),
                                 );
-                                egregore.publish_status(&status).await?;
+                                egregore
+                                    .publish_status_with_trace(&status, task_trace_id.as_deref(), None)
+                                    .await?;
                                 continue;
                             }
                         }

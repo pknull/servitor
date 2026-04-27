@@ -387,7 +387,7 @@ impl TaskClaim {
     }
 }
 
-/// Task result with signed attestation.
+/// Task result published through the local egregore node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResult {
     #[serde(rename = "type")]
@@ -405,7 +405,7 @@ pub struct TaskResult {
     /// Hash of the task.
     pub task_hash: String,
 
-    /// Hash of the result content.
+    /// Hash of the result payload and lifecycle metadata.
     pub result_hash: String,
 
     /// Execution status.
@@ -423,9 +423,6 @@ pub struct TaskResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<u64>,
 
-    /// Signed attestation.
-    pub attestation: Attestation,
-
     /// Distributed trace identifier for this task execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
@@ -438,19 +435,6 @@ pub enum TaskStatus {
     Success,
     Error,
     Timeout,
-}
-
-/// Signed attestation binding identity to output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Attestation {
-    /// Servitor that executed the task.
-    pub servitor_id: PublicId,
-
-    /// Ed25519 signature of the result hash.
-    pub signature: String,
-
-    /// Attestation timestamp.
-    pub timestamp: DateTime<Utc>,
 }
 
 /// Planned tool call embedded in a structured task.
@@ -571,6 +555,27 @@ impl Task {
 
     pub fn effective_request(&self) -> &str {
         self.request.as_deref().unwrap_or(&self.prompt)
+    }
+
+    pub fn context_trace_id(&self) -> Option<String> {
+        self.context
+            .get("trace_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
+    pub fn context_span_id(&self) -> Option<String> {
+        self.context
+            .get("span_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
+    pub fn context_parent_span_id(&self) -> Option<String> {
+        self.context
+            .get("parent_span_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
     }
 
     /// Whether this task carries pre-planned tool calls for direct execution.
@@ -942,6 +947,10 @@ pub struct EgregoreMessage {
     /// Related message hash (for threading/replies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relates: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
 }
 
 impl EgregoreMessage {

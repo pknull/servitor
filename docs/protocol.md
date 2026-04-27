@@ -21,6 +21,9 @@ Incoming `task` messages support both legacy and current fields:
 - `tool_calls`: pre-planned tool calls for direct execution
 
 Servitor normalizes these optional fields before the task enters downstream execution logic.
+When the surrounding Egregore envelope carries top-level `trace_id` or
+`span_id` fields, Servitor copies them into task context when the task itself
+does not already provide them.
 
 ## Coordinated SSE Flow
 
@@ -42,6 +45,9 @@ Assignment authorization rules:
 - any other assigner must be authorized for `assign:<task_type>`
 - unauthorized offers and assignments emit `auth_denied`
 
+When trace propagation is enabled, offer, start, status, failure, and result
+messages reuse the inherited task trace identifier when present.
+
 ## Direct, Hook, Cron, and Watcher Flow
 
 The simpler execution path is used outside SSE assignment:
@@ -52,6 +58,12 @@ The simpler execution path is used outside SSE assignment:
 4. Servitor publishes `task_result`
 
 `task_claim` is advisory only. It is not the coordination mechanism for SSE task assignment.
+
+Hook mode uses the same request gate as SSE offer evaluation:
+
+- Servitor normalizes the task using the envelope author
+- the normalized `requestor` must match the envelope author
+- the requestor must be authorized for `request:<task_type>`
 
 For local `servitor exec`, the input is a JSON array of pre-planned tool calls, not a natural-language planning request.
 
@@ -71,10 +83,29 @@ For local `servitor exec`, the input is a JSON array of pre-planned tool calls, 
 | `task_status` | Out | Progress or revised ETA |
 | `task_failed` | Out | Structured task failure |
 | `task_offer_withdraw` | Out | Offer expired before assignment |
-| `task_result` | Out | Signed final attestation and result payload |
+| `task_result` | Out | Final executor result payload |
 | `auth_denied` | Out | Authorization denial audit event |
 | `trace_span` | Out | Opt-in execution tracing |
 | `notification` | Out | Outbound operator notification payload |
+
+## Task Result Payload
+
+`task_result` is the final executor result payload. Servitor computes
+`result_hash` over a canonical payload containing:
+
+- `task_id`
+- `servitor`
+- `correlation_id`
+- `task_hash`
+- `status`
+- `result`
+- `error`
+- `duration_seconds`
+- `trace_id`
+
+`result_hash` is result metadata published through the local egregore node. The
+feed-level signature comes from the node's message envelope; there is no second
+Servitor signature field in the active model.
 
 ## Profiles and Heartbeats
 
@@ -109,6 +140,10 @@ operator-curated deployment targets, and `environment_snapshot` messages for
 configured targets. Snapshot publication is driven by
 `profile.targets[*].snapshot_tool_calls`; if no probes are configured, the
 snapshot still publishes a configured-only target view.
+
+Probe arguments are sanitized before inclusion in `environment_snapshot`, and
+probe output passes through the same output-defense pipeline used for direct
+tool execution.
 
 ## Tracing
 

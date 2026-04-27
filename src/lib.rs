@@ -1,7 +1,7 @@
 //! Servitor — Egregore network task executor using MCP servers as capabilities.
 //!
 //! Servitor is a pure tool executor: it receives tasks with pre-planned tool calls,
-//! executes them against MCP servers, and publishes signed attestations to egregore.
+//! executes them against MCP servers, and publishes execution results to egregore.
 //! All reasoning and task decomposition is handled by familiar.
 //!
 //! ## Architecture

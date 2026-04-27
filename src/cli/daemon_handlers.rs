@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::a2a::A2aPool;
-use crate::authority::{AuthRequest, Authority, PersonId};
+use crate::authority::{Authority, PersonId};
 use crate::config::Config;
 use crate::egregore::{
     build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskFailed, TaskFailureReason,
@@ -17,6 +17,7 @@ use crate::mcp::McpPool;
 use crate::runtime::{publish_auth_denied_event, RuntimeStats};
 use crate::scope::ScopeEnforcer;
 use crate::session::{SessionStore, TaskCompletionEvent, Transport};
+use crate::task::{authorize_offer_request, request_skill};
 
 /// Authorize and execute a task from the event router (cron or SSE).
 #[allow(clippy::too_many_arguments)]
@@ -34,23 +35,25 @@ pub async fn handle_event_router_task(
     // Authorize task if it has an author (from SSE)
     let keeper_name = if let Some(ref author) = task.author {
         let person = PersonId::from_egregore(author);
-        let auth_result = authority.authorize(&AuthRequest {
-            person: person.clone(),
-            skill: "*".to_string(),
-        });
+        let requestor = task
+            .requestor
+            .clone()
+            .unwrap_or_else(|| crate::identity::PublicId(author.clone()));
+        let auth_result = authorize_offer_request(authority, &requestor, &task);
 
         if !auth_result.allowed {
             publish_auth_denied_event(
                 egregore,
                 identity,
                 &person,
-                "*",
+                &request_skill(&task),
                 AuthGate::Offer,
                 &auth_result.reason,
             )
             .await;
             tracing::info!(
                 author = %author,
+                task_type = %task.effective_task_type(),
                 reason = %auth_result.reason,
                 "skipping unauthorized task"
             );
@@ -69,6 +72,7 @@ pub async fn handle_event_router_task(
 
     // Set keeper on task for downstream use
     task.keeper = keeper_name.clone();
+    let task_trace_id = task.context_trace_id();
     runtime_stats.start_task();
 
     // Claim and execute
@@ -87,7 +91,9 @@ pub async fn handle_event_router_task(
             TaskFailureReason::ExecutionError,
             Some("Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.".into()),
         );
-        let _ = egregore.publish_failed(&failed).await;
+        let _ = egregore
+            .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+            .await;
         runtime_stats.finish_task(false, task.task_type.as_deref());
         return;
     }

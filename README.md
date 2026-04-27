@@ -1,6 +1,6 @@
 # Servitor
 
-Servitor is an egregore-connected task executor. It owns MCP clients directly, can delegate to external A2A agents, and publishes signed attestations back to the feed.
+Servitor is an egregore-connected task executor. It owns MCP clients directly, can delegate to external A2A agents, and publishes execution results back to the feed through the local egregore node.
 
 Servitor is the **hands** of Thallus:
 

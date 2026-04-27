@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::a2a::A2aPool;
-use crate::authority::{load_runtime_authority, AuthRequest, PersonId};
+use crate::authority::{load_runtime_authority, PersonId};
 use crate::config::Config;
 use crate::egregore::{AuthGate, EgregoreClient, TaskClaim, TaskFailed, TaskFailureReason};
 use crate::error::Result;
@@ -12,6 +12,7 @@ use crate::mcp::McpPool;
 use crate::metrics::{self, AuthDecision};
 use crate::runtime::publish_auth_denied_event;
 use crate::scope::ScopeEnforcer;
+use crate::task::{authorize_offer_request, inherit_trace_context, request_skill};
 
 /// Run servitor in hook mode (stdin JSON from egregore).
 ///
@@ -38,25 +39,46 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
         }
     };
 
-    // Check keeper authorization for this inbound task.
-    let person = PersonId::from_egregore(&message.author.0);
-    let auth_result = authority.authorize(&AuthRequest {
-        person: person.clone(),
-        skill: "*".to_string(), // Task intake doesn't specify skill yet
-    });
+    // Extract task from message
+    let mut task = message
+        .as_task()
+        .ok_or_else(|| crate::ServitorError::Egregore {
+            reason: "message is not a task".into(),
+        })?;
+    task.author = Some(message.author.0.clone());
+    task.normalize(Some(&message.author));
+    inherit_trace_context(&mut task, &message);
+
+    let Some(requestor) = task.requestor.clone() else {
+        tracing::warn!(task_id = %task.effective_id(), "ignoring task without requestor");
+        return Ok(());
+    };
+    if requestor != message.author {
+        tracing::warn!(
+            task_id = %task.effective_id(),
+            author = %message.author,
+            "ignoring task with mismatched requestor and envelope author"
+        );
+        return Ok(());
+    }
+
+    // Check keeper authorization for this inbound task using the same request gate as SSE mode.
+    let auth_result = authorize_offer_request(&authority, &requestor, &task);
 
     if !auth_result.allowed {
+        let person = PersonId::from_egregore(&requestor.0);
         publish_auth_denied_event(
             &egregore,
             &identity,
             &person,
-            "*",
+            &request_skill(&task),
             AuthGate::Offer,
             &auth_result.reason,
         )
         .await;
         tracing::info!(
-            author = %message.author.0,
+            author = %requestor,
+            task_type = %task.effective_task_type(),
             reason = %auth_result.reason,
             "ignoring unauthorized message"
         );
@@ -68,14 +90,8 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
     }
     metrics::record_auth_decision(AuthDecision::Allowed);
 
-    // Extract task from message
-    let task = message
-        .as_task()
-        .ok_or_else(|| crate::ServitorError::Egregore {
-            reason: "message is not a task".into(),
-        })?;
-
     tracing::debug!(hash = %task.hash, prompt_len = task.prompt.len(), "received task");
+    let task_trace_id = task.context_trace_id();
 
     // Reject tasks without pre-planned tool calls
     if !task.is_direct() {
@@ -89,7 +105,9 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
             TaskFailureReason::ExecutionError,
             Some("Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.".into()),
         );
-        egregore.publish_failed(&failed).await?;
+        egregore
+            .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+            .await?;
         return Ok(());
     }
 

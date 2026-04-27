@@ -4,6 +4,8 @@ use chrono::Utc;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::a2a::A2aPool;
+use crate::agent::output_defense::defense_pipeline;
+use crate::agent::sanitize::sanitize_arguments;
 use crate::config::Config;
 use crate::egregore::{
     DeploymentTargetSummary, EnvironmentSnapshot, ScopeConstraints, ServitorManifest,
@@ -128,7 +130,9 @@ pub async fn build_manifest(
     }
 
     for toolset in toolsets_by_server.values_mut() {
-        toolset.tools.sort_by(|left, right| left.name.cmp(&right.name));
+        toolset
+            .tools
+            .sort_by(|left, right| left.name.cmp(&right.name));
     }
 
     for tool in a2a_pool.tools_for_llm() {
@@ -151,7 +155,9 @@ pub async fn build_manifest(
     }
 
     for toolset in toolsets_by_server.values_mut() {
-        toolset.tools.sort_by(|left, right| left.name.cmp(&right.name));
+        toolset
+            .tools
+            .sort_by(|left, right| left.name.cmp(&right.name));
     }
 
     let deployment_targets = config
@@ -197,8 +203,17 @@ pub async fn build_environment_snapshots(
         let mut probe_results = Vec::new();
 
         for probe in &target.snapshot_tool_calls {
-            let outcome = match mcp_pool.call_tool(&probe.name, probe.arguments.clone()).await {
+            let outcome = match mcp_pool
+                .call_tool(&probe.name, probe.arguments.clone())
+                .await
+            {
                 Ok(result) => {
+                    let sanitized_arguments = serde_json::from_str::<serde_json::Value>(
+                        &sanitize_arguments(&probe.arguments),
+                    )
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                    let (sanitized_output, _) =
+                        defense_pipeline(&probe.name, &result.text_content());
                     if result.is_error {
                         status = "degraded".to_string();
                     } else if status == "configured" {
@@ -206,16 +221,20 @@ pub async fn build_environment_snapshots(
                     }
                     serde_json::json!({
                         "tool": probe.name,
-                        "arguments": probe.arguments,
+                        "arguments": sanitized_arguments,
                         "ok": !result.is_error,
-                        "output": result.text_content(),
+                        "output": sanitized_output,
                     })
                 }
                 Err(error) => {
+                    let sanitized_arguments = serde_json::from_str::<serde_json::Value>(
+                        &sanitize_arguments(&probe.arguments),
+                    )
+                    .unwrap_or_else(|_| serde_json::json!({}));
                     status = "degraded".to_string();
                     serde_json::json!({
                         "tool": probe.name,
-                        "arguments": probe.arguments,
+                        "arguments": sanitized_arguments,
                         "ok": false,
                         "error": error.to_string(),
                     })

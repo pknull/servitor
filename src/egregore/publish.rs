@@ -123,7 +123,18 @@ impl EgregoreClient {
 
     /// Publish a task offer.
     pub async fn publish_offer(&self, offer: &TaskOffer) -> Result<String> {
-        let response = self.publish(offer, &["task_offer"], None, None).await?;
+        self.publish_offer_with_trace(offer, None, None).await
+    }
+
+    pub async fn publish_offer_with_trace(
+        &self,
+        offer: &TaskOffer,
+        trace_id: Option<&str>,
+        span_id: Option<&str>,
+    ) -> Result<String> {
+        let response = self
+            .publish(offer, &["task_offer"], trace_id, span_id)
+            .await?;
         tracing::debug!(
             hash = %response.hash,
             task_id = %offer.task_id,
@@ -135,7 +146,18 @@ impl EgregoreClient {
 
     /// Publish a task start acknowledgment.
     pub async fn publish_started(&self, started: &TaskStarted) -> Result<String> {
-        let response = self.publish(started, &["task_started"], None, None).await?;
+        self.publish_started_with_trace(started, None, None).await
+    }
+
+    pub async fn publish_started_with_trace(
+        &self,
+        started: &TaskStarted,
+        trace_id: Option<&str>,
+        span_id: Option<&str>,
+    ) -> Result<String> {
+        let response = self
+            .publish(started, &["task_started"], trace_id, span_id)
+            .await?;
         tracing::debug!(
             hash = %response.hash,
             task_id = %started.task_id,
@@ -147,7 +169,18 @@ impl EgregoreClient {
 
     /// Publish a task status update.
     pub async fn publish_status(&self, status: &TaskStatusMessage) -> Result<String> {
-        let response = self.publish(status, &["task_status"], None, None).await?;
+        self.publish_status_with_trace(status, None, None).await
+    }
+
+    pub async fn publish_status_with_trace(
+        &self,
+        status: &TaskStatusMessage,
+        trace_id: Option<&str>,
+        span_id: Option<&str>,
+    ) -> Result<String> {
+        let response = self
+            .publish(status, &["task_status"], trace_id, span_id)
+            .await?;
         tracing::debug!(
             hash = %response.hash,
             task_id = %status.task_id,
@@ -158,7 +191,18 @@ impl EgregoreClient {
 
     /// Publish a task failure.
     pub async fn publish_failed(&self, failed: &TaskFailed) -> Result<String> {
-        let response = self.publish(failed, &["task_failed"], None, None).await?;
+        self.publish_failed_with_trace(failed, None, None).await
+    }
+
+    pub async fn publish_failed_with_trace(
+        &self,
+        failed: &TaskFailed,
+        trace_id: Option<&str>,
+        span_id: Option<&str>,
+    ) -> Result<String> {
+        let response = self
+            .publish(failed, &["task_failed"], trace_id, span_id)
+            .await?;
         tracing::info!(
             hash = %response.hash,
             task_id = %failed.task_id,

@@ -1,16 +1,16 @@
 # Servitor
 
-Pure tool executor for the egregore network. Receives pre-planned tool calls from Familiar and executes them against scoped MCP servers, publishing signed attestations back to egregore.
+Pure tool executor for the egregore network. Receives pre-planned tool calls from Familiar and executes them against scoped MCP servers, publishing execution results back to egregore through the local node.
 
 ## Architecture
 
-**Direct execution model**: Servitor has no LLM. Familiar (the planner) decomposes user requests into concrete tool calls. Servitor executes them sequentially, validates scope and authority per call, and publishes signed results.
+**Direct execution model**: Servitor has no LLM. Familiar (the planner) decomposes user requests into concrete tool calls. Servitor executes them sequentially, validates scope and authority per call, and publishes results through the local egregore node.
 
 ```
 Familiar ──► egregore feed ──► Servitor ──► MCP Servers (tools)
                                    │
                                    ▼
-                              egregore feed ──► task_result (signed)
+                              egregore feed ──► task_result
 ```
 
 ### Two Planes
@@ -44,7 +44,7 @@ Familiar ──► egregore feed ──► Servitor ──► MCP Servers (tools
 - `src/main.rs` — CLI entry point, argument parsing
 - `src/cli/daemon.rs` — Daemon mode event loop (SSE + cron + heartbeat)
 - `src/cli/daemon_handlers.rs` — Event handler functions (task execution, heartbeat)
-- `src/agent/direct.rs` — Direct execution: validate scope, call MCP tools, build signed result
+- `src/agent/direct.rs` — Direct execution: validate scope, call MCP tools, build result payload
 - `src/agent/output_defense.rs` — Output defense pipeline (size limits, credential redaction, instruction detection)
 - `src/authority/mod.rs` — Authority struct, authorize(), skill checks
 - `src/a2a/server/mod.rs` — A2A server (JSON-RPC 2.0 task delegation)
@@ -109,8 +109,8 @@ No `authority.toml` means daemon and hook modes refuse to start. Use `--insecure
 4. If SSE: publish `task_offer`, wait for `task_assign` from Familiar
 5. Execute `tool_calls` sequentially via `execute_direct()`
 6. Output defense runs on every tool result
-7. Build signed `task_result` with attestation (Ed25519 signature over result hash)
-8. Publish result to egregore feed
+7. Build `task_result` with `result_hash` covering task identity + status + result/error + duration + trace_id
+8. Publish result through the local egregore node
 
 Tasks without `tool_calls` are rejected with `invalid_task`. All planning happens in Familiar.
 

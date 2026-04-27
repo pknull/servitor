@@ -12,7 +12,7 @@ cp authority.example.toml ~/.servitor/authority.toml
 
 This document describes Servitor's current role as a headless executor. Its
 job is to receive pre-planned tasks, enforce authority and scope, execute tool
-calls, and publish signed results.
+calls, and publish results through the local egregore node.
 
 ## Top-Level Sections
 
@@ -139,6 +139,11 @@ Servitor no longer owns planning or multi-turn reasoning. Any older
 planner-oriented fields should be treated as legacy residue, not part of the
 active contract.
 
+When `publish_trace_spans = true`, Servitor emits task-level and per-tool
+`trace_span` messages. If inbound work already carries top-level Egregore
+`trace_id` / `span_id` fields, Servitor reuses that trace context instead of
+starting an unrelated trace tree.
+
 ## `task`
 
 The coordinated SSE lifecycle is controlled by:
@@ -179,6 +184,10 @@ Each `[[profile.targets]]` entry supports:
 
 `snapshot_tool_calls` are structured probe calls the servitor runs locally to
 publish `environment_snapshot` state for that target.
+
+Probe arguments are sanitized before publication. Probe output is reduced
+through the same output-defense pipeline used for direct tool execution so the
+published snapshot remains planner-facing rather than raw tool output.
 
 ## `schedule`
 
@@ -222,8 +231,11 @@ Relevant concepts:
 
 - Keepers map identities across egregore, Discord, and HTTP bearer tokens
 - Permissions match `place` and `skill` patterns
-- Request authorization uses `request:<task_type>`
+- Request authorization uses `request:<task_type>` in both SSE and hook mode
 - Assignment delegation uses `assign:<task_type>`
+
+Hook mode also requires the normalized task requestor to match the Egregore
+envelope author before execution proceeds.
 
 Without `authority.toml`, daemon and hook execution refuse work unless
 `--insecure` is supplied explicitly.

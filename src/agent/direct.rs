@@ -7,12 +7,13 @@
 use std::time::Instant;
 
 use chrono::Utc;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::authority::Authority;
 use crate::config::AgentConfig;
 use crate::egregore::messages::{
-    Attestation, PlannedToolCall, Task, TaskResult, TaskStatus, TraceSpan, TraceSpanStatus,
+    PlannedToolCall, Task, TaskResult, TaskStatus, TraceSpan, TraceSpanStatus,
 };
 use crate::egregore::EgregoreClient;
 use crate::error::{Result, ServitorError};
@@ -32,7 +33,7 @@ struct DirectCallResult {
 ///
 /// Each tool call is validated (scope + authority), then executed
 /// sequentially. If any call fails, the entire task fails immediately.
-/// Results are collected and returned as a signed `TaskResult`.
+/// Results are collected and returned as a `TaskResult`.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_direct(
     task: &Task,
@@ -45,8 +46,17 @@ pub async fn execute_direct(
     keeper_name: Option<&str>,
 ) -> Result<TaskResult> {
     let execution_start = Instant::now();
+    let inherited_trace_id = task_context_string(task, "trace_id");
+    let parent_span_id = task
+        .context_span_id()
+        .or_else(|| task.context_parent_span_id())
+        .or_else(|| task_context_string(task, "parent_span_id"));
     let trace_enabled = config.publish_trace_spans && egregore.is_some();
-    let trace_id = trace_enabled.then(new_uuid);
+    let trace_id = if trace_enabled {
+        Some(inherited_trace_id.clone().unwrap_or_else(new_uuid))
+    } else {
+        inherited_trace_id
+    };
     let root_span_id = trace_enabled.then(new_uuid);
     let trace_started_at = trace_enabled.then(Utc::now);
 
@@ -111,8 +121,11 @@ pub async fn execute_direct(
         match result {
             Ok(output) => {
                 let text = output.text_content();
+                let (sanitized_text, _) =
+                    crate::agent::output_defense::defense_pipeline(&planned.name, &text);
                 if output.is_error {
-                    let error_msg = format!("tool '{}' returned error: {}", planned.name, text);
+                    let error_msg =
+                        format!("tool '{}' returned error: {}", planned.name, sanitized_text);
                     tracing::warn!(tool = %planned.name, "direct call returned error");
                     return build_error_result(
                         task,
@@ -121,6 +134,7 @@ pub async fn execute_direct(
                         trace_id,
                         &trace_started_at,
                         &root_span_id,
+                        parent_span_id.as_deref(),
                         egregore,
                         Some(execution_start.elapsed().as_secs()),
                     )
@@ -128,11 +142,12 @@ pub async fn execute_direct(
                 }
                 call_results.push(DirectCallResult {
                     tool_name: planned.name.clone(),
-                    output: text,
+                    output: sanitized_text,
                 });
             }
             Err(e) => {
-                let error_msg = format!("tool '{}' failed: {}", planned.name, e);
+                let sanitized_error = crate::agent::sanitize::sanitize_tool_result(&e.to_string());
+                let error_msg = format!("tool '{}' failed: {}", planned.name, sanitized_error);
                 tracing::error!(tool = %planned.name, error = %e, "direct call failed");
                 return build_error_result(
                     task,
@@ -141,6 +156,7 @@ pub async fn execute_direct(
                     trace_id,
                     &trace_started_at,
                     &root_span_id,
+                    parent_span_id.as_deref(),
                     egregore,
                     Some(execution_start.elapsed().as_secs()),
                 )
@@ -161,7 +177,7 @@ pub async fn execute_direct(
     });
 
     let elapsed = execution_start.elapsed().as_secs();
-    let task_result = build_signed_result(
+    let task_result = build_result(
         task,
         identity,
         TaskStatus::Success,
@@ -182,6 +198,7 @@ pub async fn execute_direct(
             root_span_id,
             started_at,
             &task_result,
+            parent_span_id.as_deref(),
         )
         .await;
     }
@@ -239,7 +256,7 @@ fn validate_direct_call(
     Ok(())
 }
 
-fn build_signed_result(
+fn build_result(
     task: &Task,
     identity: &Identity,
     status: TaskStatus,
@@ -248,25 +265,31 @@ fn build_signed_result(
     trace_id: Option<String>,
     duration_seconds: Option<u64>,
 ) -> Result<TaskResult> {
-    let result_hash = compute_result_hash(&result, &error, trace_id.as_deref());
-    let signature = identity.sign_hash(&result_hash);
-
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let servitor = identity.public_id();
+    let task_id = task.effective_id().to_string();
+    let result_hash = compute_result_hash(
+        &task_id,
+        &servitor,
+        &correlation_id,
+        &task.hash,
+        &status,
+        &result,
+        &error,
+        duration_seconds,
+        &trace_id,
+    );
     Ok(TaskResult {
         msg_type: "task_result".to_string(),
-        task_id: task.effective_id().to_string(),
-        servitor: identity.public_id(),
-        correlation_id: uuid::Uuid::new_v4().to_string(),
+        task_id,
+        servitor: servitor.clone(),
+        correlation_id,
         task_hash: task.hash.clone(),
         result_hash,
         status,
         result,
         error,
         duration_seconds,
-        attestation: Attestation {
-            servitor_id: identity.public_id(),
-            signature,
-            timestamp: Utc::now(),
-        },
         trace_id,
     })
 }
@@ -279,10 +302,11 @@ async fn build_error_result(
     trace_id: Option<String>,
     trace_started_at: &Option<chrono::DateTime<Utc>>,
     root_span_id: &Option<String>,
+    parent_span_id: Option<&str>,
     egregore: Option<&EgregoreClient>,
     duration_seconds: Option<u64>,
 ) -> Result<TaskResult> {
-    let result = build_signed_result(
+    let result = build_result(
         task,
         identity,
         TaskStatus::Error,
@@ -295,29 +319,68 @@ async fn build_error_result(
     if let (Some(trace_id), Some(root_span_id), Some(started_at)) =
         (&trace_id, root_span_id, trace_started_at)
     {
-        publish_root_span(egregore, task, trace_id, root_span_id, *started_at, &result).await;
+        publish_root_span(
+            egregore,
+            task,
+            trace_id,
+            root_span_id,
+            *started_at,
+            &result,
+            parent_span_id,
+        )
+        .await;
     }
 
     Ok(result)
 }
 
 fn compute_result_hash(
+    task_id: &str,
+    servitor: &crate::identity::PublicId,
+    correlation_id: &str,
+    task_hash: &str,
+    status: &TaskStatus,
     result: &Option<serde_json::Value>,
     error: &Option<String>,
-    trace_id: Option<&str>,
+    duration_seconds: Option<u64>,
+    trace_id: &Option<String>,
 ) -> String {
+    #[derive(Serialize)]
+    struct AttestedTaskResultPayload<'a> {
+        task_id: &'a str,
+        servitor: &'a crate::identity::PublicId,
+        correlation_id: &'a str,
+        task_hash: &'a str,
+        status: &'a TaskStatus,
+        result: &'a Option<serde_json::Value>,
+        error: &'a Option<String>,
+        duration_seconds: Option<u64>,
+        trace_id: &'a Option<String>,
+    }
+
+    let payload = AttestedTaskResultPayload {
+        task_id,
+        servitor,
+        correlation_id,
+        task_hash,
+        status,
+        result,
+        error,
+        duration_seconds,
+        trace_id,
+    };
+
     let mut hasher = Sha256::new();
-    if let Some(r) = result {
-        hasher.update(serde_json::to_string(r).unwrap_or_default().as_bytes());
-    }
-    if let Some(e) = error {
-        hasher.update(e.as_bytes());
-    }
-    if let Some(tid) = trace_id {
-        hasher.update(tid.as_bytes());
-    }
+    hasher.update(serde_json::to_vec(&payload).unwrap_or_default());
     let hash = hasher.finalize();
     hash.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn task_context_string(task: &Task, key: &str) -> Option<String> {
+    task.context
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
 }
 
 /// Best-effort split of a prefixed tool name (e.g. "shell_execute" → ("shell", "execute")).
@@ -371,6 +434,7 @@ async fn publish_root_span(
     root_span_id: &str,
     start_ts: chrono::DateTime<Utc>,
     result: &TaskResult,
+    parent_span_id: Option<&str>,
 ) {
     let Some(egregore) = egregore else { return };
 
@@ -383,7 +447,7 @@ async fn publish_root_span(
     let mut span = TraceSpan::new(
         trace_id,
         root_span_id,
-        None,
+        parent_span_id.map(str::to_string),
         "direct_execution",
         "servitor",
         start_ts,
@@ -411,6 +475,7 @@ async fn publish_root_span(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::Identity;
 
     #[test]
     fn parse_prefixed_name_splits_correctly() {
@@ -429,8 +494,31 @@ mod tests {
     #[test]
     fn result_hash_is_deterministic() {
         let r = Some(serde_json::json!({"key": "value"}));
-        let h1 = compute_result_hash(&r, &None, None);
-        let h2 = compute_result_hash(&r, &None, None);
+        let servitor = Identity::generate().public_id();
+        let status = TaskStatus::Success;
+        let trace_id = Some("trace-1".to_string());
+        let h1 = compute_result_hash(
+            "task-1",
+            &servitor,
+            "corr-1",
+            "task-hash-1",
+            &status,
+            &r,
+            &None,
+            Some(5),
+            &trace_id,
+        );
+        let h2 = compute_result_hash(
+            "task-1",
+            &servitor,
+            "corr-1",
+            "task-hash-1",
+            &status,
+            &r,
+            &None,
+            Some(5),
+            &trace_id,
+        );
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64);
     }
@@ -438,8 +526,62 @@ mod tests {
     #[test]
     fn result_hash_changes_with_error() {
         let r = Some(serde_json::json!({"key": "value"}));
-        let h1 = compute_result_hash(&r, &None, None);
-        let h2 = compute_result_hash(&r, &Some("oops".to_string()), None);
+        let servitor = Identity::generate().public_id();
+        let status = TaskStatus::Success;
+        let trace_id = None;
+        let h1 = compute_result_hash(
+            "task-1",
+            &servitor,
+            "corr-1",
+            "task-hash-1",
+            &status,
+            &r,
+            &None,
+            Some(5),
+            &trace_id,
+        );
+        let h2 = compute_result_hash(
+            "task-1",
+            &servitor,
+            "corr-1",
+            "task-hash-1",
+            &status,
+            &r,
+            &Some("oops".to_string()),
+            Some(5),
+            &trace_id,
+        );
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn result_hash_changes_with_task_metadata() {
+        let r = Some(serde_json::json!({"key": "value"}));
+        let servitor = Identity::generate().public_id();
+        let status = TaskStatus::Success;
+        let trace_id = None;
+        let h1 = compute_result_hash(
+            "task-1",
+            &servitor,
+            "corr-1",
+            "task-hash-1",
+            &status,
+            &r,
+            &None,
+            Some(5),
+            &trace_id,
+        );
+        let h2 = compute_result_hash(
+            "task-2",
+            &servitor,
+            "corr-1",
+            "task-hash-1",
+            &status,
+            &r,
+            &None,
+            Some(5),
+            &trace_id,
+        );
         assert_ne!(h1, h2);
     }
 }

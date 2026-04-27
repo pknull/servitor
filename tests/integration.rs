@@ -122,7 +122,7 @@ fn task_message_construction() {
     );
 }
 
-/// Test attestation signing in task results.
+/// Test result-hash stability in task results.
 #[test]
 fn attestation_signing() {
     use servitor::egregore::messages::{Attestation, TaskResult};
