@@ -1,6 +1,6 @@
 [package]
 name = "servitor"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Louis Grenzebach <pk@zalgo.net>"]
 description = "Egregore network task executor using MCP servers as capabilities"
