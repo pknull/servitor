@@ -6,29 +6,20 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::a2a::A2aPool;
-use crate::authority::{Authority, PersonId};
+use crate::authority::PersonId;
 use crate::config::Config;
-use crate::egregore::{
-    build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskStatus,
-};
+use crate::egregore::{build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskStatus};
 use crate::identity::Identity;
 use crate::mcp::McpPool;
-use crate::runtime::{publish_auth_denied_event, RuntimeStats};
-use crate::scope::ScopeEnforcer;
+use crate::runtime::{publish_auth_denied_event, RuntimeContext, RuntimeStats};
 use crate::session::{SessionStore, TaskCompletionEvent, Transport};
 use crate::task::{authorize_offer_request, request_skill};
 
 /// Authorize and execute a task from the event router (cron or SSE).
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_event_router_task(
     mut task: Task,
-    authority: &Authority,
-    identity: &Identity,
-    egregore: &EgregoreClient,
+    ctx: &RuntimeContext,
     runtime_stats: &mut RuntimeStats,
-    mcp_pool: &McpPool,
-    _a2a_pool: &A2aPool,
-    scope_enforcer: &ScopeEnforcer,
     config: &Config,
 ) {
     // Authorize task if it has an author (from SSE)
@@ -38,12 +29,12 @@ pub async fn handle_event_router_task(
             .requestor
             .clone()
             .unwrap_or_else(|| crate::identity::PublicId(author.clone()));
-        let auth_result = authorize_offer_request(authority, &requestor, &task);
+        let auth_result = authorize_offer_request(&ctx.authority, &requestor, &task);
 
         if !auth_result.allowed {
             publish_auth_denied_event(
-                egregore,
-                identity,
+                &ctx.egregore,
+                &ctx.identity,
                 &person,
                 &request_skill(&task),
                 AuthGate::Offer,
@@ -74,8 +65,8 @@ pub async fn handle_event_router_task(
     runtime_stats.start_task();
 
     // Claim and execute
-    let claim = TaskClaim::new(task.hash.clone(), identity.public_id(), 180);
-    let _ = egregore.publish_claim(&claim).await;
+    let claim = TaskClaim::new(task.hash.clone(), ctx.identity.public_id(), 180);
+    let _ = ctx.egregore.publish_claim(&claim).await;
 
     // Direct execution only — tasks must have pre-planned tool_calls
     if !task.is_direct() {
@@ -83,7 +74,9 @@ pub async fn handle_event_router_task(
             task_hash = %task.hash,
             "rejecting task without tool_calls — servitors require pre-planned tool calls"
         );
-        let _ = crate::task::publish_missing_tool_calls_rejection(egregore, identity, &task).await;
+        let _ =
+            crate::task::publish_missing_tool_calls_rejection(&ctx.egregore, &ctx.identity, &task)
+                .await;
         runtime_stats.finish_task(false, task.task_type.as_deref());
         return;
     }
@@ -95,12 +88,12 @@ pub async fn handle_event_router_task(
     );
     let execution_result = crate::agent::direct::execute_direct(
         &task,
-        mcp_pool,
-        scope_enforcer,
-        identity,
+        &ctx.mcp_pool,
+        &ctx.scope_enforcer,
+        &ctx.identity,
         &config.agent,
-        Some(egregore),
-        Some(authority),
+        Some(&ctx.egregore),
+        Some(&ctx.authority),
         keeper_name.as_deref(),
     )
     .await;
@@ -114,7 +107,7 @@ pub async fn handle_event_router_task(
                 .unwrap_or(true);
 
             if should_publish {
-                if let Err(e) = egregore.publish_result(&result).await {
+                if let Err(e) = ctx.egregore.publish_result(&result).await {
                     tracing::warn!(error = %e, "failed to publish result");
                 }
             }

@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::a2a::A2aPool;
 use crate::authority::{Authority, PersonId};
 use crate::config::Config;
 use crate::egregore::{
@@ -13,9 +12,7 @@ use crate::egregore::{
 use crate::error::Result;
 use crate::events::sse::SseSource;
 use crate::identity::Identity;
-use crate::mcp::McpPool;
-use crate::runtime::publish_auth_denied_event;
-use crate::scope::ScopeEnforcer;
+use crate::runtime::{publish_auth_denied_event, RuntimeContext};
 use crate::task::{
     assign_skill, authorize_assignment, authorize_offer_request, inherit_trace_context,
     request_skill, task_matches_capabilities, AssignmentDecision, TaskCoordinator,
@@ -180,34 +177,32 @@ pub async fn maybe_accept_assignment(
 /// Execute an assigned task with timeout and SSE message handling.
 ///
 /// Uses direct execution only — tasks must have pre-planned tool_calls.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_assigned_task(
+pub(crate) async fn execute_assigned_task(
     assigned: AssignmentDecision,
-    mcp_pool: &McpPool,
-    _a2a_pool: &A2aPool,
-    scope_enforcer: &ScopeEnforcer,
-    identity: &Identity,
-    authority: &Authority,
-    egregore: &EgregoreClient,
+    ctx: &RuntimeContext,
     config: &Config,
     mut sse_source: Option<&mut SseSource>,
     task_coordinator: &mut TaskCoordinator,
     capability_set: &HashSet<String>,
 ) -> Result<()> {
     let task_id = assigned.task.effective_id().to_string();
-    let servitor_id = identity.public_id();
+    let servitor_id = ctx.identity.public_id();
     let eta_seconds = assigned.started.eta_seconds;
     let task_trace_id = assigned.task.context_trace_id();
 
     // Reject tasks without pre-planned tool calls
     if !assigned.task.is_direct() {
-        crate::task::publish_missing_tool_calls_rejection(egregore, identity, &assigned.task)
-            .await?;
+        crate::task::publish_missing_tool_calls_rejection(
+            &ctx.egregore,
+            &ctx.identity,
+            &assigned.task,
+        )
+        .await?;
         let _ = task_coordinator.finish_execution(&task_id);
         return Ok(());
     }
 
-    egregore
+    ctx.egregore
         .publish_started(&assigned.started, task_trace_id.as_deref(), None)
         .await?;
 
@@ -216,12 +211,12 @@ pub async fn execute_assigned_task(
 
     let execution = crate::agent::direct::execute_direct(
         &assigned.task,
-        mcp_pool,
-        scope_enforcer,
-        identity,
+        &ctx.mcp_pool,
+        &ctx.scope_enforcer,
+        &ctx.identity,
         &config.agent,
-        Some(egregore),
-        Some(authority),
+        Some(&ctx.egregore),
+        Some(&ctx.authority),
         assigned.task.keeper.as_deref(),
     );
     tokio::pin!(execution);
@@ -236,7 +231,7 @@ pub async fn execute_assigned_task(
                         task_result.duration_seconds = task_coordinator
                             .finish_execution(&task_id)
                             .map(|active| active.started_at.elapsed().as_secs());
-                        egregore.publish_result(&task_result).await?;
+                        ctx.egregore.publish_result(&task_result).await?;
                     }
                     Err(error) => {
                         let _ = task_coordinator.finish_execution(&task_id);
@@ -246,7 +241,7 @@ pub async fn execute_assigned_task(
                             TaskFailureReason::ExecutionError,
                             Some(error.to_string()),
                         );
-                        egregore
+                        ctx.egregore
                             .publish_failed(&failed, task_trace_id.as_deref(), None)
                             .await?;
                     }
@@ -262,7 +257,7 @@ pub async fn execute_assigned_task(
                         TaskFailureReason::Timeout,
                         Some(format!("task exceeded {}s execution timeout", eta_seconds)),
                     );
-                    egregore
+                    ctx.egregore
                         .publish_failed(&failed, task_trace_id.as_deref(), None)
                         .await?;
                     return Ok(());
@@ -279,7 +274,7 @@ pub async fn execute_assigned_task(
                                     Some(remaining),
                                     Some("Task is still running.".to_string()),
                                 );
-                                egregore
+                                ctx.egregore
                                     .publish_status(&status, task_trace_id.as_deref(), None)
                                     .await?;
                                 continue;
@@ -289,10 +284,10 @@ pub async fn execute_assigned_task(
                         if message.as_task().is_some() || message.as_task_assign().is_some() {
                             if let Some(assigned) = process_sse_message(
                                 &message,
-                                authority,
-                                identity,
+                                &ctx.authority,
+                                &ctx.identity,
                                 capability_set,
-                                egregore,
+                                &ctx.egregore,
                                 task_coordinator,
                                 config,
                             )
@@ -311,10 +306,10 @@ pub async fn execute_assigned_task(
                 for event in task_coordinator.collect_timeouts(Instant::now()) {
                     match event {
                         TaskLifecycleEvent::Withdraw(withdraw) => {
-                            let _ = egregore.publish_offer_withdraw(&withdraw).await;
+                            let _ = ctx.egregore.publish_offer_withdraw(&withdraw).await;
                         }
                         TaskLifecycleEvent::Failed(failed) => {
-                            let _ = egregore.publish_failed(&failed, None, None).await;
+                            let _ = ctx.egregore.publish_failed(&failed, None, None).await;
                         }
                     }
                 }

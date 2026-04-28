@@ -244,12 +244,7 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                             Ok(Some(assigned)) => {
                                 if let Err(e) = execute_assigned_task(
                                     assigned,
-                                    &ctx.mcp_pool,
-                                    &ctx.a2a_pool,
-                                    &ctx.scope_enforcer,
-                                    &ctx.identity,
-                                    &ctx.authority,
-                                    &ctx.egregore,
+                                    &ctx,
                                     config,
                                     sse_source.as_mut(),
                                     &mut task_coordinator,
@@ -274,12 +269,7 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                 if let Some(assigned) = task_coordinator.take_next_assignment() {
                     if let Err(e) = execute_assigned_task(
                         assigned,
-                        &ctx.mcp_pool,
-                        &ctx.a2a_pool,
-                        &ctx.scope_enforcer,
-                        &ctx.identity,
-                        &ctx.authority,
-                        &ctx.egregore,
+                        &ctx,
                         config,
                         sse_source.as_mut(),
                         &mut task_coordinator,
@@ -322,13 +312,8 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
 
                         handle_event_router_task(
                             task,
-                            &ctx.authority,
-                            &ctx.identity,
-                            &ctx.egregore,
+                            &ctx,
                             &mut runtime_stats,
-                            &ctx.mcp_pool,
-                            &ctx.a2a_pool,
-                            &ctx.scope_enforcer,
                             config,
                         ).await;
                         continue;
@@ -347,13 +332,8 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
 
                     handle_event_router_task(
                         task,
-                        &ctx.authority,
-                        &ctx.identity,
-                        &ctx.egregore,
+                        &ctx,
                         &mut runtime_stats,
-                        &ctx.mcp_pool,
-                        &ctx.a2a_pool,
-                        &ctx.scope_enforcer,
                         config,
                     ).await;
                 }

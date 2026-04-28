@@ -5,7 +5,8 @@ mod handlers;
 mod state;
 
 pub use filter::task_matches_capabilities;
-pub use handlers::{execute_assigned_task, maybe_accept_assignment, process_sse_message};
+pub(crate) use handlers::execute_assigned_task;
+pub use handlers::{maybe_accept_assignment, process_sse_message};
 pub use state::{
     ActiveExecution, AssignmentDecision, ExpiredOffer, OfferDecision, OfferedTask, TaskCoordinator,
     TaskLifecycleEvent,
