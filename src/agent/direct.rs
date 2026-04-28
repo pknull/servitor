@@ -349,8 +349,14 @@ fn compute_result_hash(
     duration_seconds: Option<u64>,
     trace_id: &Option<String>,
 ) -> String {
+    // Hash payload as a Serialize-derived struct, NOT a serde_json::json!({...})
+    // literal. With serde_json's default `Map` (BTreeMap, alphabetic), json!()
+    // would serialize keys in sorted order; the derived struct emits fields in
+    // declaration order. The byte-order difference would silently change
+    // result_hash output for any downstream consumer that compared hashes
+    // across versions.
     #[derive(Serialize)]
-    struct AttestedTaskResultPayload<'a> {
+    struct ResultHashPayload<'a> {
         task_id: &'a str,
         servitor: &'a crate::identity::PublicId,
         correlation_id: &'a str,
@@ -362,7 +368,7 @@ fn compute_result_hash(
         trace_id: &'a Option<String>,
     }
 
-    let payload = AttestedTaskResultPayload {
+    let payload = ResultHashPayload {
         task_id,
         servitor,
         correlation_id,
@@ -565,5 +571,42 @@ mod tests {
             &trace_id,
         );
         assert_ne!(h1, h2);
+    }
+
+    /// Locks the byte-format of the hashed payload. If a future refactor
+    /// changes field order, switches to serde_json::json!({...}), or otherwise
+    /// alters the JSON shape, this test fails — preventing silent
+    /// hash-format regressions for any downstream consumer comparing
+    /// result_hashes across upgrades.
+    #[test]
+    fn result_hash_format_locked() {
+        use crate::identity::PublicId;
+
+        // Use a fixed PublicId rather than Identity::generate() so the input is
+        // fully deterministic. Format must satisfy PublicId::is_valid_format
+        // (53 chars: '@' + 44 base64 chars + '.ed25519').
+        let servitor = PublicId(format!("@{}.ed25519", "A".repeat(43) + "="));
+        let result = Some(serde_json::json!({"answer": 42}));
+        let trace_id = Some("trace-fixture".to_string());
+
+        let hash = compute_result_hash(
+            "task-fixture",
+            &servitor,
+            "corr-fixture",
+            "task-hash-fixture",
+            &TaskStatus::Success,
+            &result,
+            &None,
+            Some(7),
+            &trace_id,
+        );
+
+        // Locked output. Update only when intentionally changing the
+        // hash payload format (which is a downstream-visible breaking change).
+        assert_eq!(
+            hash,
+            "5d46352b090e62dedd916b90ff5f8b2cdcae9758938d84d460891b2084e615b8",
+            "result_hash byte-format changed unexpectedly"
+        );
     }
 }
