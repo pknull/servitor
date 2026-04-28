@@ -201,14 +201,7 @@ pub async fn execute_assigned_task(
 
     // Reject tasks without pre-planned tool calls
     if !assigned.task.is_direct() {
-        let failed = TaskFailed::new(
-            task_id.clone(),
-            servitor_id.clone(),
-            TaskFailureReason::ExecutionError,
-            Some("Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.".into()),
-        );
-        egregore
-            .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+        crate::task::publish_missing_tool_calls_rejection(egregore, identity, &assigned.task)
             .await?;
         let _ = task_coordinator.finish_execution(&task_id);
         return Ok(());

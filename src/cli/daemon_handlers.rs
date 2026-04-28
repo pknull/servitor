@@ -9,8 +9,7 @@ use crate::a2a::A2aPool;
 use crate::authority::{Authority, PersonId};
 use crate::config::Config;
 use crate::egregore::{
-    build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskFailed, TaskFailureReason,
-    TaskStatus,
+    build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskStatus,
 };
 use crate::identity::Identity;
 use crate::mcp::McpPool;
@@ -72,7 +71,6 @@ pub async fn handle_event_router_task(
 
     // Set keeper on task for downstream use
     task.keeper = keeper_name.clone();
-    let task_trace_id = task.context_trace_id();
     runtime_stats.start_task();
 
     // Claim and execute
@@ -85,15 +83,7 @@ pub async fn handle_event_router_task(
             task_hash = %task.hash,
             "rejecting task without tool_calls — servitors require pre-planned tool calls"
         );
-        let failed = TaskFailed::new(
-            task.effective_id().to_string(),
-            identity.public_id(),
-            TaskFailureReason::ExecutionError,
-            Some("Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.".into()),
-        );
-        let _ = egregore
-            .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
-            .await;
+        let _ = crate::task::publish_missing_tool_calls_rejection(egregore, identity, &task).await;
         runtime_stats.finish_task(false, task.task_type.as_deref());
         return;
     }

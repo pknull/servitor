@@ -12,8 +12,44 @@ pub use state::{
 };
 
 use crate::authority::{AuthRequest, AuthResult, Authority, PersonId};
-use crate::egregore::{EgregoreMessage, Task};
-use crate::identity::PublicId;
+use crate::egregore::{
+    EgregoreClient, EgregoreMessage, Task, TaskFailed, TaskFailureReason,
+};
+use crate::error::Result;
+use crate::identity::{Identity, PublicId};
+
+/// Canonical rejection message published when a task arrives without
+/// pre-planned `tool_calls`. Locked across every rejection site so wording
+/// can't drift between hook / SSE / daemon execution paths.
+pub(crate) const MISSING_TOOL_CALLS_REJECTION_REASON: &str =
+    "Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.";
+
+/// Publish a `task_failed` rejecting an inbound task that arrived without
+/// `tool_calls`. The published payload carries the canonical rejection
+/// reason and the inherited task trace; per-site cleanup (finish_execution,
+/// runtime stats, return shape) stays at the caller.
+///
+/// Returns `Result<()>` (publish hash is discarded) so callers can `?` it
+/// (hook, SSE) or `let _ =` it (daemon). Does NOT log — pre-publish tracing
+/// stays at the call site so the operator log retains its mode-specific
+/// context.
+pub(crate) async fn publish_missing_tool_calls_rejection(
+    egregore: &EgregoreClient,
+    identity: &Identity,
+    task: &Task,
+) -> Result<()> {
+    let task_trace_id = task.context_trace_id();
+    let failed = TaskFailed::new(
+        task.effective_id().to_string(),
+        identity.public_id(),
+        TaskFailureReason::ExecutionError,
+        Some(MISSING_TOOL_CALLS_REJECTION_REASON.into()),
+    );
+    egregore
+        .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+        .await?;
+    Ok(())
+}
 
 /// Build the request authorization skill string for a task.
 pub fn request_skill(task: &Task) -> String {

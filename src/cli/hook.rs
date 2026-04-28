@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::a2a::A2aPool;
 use crate::authority::{load_runtime_authority, PersonId};
 use crate::config::Config;
-use crate::egregore::{AuthGate, EgregoreClient, TaskClaim, TaskFailed, TaskFailureReason};
+use crate::egregore::{AuthGate, EgregoreClient, TaskClaim};
 use crate::error::Result;
 use crate::identity::Identity;
 use crate::mcp::McpPool;
@@ -91,7 +91,6 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
     metrics::record_auth_decision(AuthDecision::Allowed);
 
     tracing::debug!(hash = %task.hash, prompt_len = task.prompt.len(), "received task");
-    let task_trace_id = task.context_trace_id();
 
     // Reject tasks without pre-planned tool calls
     if !task.is_direct() {
@@ -99,15 +98,7 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
             task_hash = %task.hash,
             "rejecting task without tool_calls"
         );
-        let failed = TaskFailed::new(
-            task.effective_id().to_string(),
-            identity.public_id(),
-            TaskFailureReason::ExecutionError,
-            Some("Servitor requires pre-planned tool_calls. Route through familiar for task decomposition.".into()),
-        );
-        egregore
-            .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
-            .await?;
+        crate::task::publish_missing_tool_calls_rejection(&egregore, &identity, &task).await?;
         return Ok(());
     }
 
