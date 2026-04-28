@@ -179,7 +179,7 @@ pub async fn handle_lifecycle_timeouts(
                 }
             }
             TaskLifecycleEvent::Failed(failed) => {
-                if let Err(e) = egregore.publish_failed(&failed).await {
+                if let Err(e) = egregore.publish_failed(&failed, None, None).await {
                     tracing::debug!(error = %e, task_id = %failed.task_id, "failed to publish task failure");
                 }
             }

@@ -46,7 +46,7 @@ pub(crate) async fn publish_missing_tool_calls_rejection(
         Some(MISSING_TOOL_CALLS_REJECTION_REASON.into()),
     );
     egregore
-        .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+        .publish_failed(&failed, task_trace_id.as_deref(), None)
         .await?;
     Ok(())
 }

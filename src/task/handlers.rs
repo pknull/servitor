@@ -83,7 +83,7 @@ pub async fn process_sse_message(
             .register_offer(task, requestor, capability_set.iter().cloned().collect())
             .offer;
         egregore
-            .publish_offer_with_trace(&offer, task_trace_id.as_deref(), None)
+            .publish_offer(&offer, task_trace_id.as_deref(), None)
             .await?;
 
         return Ok(None);
@@ -208,7 +208,7 @@ pub async fn execute_assigned_task(
     }
 
     egregore
-        .publish_started_with_trace(&assigned.started, task_trace_id.as_deref(), None)
+        .publish_started(&assigned.started, task_trace_id.as_deref(), None)
         .await?;
 
     let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -247,7 +247,7 @@ pub async fn execute_assigned_task(
                             Some(error.to_string()),
                         );
                         egregore
-                            .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+                            .publish_failed(&failed, task_trace_id.as_deref(), None)
                             .await?;
                     }
                 }
@@ -263,7 +263,7 @@ pub async fn execute_assigned_task(
                         Some(format!("task exceeded {}s execution timeout", eta_seconds)),
                     );
                     egregore
-                        .publish_failed_with_trace(&failed, task_trace_id.as_deref(), None)
+                        .publish_failed(&failed, task_trace_id.as_deref(), None)
                         .await?;
                     return Ok(());
                 }
@@ -280,7 +280,7 @@ pub async fn execute_assigned_task(
                                     Some("Task is still running.".to_string()),
                                 );
                                 egregore
-                                    .publish_status_with_trace(&status, task_trace_id.as_deref(), None)
+                                    .publish_status(&status, task_trace_id.as_deref(), None)
                                     .await?;
                                 continue;
                             }
@@ -314,7 +314,7 @@ pub async fn execute_assigned_task(
                             let _ = egregore.publish_offer_withdraw(&withdraw).await;
                         }
                         TaskLifecycleEvent::Failed(failed) => {
-                            let _ = egregore.publish_failed(&failed).await;
+                            let _ = egregore.publish_failed(&failed, None, None).await;
                         }
                     }
                 }

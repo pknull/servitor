@@ -121,12 +121,8 @@ impl EgregoreClient {
         Ok(response.hash)
     }
 
-    /// Publish a task offer.
-    pub async fn publish_offer(&self, offer: &TaskOffer) -> Result<String> {
-        self.publish_offer_with_trace(offer, None, None).await
-    }
-
-    pub async fn publish_offer_with_trace(
+    /// Publish a task offer with optional trace context.
+    pub async fn publish_offer(
         &self,
         offer: &TaskOffer,
         trace_id: Option<&str>,
@@ -144,12 +140,8 @@ impl EgregoreClient {
         Ok(response.hash)
     }
 
-    /// Publish a task start acknowledgment.
-    pub async fn publish_started(&self, started: &TaskStarted) -> Result<String> {
-        self.publish_started_with_trace(started, None, None).await
-    }
-
-    pub async fn publish_started_with_trace(
+    /// Publish a task start acknowledgment with optional trace context.
+    pub async fn publish_started(
         &self,
         started: &TaskStarted,
         trace_id: Option<&str>,
@@ -167,12 +159,8 @@ impl EgregoreClient {
         Ok(response.hash)
     }
 
-    /// Publish a task status update.
-    pub async fn publish_status(&self, status: &TaskStatusMessage) -> Result<String> {
-        self.publish_status_with_trace(status, None, None).await
-    }
-
-    pub async fn publish_status_with_trace(
+    /// Publish a task status update with optional trace context.
+    pub async fn publish_status(
         &self,
         status: &TaskStatusMessage,
         trace_id: Option<&str>,
@@ -189,12 +177,8 @@ impl EgregoreClient {
         Ok(response.hash)
     }
 
-    /// Publish a task failure.
-    pub async fn publish_failed(&self, failed: &TaskFailed) -> Result<String> {
-        self.publish_failed_with_trace(failed, None, None).await
-    }
-
-    pub async fn publish_failed_with_trace(
+    /// Publish a task failure with optional trace context.
+    pub async fn publish_failed(
         &self,
         failed: &TaskFailed,
         trace_id: Option<&str>,
