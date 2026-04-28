@@ -70,8 +70,11 @@ pub async fn execute_direct(
     let mut call_results: Vec<DirectCallResult> = Vec::with_capacity(task.tool_calls.len());
 
     for (idx, planned) in task.tool_calls.iter().enumerate() {
-        // Validate scope and authority before execution
-        validate_direct_call(
+        // Validate scope and authority before execution. Returns the authoritative
+        // (server, tool) split from the MCP pool — reused below for metrics, trace
+        // tags, and the authority-skill string so every downstream observation
+        // matches the registered tool boundary even when tool names contain `_`.
+        let (provider_name, tool_name) = validate_direct_call(
             task,
             planned,
             mcp_pool,
@@ -92,9 +95,6 @@ pub async fn execute_direct(
             .call_tool(&planned.name, planned.arguments.clone())
             .await;
         let duration = timer.elapsed_secs();
-
-        // Record metrics
-        let (provider_name, tool_name) = parse_prefixed_name(&planned.name);
         let status = match &result {
             Ok(output) if !output.is_error => ToolCallStatus::Success,
             _ => ToolCallStatus::Error,
@@ -207,22 +207,26 @@ pub async fn execute_direct(
 }
 
 /// Validate a single direct tool call against scope and authority policies.
-fn validate_direct_call(
+/// Returns the authoritative (server_name, tool_name) split, resolved against
+/// the MCP pool's actual registration — so policy decisions and observability
+/// downstream key off the registered tool boundary, not a heuristic split.
+fn validate_direct_call<'a>(
     task: &Task,
-    planned: &PlannedToolCall,
-    mcp_pool: &McpPool,
+    planned: &'a PlannedToolCall,
+    mcp_pool: &'a McpPool,
     scope_enforcer: &ScopeEnforcer,
     authority: Option<&Authority>,
     keeper_name: Option<&str>,
-) -> Result<()> {
-    // Verify the tool exists in the MCP pool
-    if mcp_pool.parse_tool_name(&planned.name).is_none() {
-        return Err(ServitorError::PlanValidation {
-            reason: format!("unknown tool in direct call: {}", planned.name),
-        });
-    }
-
-    let (provider_name, tool_name) = parse_prefixed_name(&planned.name);
+) -> Result<(&'a str, &'a str)> {
+    // Authoritative parse against the registered tool. If this returns None the
+    // tool isn't in the pool — surface as a plan-validation error rather than
+    // falling back to a heuristic split, which would let policy keys drift.
+    let (provider_name, tool_name) =
+        mcp_pool
+            .parse_tool_name(&planned.name)
+            .ok_or_else(|| ServitorError::PlanValidation {
+                reason: format!("unknown tool in direct call: {}", planned.name),
+            })?;
 
     // Check authority (keeper skill permissions)
     if let (Some(authority), Some(keeper)) = (authority, keeper_name) {
@@ -253,7 +257,7 @@ fn validate_direct_call(
             other => other,
         })?;
 
-    Ok(())
+    Ok((provider_name, tool_name))
 }
 
 fn build_result(
@@ -383,14 +387,6 @@ fn task_context_string(task: &Task, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Best-effort split of a prefixed tool name (e.g. "shell_execute" → ("shell", "execute")).
-/// For flat names without a separator, returns (name, name) so authority constructs
-/// a matchable "name:name" pattern. Used for metrics (approximate); authority checks
-/// in `validate_direct_call` use the MCP pool's own knowledge for accurate resolution.
-fn parse_prefixed_name(prefixed: &str) -> (&str, &str) {
-    prefixed.split_once('_').unwrap_or((prefixed, prefixed))
-}
-
 fn new_uuid() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
@@ -476,20 +472,6 @@ async fn publish_root_span(
 mod tests {
     use super::*;
     use crate::identity::Identity;
-
-    #[test]
-    fn parse_prefixed_name_splits_correctly() {
-        let (provider, tool) = parse_prefixed_name("shell_execute");
-        assert_eq!(provider, "shell");
-        assert_eq!(tool, "execute");
-    }
-
-    #[test]
-    fn parse_prefixed_name_handles_no_separator() {
-        let (provider, tool) = parse_prefixed_name("noprefix");
-        assert_eq!(provider, "noprefix");
-        assert_eq!(tool, "noprefix");
-    }
 
     #[test]
     fn result_hash_is_deterministic() {

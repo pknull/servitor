@@ -1,6 +1,5 @@
 //! Integration tests for Servitor.
 
-use chrono::Utc;
 use servitor::config::Config;
 use servitor::egregore::messages::{Task, TaskScopeOverride, TaskStatus};
 use servitor::identity::Identity;
@@ -122,20 +121,15 @@ fn task_message_construction() {
     );
 }
 
-/// Test result-hash stability in task results.
+/// Test result-hash stability and TaskResult shape after the 0.3.0 Attestation
+/// removal. Servitor no longer signs results separately — feed-level signing
+/// comes from the local Egregore node's message envelope.
 #[test]
-fn attestation_signing() {
-    use servitor::egregore::messages::{Attestation, TaskResult};
+fn task_result_shape() {
+    use servitor::egregore::messages::TaskResult;
 
     let identity = Identity::generate();
     let result_hash = "deadbeef1234567890";
-
-    let signature = identity.sign_hash(result_hash);
-    let attestation = Attestation {
-        servitor_id: identity.public_id(),
-        signature: signature.clone(),
-        timestamp: Utc::now(),
-    };
 
     let task_result = TaskResult {
         msg_type: "task_result".to_string(),
@@ -148,33 +142,24 @@ fn attestation_signing() {
         result: Some(serde_json::json!({ "answer": 42 })),
         error: None,
         duration_seconds: Some(1),
-        attestation,
         trace_id: None,
     };
-
-    // Verify the signature
-    let valid = task_result
-        .attestation
-        .servitor_id
-        .verify(result_hash.as_bytes(), &signature)
-        .unwrap();
-    assert!(valid);
 
     // Serialize and check structure
     let json = serde_json::to_string_pretty(&task_result).unwrap();
     assert!(json.contains("task_result"));
-    assert!(json.contains("attestation"));
-    assert!(json.contains("signature"));
+    assert!(json.contains("result_hash"));
+    // Attestation fields must NOT appear in the post-0.3.0 wire format.
+    assert!(!json.contains("attestation"));
+    assert!(!json.contains("\"signature\""));
 }
 
 /// Test trace linkage on task results.
 #[test]
 fn task_result_trace_id_roundtrip() {
-    use chrono::Utc;
-    use servitor::egregore::messages::{Attestation, TaskResult};
+    use servitor::egregore::messages::TaskResult;
 
     let identity = Identity::generate();
-    let signature = identity.sign_hash("trace-result-hash");
     let result = TaskResult {
         msg_type: "task_result".to_string(),
         task_id: "task-trace".to_string(),
@@ -186,11 +171,6 @@ fn task_result_trace_id_roundtrip() {
         result: Some(serde_json::json!({ "text": "ok" })),
         error: None,
         duration_seconds: Some(1),
-        attestation: Attestation {
-            servitor_id: identity.public_id(),
-            signature,
-            timestamp: Utc::now(),
-        },
         trace_id: Some("trace-123".to_string()),
     };
 
