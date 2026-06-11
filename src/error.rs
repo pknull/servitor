@@ -56,12 +56,6 @@ pub enum ServitorError {
     #[error("Internal error: {reason}")]
     Internal { reason: String },
 
-    #[error("Session error: {reason}")]
-    Session { reason: String },
-
-    #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
-
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

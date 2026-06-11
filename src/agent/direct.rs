@@ -338,6 +338,7 @@ async fn build_error_result(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_result_hash(
     task_id: &str,
     servitor: &crate::identity::PublicId,
@@ -604,8 +605,7 @@ mod tests {
         // Locked output. Update only when intentionally changing the
         // hash payload format (which is a downstream-visible breaking change).
         assert_eq!(
-            hash,
-            "5d46352b090e62dedd916b90ff5f8b2cdcae9758938d84d460891b2084e615b8",
+            hash, "5d46352b090e62dedd916b90ff5f8b2cdcae9758938d84d460891b2084e615b8",
             "result_hash byte-format changed unexpectedly"
         );
     }

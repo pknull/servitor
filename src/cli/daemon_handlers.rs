@@ -2,7 +2,6 @@
 //!
 //! These functions handle specific event types to keep the main loop manageable.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::a2a::A2aPool;
@@ -12,7 +11,6 @@ use crate::egregore::{build_profile, AuthGate, EgregoreClient, Task, TaskClaim, 
 use crate::identity::Identity;
 use crate::mcp::McpPool;
 use crate::runtime::{publish_auth_denied_event, RuntimeContext, RuntimeStats};
-use crate::session::{SessionStore, TaskCompletionEvent, Transport};
 use crate::task::{authorize_offer_request, request_skill};
 
 /// Authorize and execute a task from the event router (cron or SSE).
@@ -130,6 +128,7 @@ pub async fn handle_event_router_task(
 }
 
 /// Publish a heartbeat profile to egregore.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_heartbeat(
     identity: &Identity,
     mcp_pool: &McpPool,
@@ -176,90 +175,6 @@ pub async fn handle_lifecycle_timeouts(
                     tracing::debug!(error = %e, task_id = %failed.task_id, "failed to publish task failure");
                 }
             }
-        }
-    }
-}
-
-/// Handle a task completion event from the egregore watcher.
-///
-/// When a delegated task completes (another servitor publishes a task_result
-/// with `relates` pointing to our task), this notifies the original keeper
-/// via the transport they used.
-pub async fn handle_task_completion(
-    completion: TaskCompletionEvent,
-    session_store: &Arc<SessionStore>,
-) {
-    let task = &completion.task;
-    let result = &completion.result;
-
-    tracing::info!(
-        session_id = %task.session_id,
-        message_hash = %task.message_hash,
-        success = result.success,
-        "delegated task completed"
-    );
-
-    // Look up the session to find the original transport
-    let session = match session_store.get_session(&task.session_id) {
-        Ok(Some(session)) => session,
-        Ok(None) => {
-            tracing::warn!(session_id = %task.session_id, "session not found for task completion");
-            return;
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to lookup session for task completion");
-            return;
-        }
-    };
-
-    // Build notification message
-    let _notification = if result.success {
-        format!(
-            "Task completed: {}{}",
-            result.summary,
-            result
-                .content
-                .as_ref()
-                .map(|c| format!("\n\n{}", c))
-                .unwrap_or_default()
-        )
-    } else {
-        format!("Task failed: {}", result.summary)
-    };
-
-    // Send notification via the original transport
-    match &session.transport {
-        Transport::A2a { callback_url, .. } => {
-            // TODO: Implement A2A callback notification
-            tracing::debug!(
-                callback_url = callback_url.as_deref().unwrap_or("none"),
-                "A2A callback notification not yet implemented"
-            );
-        }
-        Transport::Cli => {
-            // CLI sessions are ephemeral, no notification needed
-            tracing::debug!("CLI session, no notification sent");
-        }
-        Transport::Egregore { author } => {
-            // For egregore-originated tasks, the result was already published
-            tracing::debug!(author = %author, "egregore task, result already published");
-        }
-    }
-
-    // Update session state if it was awaiting this task
-    match session_store.get_session(&task.session_id) {
-        Ok(Some(mut updated_session)) => {
-            updated_session.state = crate::session::SessionState::Active;
-            updated_session.touch();
-            if let Err(e) = session_store.update_session(&updated_session) {
-                tracing::warn!(error = %e, "failed to update session state after task completion");
-            }
-        }
-        Ok(None) => {
-            tracing::warn!(session_id = %task.session_id, "session not found for state update");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to get session for state update");
         }
     }
 }

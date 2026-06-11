@@ -13,9 +13,7 @@ pub use state::{
 };
 
 use crate::authority::{AuthRequest, AuthResult, Authority, PersonId};
-use crate::egregore::{
-    EgregoreClient, EgregoreMessage, Task, TaskFailed, TaskFailureReason,
-};
+use crate::egregore::{EgregoreClient, EgregoreMessage, Task, TaskFailed, TaskFailureReason};
 use crate::error::Result;
 use crate::identity::{Identity, PublicId};
 

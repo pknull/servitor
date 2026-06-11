@@ -3,7 +3,6 @@
 //! Consolidates shared initialization logic across CLI commands.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::a2a::A2aPool;
 use crate::authority::{load_runtime_authority, Authority};
@@ -13,12 +12,11 @@ use crate::error::Result;
 use crate::identity::Identity;
 use crate::mcp::McpPool;
 use crate::scope::ScopeEnforcer;
-use crate::session::SessionStore;
 
 /// Shared runtime context for task execution.
 ///
 /// Encapsulates the common components needed by all CLI commands:
-/// identity, authority, MCP pool, A2A pool, scope enforcer, and session store.
+/// identity, authority, MCP pool, A2A pool, and scope enforcer.
 ///
 /// Servitors execute pre-planned tool calls directly — no LLM provider needed.
 pub struct RuntimeContext {
@@ -28,7 +26,6 @@ pub struct RuntimeContext {
     pub a2a_pool: A2aPool,
     pub scope_enforcer: ScopeEnforcer,
     pub egregore: EgregoreClient,
-    pub session_store: Arc<SessionStore>,
 }
 
 impl RuntimeContext {
@@ -77,10 +74,6 @@ impl RuntimeContext {
 
         let egregore = EgregoreClient::new(&config.egregore.api_url);
 
-        // Initialize session store
-        let session_store = Arc::new(SessionStore::open(&identity_dir)?);
-        tracing::debug!("session store: initialized at {}", identity_dir.display());
-
         Ok(Self {
             identity,
             authority,
@@ -88,7 +81,6 @@ impl RuntimeContext {
             a2a_pool,
             scope_enforcer,
             egregore,
-            session_store,
         })
     }
 

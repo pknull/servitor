@@ -59,9 +59,6 @@ cron = "0.13"
 # UUID generation
 uuid = { version = "1", features = ["v4"] }
 
-# SQLite (for session storage)
-rusqlite = { version = "0.31", features = ["bundled"] }
-
 # Directory expansion
 dirs = "5"
 shellexpand = "3"

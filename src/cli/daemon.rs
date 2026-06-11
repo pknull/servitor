@@ -16,11 +16,10 @@ use crate::events::sse::SseSource;
 use crate::events::{EventRouter, EventSource};
 use crate::metrics;
 use crate::runtime::{RuntimeContext, RuntimeStats};
-use crate::session::TaskWatcher;
 use crate::task::{execute_assigned_task, process_sse_message, TaskCoordinator};
 
 use super::daemon_handlers::{
-    handle_event_router_task, handle_heartbeat, handle_lifecycle_timeouts, handle_task_completion,
+    handle_event_router_task, handle_heartbeat, handle_lifecycle_timeouts,
 };
 
 /// Run servitor as a long-lived daemon with event router.
@@ -161,11 +160,6 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
         None
     };
 
-    // Spawn task watcher for delegated task completion notifications
-    let task_watcher = TaskWatcher::new(ctx.egregore.clone());
-    let (mut task_completion_rx, _watcher_handle) = task_watcher.start(ctx.session_store.clone());
-    tracing::info!("task completion watcher started");
-
     // Publish initial manifest and profile
     let mut runtime_stats = RuntimeStats::new();
     let manifest = build_manifest(&ctx.identity, &ctx.mcp_pool, &ctx.a2a_pool, config).await;
@@ -218,169 +212,152 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
     );
 
     loop {
-        tokio::select! {
-            // Handle task completion events from delegated work
-            Some(completion) = task_completion_rx.recv() => {
-                handle_task_completion(
-                    completion,
-                    &ctx.session_store,
-                ).await;
-            }
+        tokio::time::sleep(poll_interval).await;
 
-            // Poll other event sources
-            _ = tokio::time::sleep(poll_interval) => {
-                // Process SSE messages
-                if let Some(ref mut source) = sse_source {
-                    if let Some(message) = source.next_message().await {
-                        match process_sse_message(
-                            &message,
-                            &ctx.authority,
-                            &ctx.identity,
-                            &capability_set,
-                            &ctx.egregore,
-                            &mut task_coordinator,
-                            config,
-                        ).await {
-                            Ok(Some(assigned)) => {
-                                if let Err(e) = execute_assigned_task(
-                                    assigned,
-                                    &ctx,
-                                    config,
-                                    sse_source.as_mut(),
-                                    &mut task_coordinator,
-                                    &capability_set,
-                                ).await {
-                                    tracing::error!(error = %e, "assigned task execution failed");
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                tracing::warn!(error = %e, "failed to process SSE message");
-                            }
-                        }
-                    }
-                }
-
-                // Process task lifecycle timeouts
-                let timeout_events = task_coordinator.collect_timeouts(Instant::now());
-                handle_lifecycle_timeouts(timeout_events, &ctx.egregore).await;
-
-                // Process queued assignments
-                if let Some(assigned) = task_coordinator.take_next_assignment() {
-                    if let Err(e) = execute_assigned_task(
-                        assigned,
-                        &ctx,
-                        config,
-                        sse_source.as_mut(),
-                        &mut task_coordinator,
-                        &capability_set,
-                    ).await {
-                        tracing::error!(error = %e, "queued assigned task execution failed");
-                    }
-                }
-
-                // Poll MCP server notifications on a slower cadence than the main loop.
-                if last_mcp_notification_poll.elapsed() >= mcp_notification_poll_interval {
-                    last_mcp_notification_poll = Instant::now();
-                    if let Some(ref mut source) = mcp_notification_source {
-                        match ctx.mcp_pool.drain_notifications().await {
-                            Ok(notifications) => {
-                                for (server_name, notification) in notifications {
-                                    source.queue_notification(
-                                        &server_name,
-                                        &notification.method,
-                                        notification.params.unwrap_or(serde_json::json!({})),
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "failed to drain MCP notifications");
-                            }
-                        }
-                    }
-                }
-
-                // Process MCP notification tasks before other local sources.
-                if let Some(ref mut source) = mcp_notification_source {
-                    if let Some(task) = source.next().await {
-                        tracing::debug!(
-                            hash = %task.hash,
-                            prompt_len = task.prompt.len(),
-                            "processing task from MCP notification source"
-                        );
-                        runtime_stats.record_task_offer();
-
-                        handle_event_router_task(
-                            task,
+        // Process SSE messages
+        if let Some(ref mut source) = sse_source {
+            if let Some(message) = source.next_message().await {
+                match process_sse_message(
+                    &message,
+                    &ctx.authority,
+                    &ctx.identity,
+                    &capability_set,
+                    &ctx.egregore,
+                    &mut task_coordinator,
+                    config,
+                )
+                .await
+                {
+                    Ok(Some(assigned)) => {
+                        if let Err(e) = execute_assigned_task(
+                            assigned,
                             &ctx,
-                            &mut runtime_stats,
                             config,
-                        ).await;
-                        continue;
-                    }
-                }
-
-                // Process event router tasks (cron, etc.)
-                if let Some((source_idx, task)) = event_router.poll().await {
-                    tracing::debug!(
-                        source = source_idx,
-                        hash = %task.hash,
-                        prompt_len = task.prompt.len(),
-                        "processing task from event source"
-                    );
-                    runtime_stats.record_task_offer();
-
-                    handle_event_router_task(
-                        task,
-                        &ctx,
-                        &mut runtime_stats,
-                        config,
-                    ).await;
-                }
-
-                // Check heartbeat
-                if last_heartbeat.elapsed() >= heartbeat_interval {
-                    // Rebuild and republish manifest so capabilities stay current
-                    let fresh_manifest = build_manifest(
-                        &ctx.identity, &ctx.mcp_pool, &ctx.a2a_pool, config,
-                    ).await;
-                    match ctx.egregore.publish_manifest(&fresh_manifest).await {
-                        Ok(hash) => { manifest_ref = Some(hash); }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "failed to republish manifest");
-                        }
-                    }
-
-                    if let Some(ref current_ref) = manifest_ref {
-                        let snapshots = build_environment_snapshots(
-                            &ctx.identity,
-                            &ctx.mcp_pool,
-                            config,
-                            current_ref,
+                            sse_source.as_mut(),
+                            &mut task_coordinator,
+                            &capability_set,
                         )
-                        .await;
-                        for snapshot in snapshots {
-                            if let Err(e) = ctx.egregore.publish_environment_snapshot(&snapshot).await {
-                                tracing::debug!(
-                                    error = %e,
-                                    target_id = %snapshot.target_id,
-                                    "failed to publish environment snapshot"
-                                );
-                            }
+                        .await
+                        {
+                            tracing::error!(error = %e, "assigned task execution failed");
                         }
                     }
-                    handle_heartbeat(
-                        &ctx.identity,
-                        &ctx.mcp_pool,
-                        &ctx.a2a_pool,
-                        config,
-                        &runtime_stats,
-                        &ctx.egregore,
-                        manifest_ref.as_deref(),
-                        &mut last_heartbeat,
-                    ).await;
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to process SSE message");
+                    }
                 }
             }
+        }
+
+        // Process task lifecycle timeouts
+        let timeout_events = task_coordinator.collect_timeouts(Instant::now());
+        handle_lifecycle_timeouts(timeout_events, &ctx.egregore).await;
+
+        // Process queued assignments
+        if let Some(assigned) = task_coordinator.take_next_assignment() {
+            if let Err(e) = execute_assigned_task(
+                assigned,
+                &ctx,
+                config,
+                sse_source.as_mut(),
+                &mut task_coordinator,
+                &capability_set,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "queued assigned task execution failed");
+            }
+        }
+
+        // Poll MCP server notifications on a slower cadence than the main loop.
+        if last_mcp_notification_poll.elapsed() >= mcp_notification_poll_interval {
+            last_mcp_notification_poll = Instant::now();
+            if let Some(ref mut source) = mcp_notification_source {
+                match ctx.mcp_pool.drain_notifications().await {
+                    Ok(notifications) => {
+                        for (server_name, notification) in notifications {
+                            source.queue_notification(
+                                &server_name,
+                                &notification.method,
+                                notification.params.unwrap_or(serde_json::json!({})),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to drain MCP notifications");
+                    }
+                }
+            }
+        }
+
+        // Process MCP notification tasks before other local sources.
+        if let Some(ref mut source) = mcp_notification_source {
+            if let Some(task) = source.next().await {
+                tracing::debug!(
+                    hash = %task.hash,
+                    prompt_len = task.prompt.len(),
+                    "processing task from MCP notification source"
+                );
+                runtime_stats.record_task_offer();
+
+                handle_event_router_task(task, &ctx, &mut runtime_stats, config).await;
+                continue;
+            }
+        }
+
+        // Process event router tasks (cron, etc.)
+        if let Some((source_idx, task)) = event_router.poll().await {
+            tracing::debug!(
+                source = source_idx,
+                hash = %task.hash,
+                prompt_len = task.prompt.len(),
+                "processing task from event source"
+            );
+            runtime_stats.record_task_offer();
+
+            handle_event_router_task(task, &ctx, &mut runtime_stats, config).await;
+        }
+
+        // Check heartbeat
+        if last_heartbeat.elapsed() >= heartbeat_interval {
+            // Rebuild and republish manifest so capabilities stay current
+            let fresh_manifest =
+                build_manifest(&ctx.identity, &ctx.mcp_pool, &ctx.a2a_pool, config).await;
+            match ctx.egregore.publish_manifest(&fresh_manifest).await {
+                Ok(hash) => {
+                    manifest_ref = Some(hash);
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "failed to republish manifest");
+                }
+            }
+
+            if let Some(ref current_ref) = manifest_ref {
+                let snapshots =
+                    build_environment_snapshots(&ctx.identity, &ctx.mcp_pool, config, current_ref)
+                        .await;
+                for snapshot in snapshots {
+                    if let Err(e) = ctx.egregore.publish_environment_snapshot(&snapshot).await {
+                        tracing::debug!(
+                            error = %e,
+                            target_id = %snapshot.target_id,
+                            "failed to publish environment snapshot"
+                        );
+                    }
+                }
+            }
+            handle_heartbeat(
+                &ctx.identity,
+                &ctx.mcp_pool,
+                &ctx.a2a_pool,
+                config,
+                &runtime_stats,
+                &ctx.egregore,
+                manifest_ref.as_deref(),
+                &mut last_heartbeat,
+            )
+            .await;
         }
     }
 }
