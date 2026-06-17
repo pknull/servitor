@@ -85,12 +85,6 @@ pub struct EgregoreConfig {
     /// Enable SSE subscription in daemon mode.
     #[serde(default)]
     pub subscribe: bool,
-
-    /// Reserved consumer group configuration.
-    ///
-    /// Parsed from config but not yet wired into the runtime on this branch.
-    #[serde(default)]
-    pub group: Option<ConsumerGroupConfig>,
 }
 
 impl Default for EgregoreConfig {
@@ -98,28 +92,12 @@ impl Default for EgregoreConfig {
         Self {
             api_url: default_egregore_url(),
             subscribe: false,
-            group: None,
         }
     }
 }
 
 fn default_egregore_url() -> String {
     "http://127.0.0.1:7654".to_string()
-}
-
-/// Reserved consumer group for future feed partitioning.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ConsumerGroupConfig {
-    /// Group name.
-    pub name: String,
-
-    /// Heartbeat interval in seconds.
-    #[serde(default = "default_group_heartbeat")]
-    pub heartbeat_interval_secs: u64,
-}
-
-fn default_group_heartbeat() -> u64 {
-    10
 }
 
 /// Structured tool call template used by schedules and notification handlers.
