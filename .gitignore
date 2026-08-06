@@ -1,5 +1,6 @@
 # Build artifacts
 /target/
+/target-aarch64/
 Cargo.lock
 
 # IDE
@@ -18,3 +19,9 @@ servitor.toml
 # Assistant tooling state — managed at Thallus umbrella, never per-subproject.
 .claude/
 Memory/
+
+# Operator scratch (run reports, markers) — machine-local, never committed.
+Work/
+
+# asha issue-loop per-issue worktrees (never committed)
+.asha/worktrees/
