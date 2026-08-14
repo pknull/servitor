@@ -12,6 +12,9 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: servitor
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +41,13 @@ jobs:
             cross: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          path: servitor
+      - uses: actions/checkout@v7
+        with:
+          repository: pknull/thallus-core
+          path: thallus-core
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -70,10 +79,10 @@ jobs:
           7z a ../../../servitor-${{ matrix.target }}.zip ${{ matrix.artifact }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: servitor-${{ matrix.target }}
-          path: servitor-${{ matrix.target }}.*
+          path: servitor/servitor-${{ matrix.target }}.*
 
   release:
     name: Create Release
@@ -84,7 +93,7 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
