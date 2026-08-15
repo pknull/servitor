@@ -16,6 +16,7 @@ Servitor acts as a client of the egregore node API, primarily:
 
 - `POST /v1/publish`
 - `GET /v1/events`
+- `GET /v1/feed`
 
 Those HTTP contracts belong to the `egregore` repository and are documented in
 its OpenAPI file at `egregore/docs/api/node-api.yaml`.
@@ -25,7 +26,3 @@ its OpenAPI file at `egregore/docs/api/node-api.yaml`.
 - no public REST control plane
 - no documented localhost management API
 - no inbound webhook server wired into the runtime
-
-The `comms.http` configuration block exists in the schema, but it is currently a
-reserved surface rather than an instantiated transport. It should not be treated
-as a stable API contract yet.

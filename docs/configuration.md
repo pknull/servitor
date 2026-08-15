@@ -40,11 +40,6 @@ files. The default is `~/.servitor`.
 - `api_url`: local egregore node base URL
 - `subscribe`: subscribe to the egregore SSE feed in daemon mode
 
-Current branch note:
-
-- `egregore.group` is parsed by the config schema but is not consumed by the
-  current runtime. Do not rely on it for task ownership or deduplication yet.
-
 ## `mcp.*`
 
 Each named MCP section declares one tool server.
@@ -80,23 +75,32 @@ pre-planned call it was given.
 
 Required fields:
 
-- `url`: agent's A2A endpoint (for example `http://agent.local:8765/a2a`)
+- `url`: agent's A2A base URL (for example `http://agent.local:8765`); the
+  client appends `/a2a` for JSON-RPC calls
 
 Optional fields:
 
-- `card_url`: override `/.well-known/agent.json` discovery URL
+- `card`: override `/.well-known/agent.json` discovery URL
 - `auth.type`: `bearer` for token auth
 - `auth.token_env`: environment variable containing the bearer token
 - `timeout_secs`: per-request timeout
-- `retry_attempts`: retry count on failure
+- `poll_interval_ms`: task-status polling interval
+- `scope.allow`: remote skills to expose; an empty list exposes all discovered skills
+- `scope.block`: parsed block patterns; the current A2A pool does not consult
+  this field
 
 Example:
 
 ```toml
 [a2a.research-agent]
-url = "http://localhost:8766/a2a"
+url = "http://localhost:8766"
+card = "http://localhost:8766/.well-known/agent.json"
+timeout_secs = 300
+poll_interval_ms = 2000
 auth.type = "bearer"
 auth.token_env = "RESEARCH_AGENT_TOKEN"
+scope.allow = ["web_search", "summarize"]
+scope.block = []
 ```
 
 ## `a2a_server`

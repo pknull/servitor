@@ -100,6 +100,8 @@ Additional audit and observability messages:
 - `environment_snapshot`: target-specific planner context, optionally enriched by configured probe tool calls
 - `task_offer_withdraw`: offer TTL expired before assignment
 - `task_ping`: request a status update from an active execution
+- `assign_task/v1` (`type: "assign_task"`): typed operator assignment command
+- `assign_task_result/v1` (`type: "assign_task_result"`): durable owner decision recorded before execution
 - `auth_denied`: published when offer or assignment authorization fails
 - `trace_span`: opt-in distributed execution tracing
 - `notification`: outbound notification payloads
@@ -122,8 +124,6 @@ Key config surfaces live in [servitor.example.toml](servitor.example.toml):
 Configured `profile.targets[*].snapshot_tool_calls` let a servitor publish live
 target snapshots without embedding planner logic in the executor. The probe
 calls are operator-curated structured tool calls, not ad hoc prompts.
-
-The `[egregore.group]` and `[comms.http]` sections are reserved configuration on this branch. They are parsed by the config schema but are not wired into the current runtime.
 
 ## Scope Enforcement
 

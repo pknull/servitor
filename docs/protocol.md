@@ -45,6 +45,52 @@ Assignment authorization rules:
 - any other assigner must be authorized for `assign:<task_type>`
 - unauthorized offers and assignments emit `auth_denied`
 
+### Assignment command families
+
+Bare `task_assign` remains supported as Familiar's automated assignment path.
+The typed `assign_task/v1` family is the operator-command path used for an
+explicit assignment decision. In the current wire representation these RFC
+families use `type: "assign_task"` and `type: "assign_task_result"`, backed by
+the `AssignTaskV1` and `AssignTaskResultV1` schemas.
+
+An `assign_task/v1` command binds:
+
+- `task_id`: stable task identifier
+- `task_hash`: feed hash of the task message
+- `offer_hash`: feed hash of the selected offer
+- `executor`: target Servitor identity
+- `assigner`: authenticated assigner identity, which must equal the command
+  message's signing author
+- `predecessor`: optional expected latest lifecycle hash
+- `command_id`: stable command idempotency key
+- `attempt_id`: identity of this delivery attempt
+- `expires_at`: command expiry timestamp
+
+Servitor owns the state transition and validates the command fail closed. Its
+current rejection reasons are:
+
+| Condition | `assign_task_result/v1.reason` |
+|-----------|--------------------------------|
+| `assigner` does not match the command message author | `assigner_mismatch` |
+| `expires_at` is in the past | `expired` |
+| The task is active, already accepted, completed, or failed | `task_resolved` |
+| The pending task or offer is unknown/withdrawn, or `offer_hash` does not match | `offer_unavailable` |
+| `task_hash` does not match the offered task | `task_mismatch` |
+| A supplied `predecessor` is not the latest lifecycle hash | `stale_predecessor` |
+| The assigner lacks assignment authority | `unauthorized` |
+
+A command addressed to another executor is ignored rather than answered. For
+an accepted command, Servitor durably publishes `assign_task_result/v1`
+**before** it mutates the owner state or begins execution. The result contains
+`command_id`, `task_id`, `status`, and optional `reason`, `lifecycle_hash`, and
+`task_state`. The status domain is `accepted | rejected | superseded`; the
+current owner path emits `accepted` or `rejected`.
+
+`command_id` provides recorded-result idempotency. Before validation, Servitor
+queries its owner-authored assignment results. If that command id already has
+a recorded result, replay produces neither another decision record nor another
+execution; the existing result remains authoritative.
+
 When trace propagation is enabled, offer, start, status, failure, and result
 messages reuse the inherited task trace identifier when present.
 
@@ -78,6 +124,8 @@ For local `servitor exec`, the input is a JSON array of pre-planned tool calls, 
 | `task_claim` | Out | Advisory claim for non-assignment paths |
 | `task_offer` | Out | Servitor offers to execute a task |
 | `task_assign` | In | Requestor or assigner selects a servitor |
+| `assign_task/v1` (`type: "assign_task"`) | In | Typed operator assignment command |
+| `assign_task_result/v1` (`type: "assign_task_result"`) | Out | Durable owner acceptance or rejection |
 | `task_started` | Out | Execution acknowledged with ETA |
 | `task_ping` | In | Request status for active work |
 | `task_status` | Out | Progress or revised ETA |

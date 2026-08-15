@@ -36,8 +36,8 @@ Familiar ──► egregore feed ──► Servitor ──► MCP Servers (tools
 | metrics | `src/metrics.rs` | Prometheus metrics for observability |
 | runtime | `src/runtime/` | RuntimeContext, stats tracking, auth events |
 | scope | `src/scope/` | Allow/block policy enforcement |
-| session | `src/session/` | Session store, task watcher, pending task lifecycle |
-| task | `src/task/` | Task filtering, handlers, state management, coordinator |
+| task | `src/task/` | Task filtering, handlers, state management, coordinator, and startup recovery |
+| task recovery | `src/task/recovery.rs` | Startup recovery of identity-bound offered-but-unresolved task chains |
 
 ## Key Files
 
@@ -68,7 +68,7 @@ Familiar ──► egregore feed ──► Servitor ──► MCP Servers (tools
 
 ```bash
 cargo build --release      # Build
-cargo test                 # Run tests (166 total)
+cargo test                 # Run tests
 ./target/release/servitor init    # Generate identity
 ./target/release/servitor info    # Show config + authority status
 ./target/release/servitor exec '[{"name":"shell__execute","arguments":{"command":"pwd"}}]'  # Execute directly

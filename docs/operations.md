@@ -53,6 +53,27 @@ Reads a single egregore envelope from stdin and executes it as a hook target.
 This mode is intended for egregore hook integration rather than long-running
 subscription.
 
+## Startup Recovery
+
+Before daemon startup readiness, Servitor queries a bounded Egregore feed
+window and rebuilds unresolved task lifecycles. `RECOVERY_FEED_LIMIT` is
+currently 1,000 records. Recovery selects identity-bound task chains that this
+Servitor offered but did not withdraw or finish, including accepted typed
+assignments that have no terminal execution record.
+
+Each candidate is replayed through the normal intake and assignment paths, so
+current capability, authority, and scope policy still applies. Candidates are
+collapsed by task and recovery executes at most once per selected task during
+that startup pass. An existing durable typed-assignment acceptance record is
+recognized before its execution is resumed; recovery does not publish a
+second acceptance.
+
+This is not an exactly-once guarantee for downstream effects. A crash after an
+effect succeeds but before `task_result` or `task_failed` is recorded can cause
+the effect to be attempted again. Effects without downstream idempotency are
+therefore at-least-once and require reconciliation, compensation, or a manual
+resolution boundary.
+
 ## Observability
 
 Default heartbeat/profile publishing includes only capability and scope data.

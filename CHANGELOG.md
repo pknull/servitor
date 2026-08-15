@@ -2,6 +2,32 @@
 
 All notable changes to servitor are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this crate's pre-1.0 versioning treats minor bumps as the breaking-change signal.
 
+## [Unreleased] - 2026-08-14
+
+### Added
+
+- Startup recovery queries a bounded feed window and replays identity-bound,
+  offered-but-unresolved task chains through the normal authority path,
+  including accepted-but-unexecuted typed assignments.
+- Servitor now owns the RFC 0003 `AssignTaskV1` path: it validates typed
+  operator assignments fail closed, durably publishes `AssignTaskResultV1`
+  before execution, and suppresses replayed `command_id` mutations using
+  recorded owner results.
+
+### Changed
+
+- Cross-component reference only: Familiar now binds `task_offer.servitor` to
+  the offer's signing author and fails closed unless assignment trust is
+  explicitly configured; this does not add a Familiar-side execution path to
+  Servitor.
+
+### Fixed
+
+- Feed history queries use Egregore's current `/v1/feed` endpoint with
+  `include_self=true` and bounded pagination, replacing the obsolete
+  `/v1/query` path so startup recovery and assignment-result checks can see
+  local owner records.
+
 ## [0.3.0] - 2026-04-27
 
 ### ⚠ Breaking

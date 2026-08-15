@@ -1,5 +1,6 @@
 # Servitor Configuration
 # Copy this to servitor.toml and customize for your environment.
+# See docs/configuration.md for the detailed configuration reference.
 
 [identity]
 # Directory for identity storage (Ed25519 keypair)
@@ -12,11 +13,6 @@ api_url = "http://127.0.0.1:7654"
 subscribe = false
 # Task authorization is controlled by ~/.servitor/authority.toml, not by an
 # inline allowlist in servitor.toml.
-
-# Reserved: parsed by the config schema but not yet enforced by the runtime.
-# [egregore.group]
-# name = "workers"
-# heartbeat_interval_secs = 5
 
 [agent]
 # Task timeout in seconds
@@ -65,6 +61,18 @@ labels = { env = "staging", site = "lab-a" }
 enabled = false
 # Bind address for metrics HTTP server
 bind = "127.0.0.1:9091"
+
+# A2A Clients
+# Each named client exposes a remote A2A agent as an executable tool backend.
+# [a2a.research]
+# url = "http://127.0.0.1:8766"
+# card = "http://127.0.0.1:8766/.well-known/agent.json"
+# timeout_secs = 300
+# poll_interval_ms = 2000
+# auth.type = "bearer"
+# auth.token_env = "RESEARCH_AGENT_TOKEN"
+# scope.allow = ["web_search", "summarize"]
+# scope.block = [] # Parsed; the current A2A pool does not consult this field.
 
 # A2A Server
 # Enables external A2A agents to discover and invoke Servitor's capabilities.
