@@ -16,11 +16,15 @@ use crate::events::sse::SseSource;
 use crate::events::{EventRouter, EventSource};
 use crate::metrics;
 use crate::runtime::{RuntimeContext, RuntimeStats};
-use crate::task::{execute_assigned_task, process_sse_message, TaskCoordinator};
+use crate::task::{
+    execute_assigned_task, process_sse_message, select_recovery_candidates, TaskCoordinator,
+};
 
 use super::daemon_handlers::{
     handle_event_router_task, handle_heartbeat, handle_lifecycle_timeouts,
 };
+
+const RECOVERY_FEED_LIMIT: usize = 1_000;
 
 /// Run servitor as a long-lived daemon with event router.
 pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
@@ -98,6 +102,17 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
         None
     };
     let mut task_coordinator = TaskCoordinator::new(ctx.identity.public_id(), config.task.clone());
+
+    // SSE is a live tail, while task authority lives in the append-only feed.
+    // Rebuild unresolved offered chains before advertising startup readiness.
+    recover_feed_lifecycle(
+        &ctx,
+        config,
+        &mut sse_source,
+        &mut task_coordinator,
+        &capability_set,
+    )
+    .await;
 
     // Spawn A2A server if enabled
     let _a2a_server_handle = if let Some(ref a2a_server_config) = config.a2a_server {
@@ -358,6 +373,98 @@ pub async fn run_daemon(config: &Config, insecure: bool) -> Result<()> {
                 &mut last_heartbeat,
             )
             .await;
+        }
+    }
+}
+
+async fn recover_feed_lifecycle(
+    ctx: &RuntimeContext,
+    config: &Config,
+    sse_source: &mut Option<SseSource>,
+    task_coordinator: &mut TaskCoordinator,
+    capability_set: &HashSet<String>,
+) {
+    let messages = match ctx.egregore.query_messages(None, RECOVERY_FEED_LIMIT).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!(error = %error, "startup task recovery query failed");
+            return;
+        }
+    };
+
+    if messages.len() == RECOVERY_FEED_LIMIT {
+        tracing::warn!(
+            limit = RECOVERY_FEED_LIMIT,
+            "startup task recovery reached its bounded feed window"
+        );
+    }
+
+    let candidates = select_recovery_candidates(&messages, &ctx.identity.public_id());
+    if candidates.is_empty() {
+        tracing::debug!("startup task recovery found no unresolved offered tasks");
+        return;
+    }
+
+    tracing::info!(
+        candidates = candidates.len(),
+        "recovering unresolved task lifecycle records"
+    );
+
+    for candidate in candidates {
+        // Replaying the task through the normal intake path rechecks current
+        // authority/capability policy and rebuilds the coordinator's offer.
+        if let Err(error) = process_sse_message(
+            &candidate.task_message,
+            &ctx.authority,
+            &ctx.identity,
+            capability_set,
+            &ctx.egregore,
+            task_coordinator,
+            config,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %error,
+                task_hash = %candidate.task_message.hash,
+                "failed to restore offered task"
+            );
+            continue;
+        }
+
+        let Some(assignment_message) = candidate.assignment_message else {
+            continue;
+        };
+
+        match process_sse_message(
+            &assignment_message,
+            &ctx.authority,
+            &ctx.identity,
+            capability_set,
+            &ctx.egregore,
+            task_coordinator,
+            config,
+        )
+        .await
+        {
+            Ok(Some(assigned)) => {
+                if let Err(error) = execute_assigned_task(
+                    assigned,
+                    ctx,
+                    config,
+                    sse_source.as_mut(),
+                    task_coordinator,
+                    capability_set,
+                )
+                .await
+                {
+                    tracing::error!(error = %error, "recovered task execution failed");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to restore task assignment");
+            }
         }
     }
 }

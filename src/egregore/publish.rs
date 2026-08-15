@@ -301,7 +301,11 @@ impl EgregoreClient {
         content_type: Option<&str>,
         limit: usize,
     ) -> Result<Vec<crate::egregore::EgregoreMessage>> {
-        let mut url = format!("{}/v1/query?limit={}", self.api_url, limit);
+        // Recovery must see both replicated requestor records and records
+        // published by this local node (offers/results), so include_self is
+        // explicit. `/v1/query` was a pre-2.0 endpoint and is not served by
+        // Egregore's current API.
+        let mut url = format!("{}/v1/feed?include_self=true&limit={}", self.api_url, limit);
         if let Some(ct) = content_type {
             url.push_str(&format!("&content_type={}", ct));
         }
