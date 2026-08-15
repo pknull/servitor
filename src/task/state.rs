@@ -24,6 +24,8 @@ pub struct OfferedTask {
     pub task: Task,
     pub requestor: PublicId,
     pub offered_at: Instant,
+    pub task_message_hash: String,
+    pub offer_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +72,7 @@ impl TaskCoordinator {
         task: Task,
         requestor: PublicId,
         capabilities: Vec<String>,
+        task_message_hash: String,
     ) -> OfferDecision {
         let task_id = task.effective_id().to_string();
         let offer = TaskOffer::new(
@@ -84,6 +87,8 @@ impl TaskCoordinator {
                 task: task.clone(),
                 requestor: requestor.clone(),
                 offered_at: Instant::now(),
+                task_message_hash,
+                offer_hash: None,
             },
         );
         OfferDecision {
@@ -99,6 +104,22 @@ impl TaskCoordinator {
 
     pub fn pending_task(&self, task_id: &str) -> Option<&Task> {
         self.offered.get(task_id).map(|offered| &offered.task)
+    }
+
+    pub fn pending_offer(&self, task_id: &str) -> Option<&OfferedTask> {
+        self.offered.get(task_id)
+    }
+
+    pub fn record_offer_hash(&mut self, task_id: &str, offer_hash: String) -> bool {
+        let Some(offered) = self.offered.get_mut(task_id) else {
+            return false;
+        };
+        offered.offer_hash = Some(offer_hash);
+        true
+    }
+
+    pub fn is_active(&self, task_id: &str) -> bool {
+        self.active.contains_key(task_id)
     }
 
     pub fn apply_assignment(
@@ -211,8 +232,12 @@ mod tests {
         let mut coordinator = TaskCoordinator::new(servitor_id(), TaskConfig::default());
         let task = task();
         let requestor = task.requestor.clone().unwrap();
-        let decision =
-            coordinator.register_offer(task.clone(), requestor.clone(), vec!["docker".to_string()]);
+        let decision = coordinator.register_offer(
+            task.clone(),
+            requestor.clone(),
+            vec!["docker".to_string()],
+            "task-message-hash".to_string(),
+        );
         assert_eq!(decision.offer.task_id, "task-1");
         assert_eq!(decision.requestor, requestor);
         assert!(coordinator.pending_task("task-1").is_some());
@@ -223,7 +248,12 @@ mod tests {
         let mut coordinator = TaskCoordinator::new(servitor_id(), TaskConfig::default());
         let task = task();
         let requestor = task.requestor.clone().unwrap();
-        coordinator.register_offer(task, requestor, vec!["docker".to_string()]);
+        coordinator.register_offer(
+            task,
+            requestor,
+            vec!["docker".to_string()],
+            "task-message-hash".to_string(),
+        );
 
         let assign = TaskAssign {
             msg_type: "task_assign".to_string(),
@@ -251,7 +281,12 @@ mod tests {
         );
         let task = task();
         let requestor = task.requestor.clone().unwrap();
-        coordinator.register_offer(task, requestor, vec!["docker".to_string()]);
+        coordinator.register_offer(
+            task,
+            requestor,
+            vec!["docker".to_string()],
+            "task-message-hash".to_string(),
+        );
 
         let events = coordinator.collect_timeouts(Instant::now() + Duration::from_secs(2));
         assert!(matches!(

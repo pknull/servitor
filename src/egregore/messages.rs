@@ -625,6 +625,73 @@ pub struct TaskAssign {
     pub assigner: Option<PublicId>,
 }
 
+/// Versioned operator command selecting a Servitor-authored task offer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignTaskV1 {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub task_id: String,
+    pub task_hash: String,
+    pub offer_hash: String,
+    pub executor: PublicId,
+    pub assigner: PublicId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor: Option<String>,
+    pub command_id: String,
+    pub attempt_id: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Durable owner decision for an [`AssignTaskV1`] command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignTaskResultV1 {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub command_id: String,
+    pub status: AssignTaskResultStatus,
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_state: Option<String>,
+}
+
+impl AssignTaskResultV1 {
+    pub fn accepted(command: &AssignTaskV1, command_hash: impl Into<String>) -> Self {
+        Self {
+            msg_type: "assign_task_result".to_string(),
+            command_id: command.command_id.clone(),
+            status: AssignTaskResultStatus::Accepted,
+            task_id: command.task_id.clone(),
+            reason: None,
+            lifecycle_hash: Some(command_hash.into()),
+            task_state: Some("assigned".to_string()),
+        }
+    }
+
+    pub fn rejected(command: &AssignTaskV1, reason: impl Into<String>) -> Self {
+        Self {
+            msg_type: "assign_task_result".to_string(),
+            command_id: command.command_id.clone(),
+            status: AssignTaskResultStatus::Rejected,
+            task_id: command.task_id.clone(),
+            reason: Some(reason.into()),
+            lifecycle_hash: None,
+            task_state: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AssignTaskResultStatus {
+    Accepted,
+    Rejected,
+    Superseded,
+}
+
 /// Acknowledgment that execution has started.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskStarted {
@@ -979,6 +1046,22 @@ impl EgregoreMessage {
 
     pub fn as_task_assign(&self) -> Option<TaskAssign> {
         if self.content_type() == Some("task_assign") {
+            serde_json::from_value(self.content.clone()?).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn as_assign_task(&self) -> Option<AssignTaskV1> {
+        if self.content_type() == Some("assign_task") {
+            serde_json::from_value(self.content.clone()?).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn as_assign_task_result(&self) -> Option<AssignTaskResultV1> {
+        if self.content_type() == Some("assign_task_result") {
             serde_json::from_value(self.content.clone()?).ok()
         } else {
             None

@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::a2a::server as a2a_server;
 use crate::config::Config;
-use crate::egregore::{build_environment_snapshots, build_manifest, build_profile};
+use crate::egregore::{build_environment_snapshots, build_manifest, build_profile, TaskAssign};
 use crate::error::Result;
 use crate::events::cron::CronSource;
 use crate::events::mcp::McpNotificationSource;
@@ -17,7 +17,8 @@ use crate::events::{EventRouter, EventSource};
 use crate::metrics;
 use crate::runtime::{RuntimeContext, RuntimeStats};
 use crate::task::{
-    execute_assigned_task, process_sse_message, select_recovery_candidates, TaskCoordinator,
+    execute_assigned_task, maybe_accept_assignment, process_sse_message,
+    select_recovery_candidates, RecoveryAssignment, TaskCoordinator,
 };
 
 use super::daemon_handlers::{
@@ -432,21 +433,48 @@ async fn recover_feed_lifecycle(
             continue;
         }
 
-        let Some(assignment_message) = candidate.assignment_message else {
+        let Some(assignment) = candidate.assignment else {
             continue;
         };
 
-        match process_sse_message(
-            &assignment_message,
-            &ctx.authority,
-            &ctx.identity,
-            capability_set,
-            &ctx.egregore,
-            task_coordinator,
-            config,
-        )
-        .await
-        {
+        let assignment_result = match assignment {
+            RecoveryAssignment::Bare(message) => {
+                process_sse_message(
+                    &message,
+                    &ctx.authority,
+                    &ctx.identity,
+                    capability_set,
+                    &ctx.egregore,
+                    task_coordinator,
+                    config,
+                )
+                .await
+            }
+            RecoveryAssignment::AcceptedTyped(message) => {
+                let Some(assign) = message.as_assign_task() else {
+                    tracing::warn!(hash = %message.hash, "invalid accepted typed assignment");
+                    continue;
+                };
+                let legacy_assignment = TaskAssign {
+                    msg_type: "task_assign".to_string(),
+                    task_id: assign.task_id,
+                    servitor: assign.executor,
+                    assigner: Some(assign.assigner),
+                };
+                maybe_accept_assignment(
+                    legacy_assignment,
+                    &message,
+                    &ctx.egregore,
+                    &ctx.authority,
+                    &ctx.identity,
+                    task_coordinator,
+                    config,
+                )
+                .await
+            }
+        };
+
+        match assignment_result {
             Ok(Some(assigned)) => {
                 if let Err(error) = execute_assigned_task(
                     assigned,

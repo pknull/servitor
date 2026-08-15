@@ -85,7 +85,10 @@ impl SseSource {
                             return None;
                         }
 
-                        if matches!(message.content_type(), Some("task_assign" | "task_ping")) {
+                        if matches!(
+                            message.content_type(),
+                            Some("task_assign" | "assign_task" | "task_ping")
+                        ) {
                             return Some(message);
                         }
                     }

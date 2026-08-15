@@ -4,11 +4,13 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::egregore::messages::{
-    AuthDenied, EnvironmentSnapshot, Notification, ServitorManifest, ServitorProfile, TaskClaim,
-    TaskFailed, TaskOffer, TaskOfferWithdraw, TaskResult, TaskStarted, TaskStatusMessage,
-    TraceSpan,
+    AssignTaskResultV1, AuthDenied, EnvironmentSnapshot, Notification, ServitorManifest,
+    ServitorProfile, TaskClaim, TaskFailed, TaskOffer, TaskOfferWithdraw, TaskResult, TaskStarted,
+    TaskStatusMessage, TraceSpan,
 };
 use crate::error::{Result, ServitorError};
+
+const FEED_PAGE_LIMIT: usize = 200;
 
 /// Client for publishing messages to egregore.
 #[derive(Clone)]
@@ -209,6 +211,26 @@ impl EgregoreClient {
         Ok(response.hash)
     }
 
+    /// Publish the Servitor-owned durable result of a typed assignment command.
+    pub async fn publish_assign_task_result(&self, result: &AssignTaskResultV1) -> Result<String> {
+        let status = match result.status {
+            crate::egregore::AssignTaskResultStatus::Accepted => "accepted",
+            crate::egregore::AssignTaskResultStatus::Rejected => "rejected",
+            crate::egregore::AssignTaskResultStatus::Superseded => "superseded",
+        };
+        let response = self
+            .publish(result, &["assign_task_result", status], None, None)
+            .await?;
+        tracing::info!(
+            hash = %response.hash,
+            command_id = %result.command_id,
+            task_id = %result.task_id,
+            status,
+            "published typed assignment result"
+        );
+        Ok(response.hash)
+    }
+
     /// Publish an authorization denial event.
     pub async fn publish_auth_denied(&self, denial: &AuthDenied) -> Result<String> {
         let gate_tag = match denial.gate {
@@ -305,34 +327,49 @@ impl EgregoreClient {
         // published by this local node (offers/results), so include_self is
         // explicit. `/v1/query` was a pre-2.0 endpoint and is not served by
         // Egregore's current API.
-        let mut url = format!("{}/v1/feed?include_self=true&limit={}", self.api_url, limit);
-        if let Some(ct) = content_type {
-            url.push_str(&format!("&content_type={}", ct));
+        let mut messages = Vec::with_capacity(limit.min(FEED_PAGE_LIMIT));
+        while messages.len() < limit {
+            let page_limit = (limit - messages.len()).min(FEED_PAGE_LIMIT);
+            let mut url = format!(
+                "{}/v1/feed?include_self=true&limit={}&offset={}",
+                self.api_url,
+                page_limit,
+                messages.len()
+            );
+            if let Some(ct) = content_type {
+                url.push_str(&format!("&content_type={}", ct));
+            }
+
+            let response =
+                self.http
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| ServitorError::Egregore {
+                        reason: format!("query request failed: {}", e),
+                    })?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(ServitorError::Egregore {
+                    reason: format!("query failed with {}: {}", status, body),
+                });
+            }
+
+            let envelope: ApiResponse<Vec<crate::egregore::EgregoreMessage>> =
+                response.json().await.map_err(|e| ServitorError::Egregore {
+                    reason: format!("failed to parse query response: {}", e),
+                })?;
+            let mut page = envelope.data.unwrap_or_default();
+            let page_len = page.len();
+            messages.append(&mut page);
+            if page_len < page_limit {
+                break;
+            }
         }
 
-        let response = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ServitorError::Egregore {
-                reason: format!("query request failed: {}", e),
-            })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ServitorError::Egregore {
-                reason: format!("query failed with {}: {}", status, body),
-            });
-        }
-
-        let envelope: ApiResponse<Vec<crate::egregore::EgregoreMessage>> =
-            response.json().await.map_err(|e| ServitorError::Egregore {
-                reason: format!("failed to parse query response: {}", e),
-            })?;
-
-        Ok(envelope.data.unwrap_or_default())
+        Ok(messages)
     }
 }
 
