@@ -1,0 +1,49 @@
+{
+  "adopted": {
+    "AGENTS.md": {
+      "repairable": false,
+      "sha256": "09ced281ec3c8c5b1ac1ca4b0e82f82a6f5e9ab90b43fa2739ee24a56b3b5f13"
+    },
+    "CLAUDE.md": {
+      "repairable": false,
+      "sha256": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+    }
+  },
+  "git_mode": "existing",
+  "managed": {
+    "gitignore_block": [
+      "memory-local/",
+      "Work/worktrees/",
+      "/Work/session-state/",
+      "/Work/memory-migration/",
+      "!.asha/",
+      ".asha/*",
+      "!.asha/workspace.json",
+      "!.asha/workspace-init.json",
+      ".asha/cache/",
+      ".asha/state/",
+      "!Memory/",
+      "Memory/*",
+      "!Memory/*.md",
+      "!knowledge/",
+      "!knowledge/**"
+    ],
+    "knowledge_root": "knowledge"
+  },
+  "mutable": [
+    ".asha/workspace.json",
+    "Memory/activeContext.md",
+    "Memory/decisions.md",
+    "memory-local/.gitkeep"
+  ],
+  "owned": {
+    ".github/copilot-instructions.md": {
+      "kind": "instruction",
+      "repairable": true,
+      "sha256": "8c3015840f499a45b6ab6849b9a155e7f251f6006ba07279938e2423667f6230"
+    }
+  },
+  "owner": "asha-workspace-init",
+  "shared_git_root": ".",
+  "version": 1
+}

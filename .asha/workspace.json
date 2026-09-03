@@ -1,0 +1,15 @@
+{
+  "bootstrap": {
+    "git_mode": "existing"
+  },
+  "memory": {
+    "operational_root": "Memory",
+    "personal_root": "memory-local",
+    "promotion_mode": "pull-request",
+    "shared_git_root": ".",
+    "shared_root": "knowledge"
+  },
+  "repositories": [],
+  "version": 1,
+  "workspace_name": "servitor"
+}

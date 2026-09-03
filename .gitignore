@@ -25,3 +25,21 @@ Work/
 
 # asha issue-loop per-issue worktrees (never committed)
 .asha/worktrees/
+
+# >>> asha workspace private roots >>>
+memory-local/
+Work/worktrees/
+/Work/session-state/
+/Work/memory-migration/
+!.asha/
+.asha/*
+!.asha/workspace.json
+!.asha/workspace-init.json
+.asha/cache/
+.asha/state/
+!Memory/
+Memory/*
+!Memory/*.md
+!knowledge/
+!knowledge/**
+# <<< asha workspace private roots <<<
