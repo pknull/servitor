@@ -434,6 +434,14 @@ skills = ["docker:inspect_*"]
             skill: "shell:execute".to_string(),
         });
         assert!(!result.allowed);
+
+        // Nested-namespace negative: the docker:inspect_* grant must not
+        // authorize a deeper, more privileged skill segment.
+        let result = auth.authorize(&AuthRequest {
+            person: PersonId::Egregore("@AutomationKey.ed25519".to_string()),
+            skill: "docker:inspect_container:privileged".to_string(),
+        });
+        assert!(!result.allowed);
     }
 
     #[test]
@@ -461,6 +469,11 @@ skills = ["docker:inspect_*"]
         assert!(result.allowed);
 
         let result = auth.authorize_skill("automation", "shell:execute");
+        assert!(!result.allowed);
+
+        // Nested-namespace negative: the docker:inspect_* grant must not
+        // authorize a deeper, more privileged skill segment.
+        let result = auth.authorize_skill("automation", "docker:inspect_container:privileged");
         assert!(!result.allowed);
     }
 

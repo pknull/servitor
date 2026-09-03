@@ -128,10 +128,14 @@ pub fn skill_pattern_matches(pattern: &str, skill: &str) -> bool {
     }
 
     // Check for underscore wildcards within a segment
-    // e.g., "docker:container_*" should match "docker:container_list"
+    // e.g., "docker:container_*" should match "docker:container_list", but
+    // must not match a deeper skill like "docker:container_exec:privileged".
+    // The prefix match alone doesn't enforce a segment boundary, so we also
+    // require the ':'-segment count to match exactly, mirroring the rule
+    // pattern_matches() applies for its trailing-wildcard case.
     if pattern.contains('_') && pattern.ends_with('*') {
         let prefix = pattern.trim_end_matches('*');
-        if skill.starts_with(prefix) {
+        if skill.starts_with(prefix) && pattern.split(':').count() == skill.split(':').count() {
             return true;
         }
     }
@@ -197,6 +201,29 @@ mod tests {
             "docker:container_*",
             "docker:image_list"
         ));
+
+        // Nested-namespace negative: a grant of "docker:container_*" must not
+        // reach into a deeper skill segment such as ":privileged".
+        assert!(!skill_pattern_matches(
+            "docker:container_*",
+            "docker:container_exec:privileged"
+        ));
+    }
+
+    #[test]
+    fn test_skill_pattern_underscore_segment_boundary() {
+        // Positive: same segment depth as the pattern is still allowed.
+        assert!(skill_pattern_matches(
+            "docker:inspect_*",
+            "docker:inspect_container"
+        ));
+
+        // Negative: a deeper segment must not be authorized by the
+        // underscore-glob prefix match alone.
+        assert!(!skill_pattern_matches(
+            "docker:inspect_*",
+            "docker:inspect_container:privileged"
+        ));
     }
 
     #[test]
@@ -209,5 +236,9 @@ mod tests {
         assert!(perm.matches("shell:execute"));
         assert!(perm.matches("docker:inspect_container"));
         assert!(!perm.matches("dangerous:tool"));
+
+        // Nested-namespace negative: the "docker:inspect_*" grant must not
+        // authorize a deeper, more privileged skill segment.
+        assert!(!perm.matches("docker:inspect_container:privileged"));
     }
 }
