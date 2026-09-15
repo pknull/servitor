@@ -16,9 +16,8 @@ servitor.toml
 # Identity (never commit)
 .servitor/
 
-# Assistant tooling state — managed at Thallus umbrella, never per-subproject.
+# Harness-local state (Memory v2 pair is tracked; see managed block below)
 .claude/
-Memory/
 
 # Operator scratch (run reports, markers) — machine-local, never committed.
 Work/
