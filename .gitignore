@@ -16,11 +16,10 @@ servitor.toml
 # Identity (never commit)
 .servitor/
 
-# Harness-local state (Memory v2 pair is tracked; see managed block below)
+# Harness-local state
 .claude/
 
 # Operator scratch (run reports, markers) — machine-local, never committed.
-Work/
 
 # asha issue-loop per-issue worktrees (never committed)
 .asha/worktrees/
@@ -30,15 +29,11 @@ memory-local/
 Work/worktrees/
 /Work/session-state/
 /Work/memory-migration/
-!.asha/
 .asha/*
-!.asha/workspace.json
-!.asha/workspace-init.json
 .asha/cache/
 .asha/state/
-!Memory/
-Memory/*
-!Memory/*.md
-!knowledge/
-!knowledge/**
+Memory/
+Work/
+knowledge/
+.asha/workspace*.json
 # <<< asha workspace private roots <<<

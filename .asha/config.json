@@ -3,5 +3,6 @@
   "initialized": true,
   "memory_version": 2,
   "project": "servitor",
-  "project_id": "f540deb5-381b-4a8f-b6c1-0891679ccc14"
+  "project_id": "f540deb5-381b-4a8f-b6c1-0891679ccc14",
+  "memory_visibility": "private"
 }
