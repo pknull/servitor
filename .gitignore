@@ -29,7 +29,9 @@ memory-local/
 Work/worktrees/
 /Work/session-state/
 /Work/memory-migration/
+!.asha/
 .asha/*
+!.asha/config.json
 .asha/cache/
 .asha/state/
 Memory/
