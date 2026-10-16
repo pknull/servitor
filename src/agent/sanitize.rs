@@ -12,6 +12,7 @@
 
 use regex::{Captures, Regex};
 use serde_json::{Map, Value};
+use std::ops::Range;
 use std::sync::OnceLock;
 
 /// Maximum length for a single string value before truncation.
@@ -43,6 +44,10 @@ const MAX_ARRAY_SIZE: usize = 100;
 
 /// Redaction marker for sensitive fields.
 const REDACTED: &str = "[REDACTED]";
+
+/// Sibling fields that name the program an argument list runs under, as in
+/// `{"command": "mysql", "args": ["-phunter2"]}`.
+const COMMAND_FIELDS: &[&str] = &["command", "cmd", "program", "executable"];
 
 /// Patterns that indicate sensitive field names (case-insensitive matching).
 /// NOTE: Keep aligned with egregore/src/telemetry.rs SENSITIVE_PATTERNS.
@@ -82,7 +87,7 @@ pub fn sanitize_arguments(arguments: &Value) -> String {
 /// Same rules as [`sanitize_arguments`]; use this when the result is
 /// embedded in another JSON document.
 pub fn sanitize_argument_value(arguments: &Value) -> Value {
-    sanitize_value(arguments, None, 0)
+    sanitize_value(arguments, None, 0, None)
 }
 
 /// Build the `arguments` attribute for a tool-call trace span.
@@ -121,7 +126,13 @@ pub fn span_arguments_attribute(arguments: &Value) -> Value {
 /// * `value` - The value to sanitize
 /// * `field_name` - The field name if this value is part of an object (for sensitivity checking)
 /// * `depth` - Current recursion depth (to prevent stack overflow on deeply nested structures)
-fn sanitize_value(value: &Value, field_name: Option<&str>, depth: usize) -> Value {
+/// * `command` - A sibling field naming the program an argument list runs under
+fn sanitize_value(
+    value: &Value,
+    field_name: Option<&str>,
+    depth: usize,
+    command: Option<&str>,
+) -> Value {
     // Prevent stack overflow on deeply nested structures
     if depth > MAX_DEPTH {
         return Value::String("[TRUNCATED: max depth exceeded]".to_string());
@@ -136,9 +147,15 @@ fn sanitize_value(value: &Value, field_name: Option<&str>, depth: usize) -> Valu
 
     match value {
         Value::Object(map) => {
+            let sibling_command = COMMAND_FIELDS
+                .iter()
+                .find_map(|field| map.get(*field).and_then(Value::as_str));
             let sanitized: Map<String, Value> = map
                 .iter()
-                .map(|(k, v)| (k.clone(), sanitize_value(v, Some(k), depth + 1)))
+                .map(|(k, v)| {
+                    let value = sanitize_value(v, Some(k), depth + 1, sibling_command);
+                    (k.clone(), value)
+                })
                 .collect();
             Value::Object(sanitized)
         }
@@ -146,18 +163,27 @@ fn sanitize_value(value: &Value, field_name: Option<&str>, depth: usize) -> Valu
             let total_len = arr.len();
             let truncated = total_len > MAX_ARRAY_SIZE;
             let items_to_process = if truncated { MAX_ARRAY_SIZE } else { total_len };
+            let items = &arr[..items_to_process];
 
             // A secret-named flag element ("--password") redacts the element
             // after it, which holds its value in exec-style argument lists.
+            // Short-flag passwords ("-p", "hunter2") depend on the command,
+            // so the list is scanned as one command line.
+            let flag_secrets = argv_short_flag_secrets(items, command);
             let mut sanitized: Vec<Value> = Vec::with_capacity(items_to_process + 1);
             let mut redact_next = false;
-            for v in arr.iter().take(items_to_process) {
+            for (v, secrets) in items.iter().zip(flag_secrets) {
                 let is_flag_value = redact_next && !v.as_str().is_some_and(|s| s.starts_with('-'));
                 redact_next = v.as_str().is_some_and(is_secret_flag);
                 if is_flag_value {
                     sanitized.push(Value::String(REDACTED.to_string()));
+                } else if let Some(s) = v
+                    .as_str()
+                    .filter(|_| !secrets.is_empty() && depth < MAX_DEPTH)
+                {
+                    sanitized.push(sanitize_string(&redact_ranges(s, &secrets), s.len()));
                 } else {
-                    sanitized.push(sanitize_value(v, None, depth + 1));
+                    sanitized.push(sanitize_value(v, None, depth + 1, None));
                 }
             }
 
@@ -169,27 +195,29 @@ fn sanitize_value(value: &Value, field_name: Option<&str>, depth: usize) -> Valu
             }
             Value::Array(sanitized)
         }
-        Value::String(s) => {
-            // Scan the whole value before truncating. A secret straddling the
-            // cut would otherwise leave a prefix too short to recognize, and
-            // redactions can pull text from anywhere in the value into the
-            // kept prefix, so no shorter scan window is safe. Every pattern
-            // is linear time, so the scan stays linear in the value's length.
-            let scanned = redact_credential_values(s);
-            if scanned.len() > MAX_VALUE_LENGTH {
-                let end = scanned.floor_char_boundary(MAX_VALUE_LENGTH);
-                let truncated = format!(
-                    "{}... [truncated, {} bytes total]",
-                    &scanned[..end],
-                    s.len()
-                );
-                Value::String(truncated)
-            } else {
-                Value::String(scanned)
-            }
-        }
+        Value::String(s) => sanitize_string(s, s.len()),
         // Numbers, booleans, and nulls pass through unchanged
         _ => value.clone(),
+    }
+}
+
+/// Scan a string value for credentials, then truncate it to the value cap.
+/// `original_len` is the length reported in the truncation marker.
+fn sanitize_string(s: &str, original_len: usize) -> Value {
+    // Scan the whole value before truncating. A secret straddling the cut
+    // would otherwise leave a prefix too short to recognize, and redactions
+    // can pull text from anywhere in the value into the kept prefix, so no
+    // shorter scan window is safe. Every pattern is linear time, so the scan
+    // stays linear in the value's length.
+    let scanned = redact_credential_values(s);
+    if scanned.len() > MAX_VALUE_LENGTH {
+        let end = scanned.floor_char_boundary(MAX_VALUE_LENGTH);
+        Value::String(format!(
+            "{}... [truncated, {original_len} bytes total]",
+            &scanned[..end]
+        ))
+    } else {
+        Value::String(scanned)
     }
 }
 
@@ -298,9 +326,10 @@ fn is_sensitive_field(name: &str) -> bool {
 /// 4. `Bearer <token>`
 /// 5. Passwords in URL userinfo (`scheme://user:password@host`)
 /// 6. `key`, `sig` and `code` query parameters
-/// 7. `name=value` / `name: value` forms whose name carries a secret word
-/// 8. `--flag value` pairs whose flag carries a secret word
-/// 9. High-entropy tokens (see [`randomness`])
+/// 7. Short-flag passwords of known commands (see [`short_flag_rules`])
+/// 8. `name=value` / `name: value` forms whose name carries a secret word
+/// 9. `--flag value` pairs whose flag carries a secret word
+/// 10. High-entropy tokens (see [`randomness`])
 ///
 /// Over-redaction is deliberate: hex digests, UUIDs and long identifiers
 /// mixing case and digits may read as random and be redacted.
@@ -309,11 +338,19 @@ pub fn redact_credential_values(text: &str) -> String {
     for (pattern, replacement) in fixed_credential_patterns() {
         out = pattern.replace_all(&out, *replacement).into_owned();
     }
+    out = redact_ranges(&out, &short_flag_secret_ranges(&out));
     out = secret_assignment_pattern()
         .replace_all(&out, redact_keeping_quotes)
         .into_owned();
     out = secret_flag_pattern()
-        .replace_all(&out, redact_keeping_quotes)
+        .replace_all(&out, |caps: &Captures| {
+            // `--password-stdin` is a switch; the word after it is no value.
+            if caps[1].trim_end().to_ascii_lowercase().ends_with("-stdin") {
+                caps[0].to_string()
+            } else {
+                redact_keeping_quotes(caps)
+            }
+        })
         .into_owned();
     redact_random_tokens(&out)
 }
@@ -373,7 +410,8 @@ fn secret_flag_pattern() -> &'static Regex {
     })
 }
 
-/// Whether a whole argument is a secret-named flag, such as `--password`.
+/// Whether a whole argument is a secret-named flag taking a value, such as
+/// `--password` (but not the `--password-stdin` switch).
 fn is_secret_flag(arg: &str) -> bool {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN
@@ -381,6 +419,191 @@ fn is_secret_flag(arg: &str) -> bool {
             Regex::new(&format!(r"(?i)^--?[a-z0-9_-]*{SECRET_NAME}[a-z0-9_-]*$")).unwrap()
         })
         .is_match(arg)
+        && !arg.to_ascii_lowercase().ends_with("-stdin")
+}
+
+/// What a short flag's value holds.
+#[derive(Clone, Copy)]
+enum FlagSecret {
+    /// The whole value is a password.
+    Password,
+    /// `user:password`; only the part after the first `:` is secret.
+    UserPassword,
+}
+
+/// Commands whose short flags carry passwords, where the same flag means
+/// something else to other tools (`-p` is a port to `ssh` and `docker run`).
+///
+/// Each rule is a regex whose group 1 holds one invocation's arguments, up
+/// to a shell separator outside quotes; a regex run over those arguments
+/// whose group 1 is a flag value; and what that value holds. The command may
+/// appear anywhere, so `docker exec db mysql …` and `sh -c 'mysql …'` match.
+fn short_flag_rules() -> &'static [(Regex, Regex, FlagSecret)] {
+    static RULES: OnceLock<Vec<(Regex, Regex, FlagSecret)>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let value = r#"("[^"]*"|'[^']*'|\S+)"#;
+        let args = r#"(\s(?:"[^"]*"|'[^']*'|[^;|&\n])*)"#;
+        [
+            // MySQL and MariaDB clients: `-pPASSWORD`, attached only, since
+            // `-p name` prompts for the password and names a database.
+            (
+                format!(r"\b(?:mysql\w*|mariadb[\w-]*){args}"),
+                format!(r"\s-p{value}"),
+                FlagSecret::Password,
+            ),
+            // Registry logins: `-p PASSWORD`, `-pPASSWORD`, `-p=PASSWORD`.
+            (
+                format!(
+                    r"\b(?:docker|podman|nerdctl|buildah|skopeo)(?:\s+-[\w-]+(?:=\S+|\s+[^-\s]\S*)?)*\s+login{args}"
+                ),
+                format!(r"\s-p(?:=|[ \t]+)?{value}"),
+                FlagSecret::Password,
+            ),
+            // sshpass: only its own options, before the command it wraps,
+            // whose `-p` may be a port.
+            (
+                r#"\bsshpass((?:\s+(?:-[fdP][ \t]*(?:"[^"]*"|'[^']*'|\S+)|-e\S*|-[hvV]+))*\s+-p[ \t]*(?:"[^"]*"|'[^']*'|\S+))"#
+                    .to_string(),
+                format!(r"\s-p[ \t]*{value}"),
+                FlagSecret::Password,
+            ),
+            // curl: `-u`/`--user` and `-U`/`--proxy-user` take
+            // `user:password`, also at the end of a short-flag cluster.
+            (
+                format!(r"\bcurl{args}"),
+                format!(r"\s(?:-[a-zA-Z]*[uU][ \t]*|--(?:proxy-)?user(?:=|[ \t]+)){value}"),
+                FlagSecret::UserPassword,
+            ),
+        ]
+        .into_iter()
+        .map(|(command, flag, secret)| {
+            (
+                Regex::new(&command).unwrap(),
+                Regex::new(&flag).unwrap(),
+                secret,
+            )
+        })
+        .collect()
+    })
+}
+
+/// Sorted, disjoint byte ranges of short-flag passwords in `text`.
+fn short_flag_secret_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    for (command, flag, secret) in short_flag_rules() {
+        for invocation in command.captures_iter(text) {
+            let args = invocation.get(1).unwrap();
+            for caps in flag.captures_iter(args.as_str()) {
+                let value = caps.get(1).unwrap().range();
+                let value =
+                    without_quotes(text, args.start() + value.start..args.start() + value.end);
+                let start = match secret {
+                    FlagSecret::Password => value.start,
+                    FlagSecret::UserPassword => match text[value.clone()].find(':') {
+                        Some(colon) => value.start + colon + 1,
+                        None => continue,
+                    },
+                };
+                if start < value.end {
+                    ranges.push(start..value.end);
+                }
+            }
+        }
+    }
+    merge_ranges(ranges)
+}
+
+/// Short-flag password ranges for each element of an exec-style argument
+/// list, found by scanning the elements joined as one command line after
+/// `command`, the program a sibling field names.
+///
+/// Inside an element, whitespace, quotes and shell separators are literal,
+/// so the joined line carries one `_` per byte of each; that keeps every
+/// element one token and every byte offset unchanged.
+fn argv_short_flag_secrets(items: &[Value], command: Option<&str>) -> Vec<Vec<Range<usize>>> {
+    let mut line = command.unwrap_or_default().to_string();
+    let mut spans = Vec::with_capacity(items.len());
+    for item in items {
+        line.push(' ');
+        let start = line.len();
+        match item.as_str().filter(|s| !s.is_empty()) {
+            Some(s) => {
+                for c in s.chars() {
+                    if c.is_whitespace() || matches!(c, '"' | '\'' | ';' | '|' | '&') {
+                        line.extend(std::iter::repeat_n('_', c.len_utf8()));
+                    } else {
+                        line.push(c);
+                    }
+                }
+                spans.push(Some(start..line.len()));
+            }
+            None => {
+                line.push('_');
+                spans.push(None);
+            }
+        }
+    }
+
+    let secrets = short_flag_secret_ranges(&line);
+    spans
+        .into_iter()
+        .map(|span| {
+            let Some(span) = span else {
+                return Vec::new();
+            };
+            secrets
+                .iter()
+                .filter_map(|secret| {
+                    let start = secret.start.max(span.start);
+                    let end = secret.end.min(span.end);
+                    (start < end).then(|| start - span.start..end - span.start)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `range` without its surrounding quotes, when it is a quoted string.
+fn without_quotes(text: &str, range: Range<usize>) -> Range<usize> {
+    let bytes = &text.as_bytes()[range.clone()];
+    match (bytes.first(), bytes.last()) {
+        (Some(&first @ (b'"' | b'\'')), Some(&last)) if bytes.len() >= 2 && first == last => {
+            range.start + 1..range.end - 1
+        }
+        _ => range,
+    }
+}
+
+/// Sort ranges and merge any that overlap or touch.
+fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// Replace each of the sorted, disjoint `ranges` of `text` with the marker.
+/// A range that splits a character widens to cover it.
+fn redact_ranges(text: &str, ranges: &[Range<usize>]) -> String {
+    if ranges.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for range in ranges {
+        let start = text.floor_char_boundary(range.start).max(last);
+        let end = text.ceil_char_boundary(range.end).max(start);
+        out.push_str(&text[last..start]);
+        out.push_str(REDACTED);
+        last = end;
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 /// Replace capture group 2 with the redaction marker, keeping its quotes.
@@ -427,19 +650,7 @@ fn redact_random_tokens(text: &str) -> String {
             ranges.push(run.range());
         }
     }
-    if ranges.is_empty() {
-        return text.to_string();
-    }
-
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for range in ranges {
-        out.push_str(&text[last..range.start]);
-        out.push_str(REDACTED);
-        last = range.end;
-    }
-    out.push_str(&text[last..]);
-    out
+    redact_ranges(text, &ranges)
 }
 
 /// How strongly a token reads as randomly generated.
@@ -864,6 +1075,176 @@ mod tests {
         // A following flag is not a value.
         let out = scan_command("tool --no-password --verbose");
         assert_eq!(out, "tool --no-password --verbose");
+    }
+
+    #[test]
+    fn value_scan_redacts_short_flag_passwords_for_known_commands() {
+        let cases = [
+            (
+                "curl -u admin:hunter2 https://api.example.com",
+                "curl -u admin:[REDACTED] https://api.example.com",
+            ),
+            (
+                "curl --user admin:hunter2 https://api.example.com",
+                "curl --user admin:[REDACTED] https://api.example.com",
+            ),
+            (
+                "curl --user=admin:hunter2 https://api.example.com",
+                "curl --user=admin:[REDACTED] https://api.example.com",
+            ),
+            (
+                "curl -uadmin:hunter2 https://api.example.com",
+                "curl -uadmin:[REDACTED] https://api.example.com",
+            ),
+            (
+                "curl -fsSu 'admin:hunter 2' https://api.example.com",
+                "curl -fsSu 'admin:[REDACTED]' https://api.example.com",
+            ),
+            (
+                "curl -U proxy:hunter2 -x http://proxy:3128 https://example.com",
+                "curl -U proxy:[REDACTED] -x http://proxy:3128 https://example.com",
+            ),
+            (
+                "curl --proxy-user proxy:hunter2 https://example.com",
+                "curl --proxy-user proxy:[REDACTED] https://example.com",
+            ),
+            (
+                "mysql -h db.internal -uroot -phunter2 app",
+                "mysql -h db.internal -uroot -p[REDACTED] app",
+            ),
+            (
+                "mysqldump -uroot -p'hunter 2' app > app.sql",
+                "mysqldump -uroot -p'[REDACTED]' app > app.sql",
+            ),
+            (
+                "docker exec db mysql -uroot -phunter2 -e 'select 1; select 2'",
+                "docker exec db mysql -uroot -p[REDACTED] -e 'select 1; select 2'",
+            ),
+            (
+                "ssh db.internal 'mysqladmin -phunter2 status'",
+                "ssh db.internal 'mysqladmin -p[REDACTED] status'",
+            ),
+            (
+                "sshpass -p hunter2 ssh -p 22 deploy@host",
+                "sshpass -p [REDACTED] ssh -p 22 deploy@host",
+            ),
+            (
+                "sshpass -phunter2 scp -P 2222 file host:/tmp",
+                "sshpass -p[REDACTED] scp -P 2222 file host:/tmp",
+            ),
+            (
+                "sshpass -v -p 'hunter 2' ssh host",
+                "sshpass -v -p '[REDACTED]' ssh host",
+            ),
+            (
+                "docker login -u deploy -p hunter2 ghcr.io",
+                "docker login -u deploy -p [REDACTED] ghcr.io",
+            ),
+            (
+                "docker login registry.example.com -phunter2",
+                "docker login registry.example.com -p[REDACTED]",
+            ),
+            (
+                "docker --config /tmp/cfg login -p=hunter2 ghcr.io",
+                "docker --config /tmp/cfg login -p=[REDACTED] ghcr.io",
+            ),
+            (
+                "podman login -u deploy -p hunter2 quay.io",
+                "podman login -u deploy -p [REDACTED] quay.io",
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(scan_command(text), expected, "input: {text}");
+        }
+    }
+
+    #[test]
+    fn value_scan_keeps_short_flags_that_are_not_passwords() {
+        let commands = [
+            // -p is a port, a prompt, or a different tool's flag here.
+            "ssh -p 22 deploy@host",
+            "scp -P 2222 file host:/tmp",
+            "docker run -d --name web -p 8080:80 nginx:1.27",
+            "docker run --rm -p 127.0.0.1:5432:5432 postgres:16",
+            "mysql -h db.internal -P 3306 -u app -p appdb",
+            "mkdir -p /srv/data && ls -pa /srv",
+            // No password given: curl and docker prompt or read stdin.
+            "curl -u admin https://api.example.com",
+            "curl --user-agent 'probe:1.0' https://example.com",
+            "docker login --username deploy --password-stdin ghcr.io",
+            "cat token.txt | docker login -u deploy --password-stdin ghcr.io",
+        ];
+        for command in commands {
+            assert_eq!(scan_command(command), command, "ordinary command altered");
+        }
+    }
+
+    #[test]
+    fn value_scan_redacts_short_flag_passwords_in_argument_arrays() {
+        let cases = [
+            (
+                json!({ "argv": ["mysql", "-uroot", "-phunter2", "app"] }),
+                json!({ "argv": ["mysql", "-uroot", "-p[REDACTED]", "app"] }),
+            ),
+            (
+                json!({ "argv": ["sshpass", "-p", "hunter 2", "ssh", "-p", "22", "host"] }),
+                json!({ "argv": ["sshpass", "-p", REDACTED, "ssh", "-p", "22", "host"] }),
+            ),
+            (
+                json!({ "argv": ["curl", "-u", "admin:hunter2", "https://example.com"] }),
+                json!({ "argv": ["curl", "-u", "admin:[REDACTED]", "https://example.com"] }),
+            ),
+            (
+                json!({ "command": "docker", "args": ["login", "-u", "me", "-p", "hunter2"] }),
+                json!({ "command": "docker", "args": ["login", "-u", "me", "-p", REDACTED] }),
+            ),
+            (
+                json!({ "command": "/usr/bin/mysql", "args": ["-phunter2"] }),
+                json!({ "command": "/usr/bin/mysql", "args": ["-p[REDACTED]"] }),
+            ),
+            (
+                json!({ "argv": ["docker", "login", "--password-stdin", "ghcr.io"] }),
+                json!({ "argv": ["docker", "login", "--password-stdin", "ghcr.io"] }),
+            ),
+            (
+                json!({ "argv": ["ssh", "-p", "22", "host"] }),
+                json!({ "argv": ["ssh", "-p", "22", "host"] }),
+            ),
+        ];
+        for (args, expected) in cases {
+            assert_eq!(sanitize_argument_value(&args), expected, "input: {args}");
+        }
+    }
+
+    #[test]
+    fn value_scan_maps_argument_array_secrets_across_multibyte_whitespace() {
+        // A multibyte space inside an element must not shift the offsets
+        // mapped back from the joined command line.
+        let args = json!({ "argv": ["sshpass", "-p", "hun\u{3000}ter\u{a0}2", "ssh", "host"] });
+        assert_eq!(
+            sanitize_argument_value(&args),
+            json!({ "argv": ["sshpass", "-p", REDACTED, "ssh", "host"] })
+        );
+        let args = json!({ "argv": ["mysql", "-e", "select\u{3000}1", "-phunter2"] });
+        assert_eq!(
+            sanitize_argument_value(&args),
+            json!({ "argv": ["mysql", "-e", "select\u{3000}1", "-p[REDACTED]"] })
+        );
+    }
+
+    #[test]
+    fn argument_array_elements_past_max_depth_are_truncated() {
+        // Elements with a short-flag secret obey the depth limit like the rest.
+        let mut nested = json!(["mysql", "-phunter2"]);
+        for _ in 0..MAX_DEPTH {
+            nested = json!({ "n": nested });
+        }
+        let mut out = &sanitize_argument_value(&nested);
+        for _ in 0..MAX_DEPTH {
+            out = &out["n"];
+        }
+        let marker = "[TRUNCATED: max depth exceeded]";
+        assert_eq!(out, &json!([marker, marker]));
     }
 
     #[test]
