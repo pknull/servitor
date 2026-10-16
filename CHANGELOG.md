@@ -13,6 +13,15 @@ All notable changes to servitor are documented here. The format follows [Keep a 
   operator assignments fail closed, durably publishes `AssignTaskResultV1`
   before execution, and suppresses replayed `command_id` mutations using
   recorded owner results.
+- `agent.trace_span_arguments` (default `false`) attaches each tool call's
+  sanitized arguments to its tool `trace_span` as an `arguments` attribute,
+  capped at 4KB serialized. It has no effect unless `publish_trace_spans` is
+  also enabled; with it off, tool spans are unchanged.
+- Argument sanitization scans string values for credential-shaped content in
+  addition to field names: authorization headers, bearer tokens, URL
+  passwords, secret query parameters, `name=value` and `--flag value`
+  secrets, known token formats, PEM private keys, and high-entropy tokens.
+  Values are scanned before the 1KB truncation.
 
 ### Changed
 
@@ -20,6 +29,8 @@ All notable changes to servitor are documented here. The format follows [Keep a 
   the offer's signing author and fails closed unless assignment trust is
   explicitly configured; this does not add a Familiar-side execution path to
   Servitor.
+- `environment_snapshot` probe arguments pass through the same value scan, so
+  they may now redact more than before (never less).
 
 ### Fixed
 

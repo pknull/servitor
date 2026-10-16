@@ -2,13 +2,42 @@
 //!
 //! Implements security-conscious sanitization rules from component-model.md:
 //! - Redacts fields matching sensitive patterns: *key*, *secret*, *password*, *token*, *credential*, *api_key*
+//! - Scans string values for credential-shaped content (authorization headers,
+//!   `key=value` secret forms, known token formats, high-entropy tokens)
 //! - Truncates values longer than 1KB to prevent log flooding
-//! - Returns JSON string suitable for span attributes
+//! - Caps the serialized arguments attribute of one span at 4KB
+//!
+//! Spans enter the append-only, replicated feed, so a missed secret is
+//! permanent: every rule here prefers over-redaction to a miss.
 
+use regex::{Captures, Regex};
 use serde_json::{Map, Value};
+use std::sync::OnceLock;
 
 /// Maximum length for a single string value before truncation.
 const MAX_VALUE_LENGTH: usize = 1024;
+
+/// Bytes scanned past the truncation point, so a secret that starts before
+/// the cut is seen whole (an RSA 4096 private key PEM is about 3.3KB).
+const SCAN_MARGIN: usize = 4096;
+
+/// Maximum serialized size, in bytes, of the arguments attribute on one span.
+pub const MAX_SPAN_ARGUMENTS_BYTES: usize = 4096;
+
+/// Minimum alphanumeric length before a token is judged by the entropy check.
+const MIN_RANDOM_TOKEN_ALNUM: usize = 20;
+
+/// Character-class transition rate at or above which a token reads as random.
+const RANDOM_TRANSITION_RATE: f64 = 0.25;
+
+/// Lower transition rate accepted when Shannon entropy is also high.
+const RANDOM_TRANSITION_RATE_WITH_ENTROPY: f64 = 0.2;
+
+/// Shannon entropy (bits per character) paired with the lower transition rate.
+const RANDOM_ENTROPY_BITS: f64 = 3.8;
+
+/// Secret-bearing name fragments for `key=value` forms and `--flag value` pairs.
+const SECRET_NAME: &str = r"(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credentials?|signature)";
 
 /// Maximum nesting depth for recursive sanitization to prevent stack overflow.
 const MAX_DEPTH: usize = 10;
@@ -48,8 +77,46 @@ const SENSITIVE_PATTERNS: &[&str] = &[
 /// # Returns
 /// A sanitized JSON string suitable for span attributes
 pub fn sanitize_arguments(arguments: &Value) -> String {
-    let sanitized = sanitize_value(arguments, None, 0);
+    let sanitized = sanitize_argument_value(arguments);
     serde_json::to_string(&sanitized).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Sanitize tool arguments, returning the sanitized JSON value.
+///
+/// Same rules as [`sanitize_arguments`]; use this when the result is
+/// embedded in another JSON document.
+pub fn sanitize_argument_value(arguments: &Value) -> Value {
+    sanitize_value(arguments, None, 0)
+}
+
+/// Build the `arguments` attribute for a tool-call trace span.
+///
+/// Returns the sanitized arguments as structured JSON when their compact
+/// serialization fits in [`MAX_SPAN_ARGUMENTS_BYTES`]. Larger arguments
+/// become a string preview of the sanitized JSON text, ending in a
+/// truncation marker and sized so that the attribute, serialized, still
+/// fits the cap.
+pub fn span_arguments_attribute(arguments: &Value) -> Value {
+    let sanitized = sanitize_argument_value(arguments);
+    let serialized = serde_json::to_string(&sanitized).unwrap_or_else(|_| "{}".to_string());
+    if serialized.len() <= MAX_SPAN_ARGUMENTS_BYTES {
+        return sanitized;
+    }
+
+    let marker = format!("... [truncated, {} bytes total]", serialized.len());
+    // Two bytes for the quotes around the preview string.
+    let budget = MAX_SPAN_ARGUMENTS_BYTES.saturating_sub(marker.len() + 2);
+    let mut end = serialized.floor_char_boundary(budget);
+    loop {
+        let preview = Value::String(format!("{}{marker}", &serialized[..end]));
+        let encoded_len = serde_json::to_string(&preview).map_or(usize::MAX, |s| s.len());
+        if encoded_len <= MAX_SPAN_ARGUMENTS_BYTES || end == 0 {
+            return preview;
+        }
+        // Escaping quotes and backslashes grew the preview: drop the overflow.
+        let overflow = encoded_len - MAX_SPAN_ARGUMENTS_BYTES;
+        end = serialized.floor_char_boundary(end.saturating_sub(overflow));
+    }
 }
 
 /// Recursively sanitize a JSON value.
@@ -84,11 +151,19 @@ fn sanitize_value(value: &Value, field_name: Option<&str>, depth: usize) -> Valu
             let truncated = total_len > MAX_ARRAY_SIZE;
             let items_to_process = if truncated { MAX_ARRAY_SIZE } else { total_len };
 
-            let mut sanitized: Vec<Value> = arr
-                .iter()
-                .take(items_to_process)
-                .map(|v| sanitize_value(v, None, depth + 1))
-                .collect();
+            // A secret-named flag element ("--password") redacts the element
+            // after it, which holds its value in exec-style argument lists.
+            let mut sanitized: Vec<Value> = Vec::with_capacity(items_to_process + 1);
+            let mut redact_next = false;
+            for v in arr.iter().take(items_to_process) {
+                let is_flag_value = redact_next && !v.as_str().is_some_and(|s| s.starts_with('-'));
+                redact_next = v.as_str().is_some_and(is_secret_flag);
+                if is_flag_value {
+                    sanitized.push(Value::String(REDACTED.to_string()));
+                } else {
+                    sanitized.push(sanitize_value(v, None, depth + 1));
+                }
+            }
 
             if truncated {
                 sanitized.push(Value::String(format!(
@@ -99,16 +174,25 @@ fn sanitize_value(value: &Value, field_name: Option<&str>, depth: usize) -> Valu
             Value::Array(sanitized)
         }
         Value::String(s) => {
-            if s.len() > MAX_VALUE_LENGTH {
+            // Scan before truncating: a secret straddling the cut would
+            // otherwise leave a prefix too short to recognize. Only the kept
+            // prefix plus a margin is scanned, bounding work on huge values.
+            let window = &s[..s.floor_char_boundary(MAX_VALUE_LENGTH + SCAN_MARGIN)];
+            let scanned = redact_credential_values(window);
+            if scanned.len() > MAX_VALUE_LENGTH || window.len() < s.len() {
                 // Find safe UTF-8 boundary for truncation
-                let mut end = MAX_VALUE_LENGTH;
-                while end > 0 && !s.is_char_boundary(end) {
+                let mut end = MAX_VALUE_LENGTH.min(scanned.len());
+                while end > 0 && !scanned.is_char_boundary(end) {
                     end -= 1;
                 }
-                let truncated = format!("{}... [truncated, {} bytes total]", &s[..end], s.len());
+                let truncated = format!(
+                    "{}... [truncated, {} bytes total]",
+                    &scanned[..end],
+                    s.len()
+                );
                 Value::String(truncated)
             } else {
-                value.clone()
+                Value::String(scanned)
             }
         }
         // Numbers, booleans, and nulls pass through unchanged
@@ -207,6 +291,251 @@ fn is_sensitive_field(name: &str) -> bool {
     SENSITIVE_PATTERNS
         .iter()
         .any(|pattern| lower.contains(pattern))
+}
+
+/// Redact credential-shaped content inside a string value.
+///
+/// Field-name redaction misses a secret carried in an innocent field, such
+/// as `"command": "curl -H 'Authorization: Bearer …'"`. This scans the text
+/// itself, in order, for:
+/// 1. PEM private key blocks, including one cut off before its END line
+/// 2. Known token formats (GitHub, GitLab, Slack, OpenAI/Anthropic, Stripe,
+///    AWS access key ids, Google API keys, npm, JWTs)
+/// 3. `Authorization:` / `Proxy-Authorization:` header values
+/// 4. `Bearer <token>`
+/// 5. Passwords in URL userinfo (`scheme://user:password@host`)
+/// 6. `key`, `sig` and `code` query parameters
+/// 7. `name=value` / `name: value` forms whose name carries a secret word
+/// 8. `--flag value` pairs whose flag carries a secret word
+/// 9. High-entropy tokens (see [`randomness`])
+///
+/// Over-redaction is deliberate: hex digests, UUIDs and long identifiers
+/// mixing case and digits may read as random and be redacted.
+pub fn redact_credential_values(text: &str) -> String {
+    let mut out = text.to_string();
+    for (pattern, replacement) in fixed_credential_patterns() {
+        out = pattern.replace_all(&out, *replacement).into_owned();
+    }
+    out = secret_assignment_pattern()
+        .replace_all(&out, redact_keeping_quotes)
+        .into_owned();
+    out = secret_flag_pattern()
+        .replace_all(&out, redact_keeping_quotes)
+        .into_owned();
+    redact_random_tokens(&out)
+}
+
+/// Patterns whose replacement is a fixed template.
+fn fixed_credential_patterns() -> &'static [(Regex, &'static str)] {
+    static PATTERNS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            (
+                r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----|\z)",
+                REDACTED,
+            ),
+            (
+                r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|A(?:KIA|SIA)[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|npm_[A-Za-z0-9]{36}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*)",
+                REDACTED,
+            ),
+            (
+                r#"(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)[^\r\n"']+"#,
+                "${1}[REDACTED]",
+            ),
+            (r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}", "${1}[REDACTED]"),
+            (
+                r#"(?i)\b([a-z][a-z0-9+.-]*://[^\s/?#@:"']*:)[^\s/?#@"']+@"#,
+                "${1}[REDACTED]@",
+            ),
+            (r#"(?i)([?&](?:key|sig|code)=)[^&#\s"']+"#, "${1}[REDACTED]"),
+        ]
+        .into_iter()
+        .map(|(pattern, replacement)| (Regex::new(pattern).unwrap(), replacement))
+        .collect()
+    })
+}
+
+/// `name=value` or `name: value` where the name carries a secret word.
+/// Group 1 is the name and separator, group 2 the value.
+fn secret_assignment_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(&format!(
+            r#"(?i)([a-z0-9_.-]*{SECRET_NAME}[a-z0-9_.-]*["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s"'&;,]+)"#
+        ))
+        .unwrap()
+    })
+}
+
+/// `--flag value` where the flag starts a word and carries a secret word, and
+/// the value is not itself a flag. Group 1 is the flag (with the character
+/// before it) and whitespace, group 2 the value.
+fn secret_flag_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(&format!(
+            r#"(?i)((?:^|[\s"'])--?[a-z0-9_-]*{SECRET_NAME}[a-z0-9_-]*\s+)("[^"]*"|'[^']*'|[^\s"'-][^\s"']*)"#
+        ))
+        .unwrap()
+    })
+}
+
+/// Whether a whole argument is a secret-named flag, such as `--password`.
+fn is_secret_flag(arg: &str) -> bool {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            Regex::new(&format!(r"(?i)^--?[a-z0-9_-]*{SECRET_NAME}[a-z0-9_-]*$")).unwrap()
+        })
+        .is_match(arg)
+}
+
+/// Replace capture group 2 with the redaction marker, keeping its quotes.
+fn redact_keeping_quotes(caps: &Captures) -> String {
+    let value = &caps[2];
+    let quote = match value.chars().next() {
+        Some(q @ ('"' | '\'')) => q.to_string(),
+        _ => String::new(),
+    };
+    format!("{}{quote}{REDACTED}{quote}", &caps[1])
+}
+
+/// Redact tokens that read as random, and random segments of `/` paths.
+///
+/// A candidate is a maximal run of base64/URL-safe characters. A strongly
+/// random run is redacted whole. Otherwise a run with `/` has its random
+/// segments redacted, keeping the path around them; a run with no random
+/// segment is redacted whole if it is weakly random (base64 whose `/`
+/// splits it into segments too short to judge alone).
+fn redact_random_tokens(text: &str) -> String {
+    static TOKEN: OnceLock<Regex> = OnceLock::new();
+    let token = TOKEN.get_or_init(|| Regex::new(r"[A-Za-z0-9+/=_-]+").unwrap());
+
+    let mut ranges = Vec::new();
+    for run in token.find_iter(text) {
+        let whole = randomness(run.as_str());
+        if whole == Randomness::Strong {
+            ranges.push(run.range());
+            continue;
+        }
+        let mut segment_hits = Vec::new();
+        if run.as_str().contains('/') {
+            let mut start = run.start();
+            for segment in run.as_str().split('/') {
+                if randomness(segment) != Randomness::None {
+                    segment_hits.push(start..start + segment.len());
+                }
+                start += segment.len() + 1;
+            }
+        }
+        if !segment_hits.is_empty() {
+            ranges.extend(segment_hits);
+        } else if whole == Randomness::Weak {
+            ranges.push(run.range());
+        }
+    }
+    if ranges.is_empty() {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for range in ranges {
+        out.push_str(&text[last..range.start]);
+        out.push_str(REDACTED);
+        last = range.end;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// How strongly a token reads as randomly generated.
+#[derive(Debug, PartialEq)]
+enum Randomness {
+    None,
+    /// Judged random only with help from its Shannon entropy.
+    Weak,
+    /// Judged random by its class transition rate alone.
+    Strong,
+}
+
+/// Judge whether a token reads as randomly generated rather than human-written.
+///
+/// Requires at least [`MIN_RANDOM_TOKEN_ALNUM`] alphanumeric characters with
+/// both letters and digits. Randomness is judged by how often adjacent
+/// characters switch class (lowercase, uppercase, digit), ignoring an
+/// uppercase-to-lowercase switch, which starts every capitalized word.
+/// Random base64 or hex switches on roughly half its characters; paths,
+/// package names and CamelCase identifiers rarely do. Shannon entropy rescues
+/// single-case random tokens, which switch class less often.
+fn randomness(token: &str) -> Randomness {
+    let alnum: Vec<u8> = token.bytes().filter(u8::is_ascii_alphanumeric).collect();
+    if alnum.len() < MIN_RANDOM_TOKEN_ALNUM
+        || !alnum.iter().any(u8::is_ascii_digit)
+        || !alnum.iter().any(u8::is_ascii_alphabetic)
+    {
+        return Randomness::None;
+    }
+
+    let rate = class_transition_rate(token);
+    if rate >= RANDOM_TRANSITION_RATE {
+        Randomness::Strong
+    } else if rate >= RANDOM_TRANSITION_RATE_WITH_ENTROPY
+        && shannon_entropy(&alnum) >= RANDOM_ENTROPY_BITS
+    {
+        Randomness::Weak
+    } else {
+        Randomness::None
+    }
+}
+
+/// Fraction of adjacent alphanumeric pairs that switch character class,
+/// not counting uppercase-to-lowercase switches.
+fn class_transition_rate(token: &str) -> f64 {
+    #[derive(PartialEq)]
+    enum Class {
+        Lower,
+        Upper,
+        Digit,
+    }
+    let class = |b: u8| match b {
+        b'a'..=b'z' => Some(Class::Lower),
+        b'A'..=b'Z' => Some(Class::Upper),
+        b'0'..=b'9' => Some(Class::Digit),
+        _ => None,
+    };
+
+    let (mut pairs, mut switches) = (0usize, 0usize);
+    for window in token.as_bytes().windows(2) {
+        if let (Some(a), Some(b)) = (class(window[0]), class(window[1])) {
+            pairs += 1;
+            if a != b && !(a == Class::Upper && b == Class::Lower) {
+                switches += 1;
+            }
+        }
+    }
+    if pairs == 0 {
+        0.0
+    } else {
+        switches as f64 / pairs as f64
+    }
+}
+
+/// Shannon entropy of a byte string, in bits per byte.
+fn shannon_entropy(bytes: &[u8]) -> f64 {
+    let mut counts = [0usize; 256];
+    for &b in bytes {
+        counts[b as usize] += 1;
+    }
+    let len = bytes.len() as f64;
+    counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let p = count as f64 / len;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -454,6 +783,303 @@ mod tests {
 
         assert_eq!(parsed["session_cookie"], "[REDACTED]");
         assert_eq!(parsed["auth_cookie"], "[REDACTED]");
+    }
+
+    // Tests for value-level credential scanning
+
+    /// Sanitize `{"command": text}` and return the sanitized command string.
+    fn scan_command(text: &str) -> String {
+        let sanitized = sanitize_argument_value(&json!({ "command": text }));
+        sanitized["command"].as_str().unwrap().to_string()
+    }
+
+    fn assert_redacted(text: &str, secret: &str) {
+        let out = scan_command(text);
+        assert!(
+            !out.contains(secret),
+            "secret {secret:?} survived value scan: {out:?}"
+        );
+        assert!(out.contains(REDACTED), "no redaction marker in {out:?}");
+    }
+
+    #[test]
+    fn value_scan_redacts_authorization_headers_in_strings() {
+        assert_redacted(
+            "curl -H 'Authorization: Bearer abc123def456' https://api.example.com/v1",
+            "abc123def456",
+        );
+        assert_redacted(
+            "curl -H \"Authorization: token gho0wn3dVal\" https://api.example.com",
+            "gho0wn3dVal",
+        );
+        assert_redacted("Authorization: Basic dXNlcjpodW50ZXIy", "dXNlcjpodW50ZXIy");
+        assert_redacted(
+            "Proxy-Authorization: Basic cHJveHk6cGFzcw==",
+            "cHJveHk6cGFzcw",
+        );
+        assert_redacted(
+            r#"{"headers": {"Authorization": "Bearer abc123def456"}}"#,
+            "abc123def456",
+        );
+
+        let out =
+            scan_command("curl -H 'Authorization: Bearer abc123def456' https://api.example.com/v1");
+        assert!(out.starts_with("curl -H 'Authorization: "));
+        assert!(out.ends_with("' https://api.example.com/v1"));
+    }
+
+    #[test]
+    fn value_scan_redacts_bare_bearer_tokens() {
+        assert_redacted(
+            "wget --header=Bearer:x; echo Bearer abc123def456",
+            "abc123def456",
+        );
+        assert_redacted(
+            "bearer eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+        );
+    }
+
+    #[test]
+    fn value_scan_redacts_key_value_secret_forms() {
+        assert_redacted("PGPASSWORD=hunter2 psql -h db.internal app", "hunter2");
+        assert_redacted("mysql --password=hunter2 -h db.internal", "hunter2");
+        assert_redacted("export AWS_SECRET_ACCESS_KEY=wJalrXUtn", "wJalrXUtn");
+        assert_redacted("GITHUB_TOKEN=plainvalue make release", "plainvalue");
+        assert_redacted("client_secret: s3cr3tvalue", "s3cr3tvalue");
+        assert_redacted("api-key = 'quoted secret value'", "quoted secret value");
+        assert_redacted(r#"echo '{"password": "hunter2"}' | jq ."#, "hunter2");
+        assert_redacted(
+            "curl 'https://maps.example.com/api?q=x&key=plainvalue'",
+            "plainvalue",
+        );
+        assert_redacted(
+            "curl https://api.example.com/v1?api_key=plainvalue",
+            "plainvalue",
+        );
+
+        let out = scan_command("PGPASSWORD=hunter2 psql -h db.internal app");
+        assert_eq!(out, "PGPASSWORD=[REDACTED] psql -h db.internal app");
+    }
+
+    #[test]
+    fn value_scan_redacts_space_separated_secret_flags() {
+        assert_redacted("mysql --password hunter2 -h db.internal", "hunter2");
+        assert_redacted("tool --api-key plainvalue --verbose", "plainvalue");
+        assert_redacted("vault login --token \"quoted value\"", "quoted value");
+
+        // A following flag is not a value.
+        let out = scan_command("tool --no-password --verbose");
+        assert_eq!(out, "tool --no-password --verbose");
+    }
+
+    #[test]
+    fn value_scan_redacts_secret_flag_value_in_argument_array() {
+        let args = json!({
+            "command": "mysql",
+            "args": ["--password", "hunter2", "-h", "db.internal"]
+        });
+        let sanitized = sanitize_argument_value(&args);
+        assert_eq!(
+            sanitized["args"],
+            json!(["--password", REDACTED, "-h", "db.internal"])
+        );
+    }
+
+    #[test]
+    fn value_scan_redacts_strings_inside_arrays() {
+        let args = json!({ "args": ["-H", "Authorization: Bearer abc123def456"] });
+        let out = sanitize_arguments(&args);
+        assert!(!out.contains("abc123def456"), "{out}");
+    }
+
+    #[test]
+    fn value_scan_redacts_url_userinfo_passwords() {
+        assert_redacted(
+            "git clone https://deploy:hunter2@github.com/org/repo.git",
+            "hunter2",
+        );
+        assert_redacted("psql postgres://admin:hunter2@db:5432/app", "hunter2");
+
+        let out = scan_command("git clone https://deploy:hunter2@github.com/org/repo.git");
+        assert!(out.contains("github.com/org/repo.git"), "{out}");
+    }
+
+    #[test]
+    fn value_scan_redacts_known_token_formats() {
+        let tokens = [
+            "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
+            "github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz",
+            "glpat-abcdefghij0123456789",
+            "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
+            "sk-proj-abcdefghijklmnopqrstuvwxyz",
+            "xoxb-123456789012-1234567890123-abcdefghij",
+            "AKIAIOSFODNN7EXAMPLE",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+        ];
+        for token in tokens {
+            assert_redacted(&format!("deploy --with {token} now"), token);
+        }
+    }
+
+    #[test]
+    fn value_scan_redacts_high_entropy_tokens() {
+        let tokens = [
+            // Mixed-case alphanumeric
+            "q8Zr3Lp0Xv7Nk2Wm5Ty9Bc4D",
+            // Base64 with '/' and '+'
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "Zm9vYmFyYmF6+cXV4/Y29yZ2U9Z3JhdWx0eQ==",
+            // Hex-encoded
+            "a3f1c9e8b7d6052f4e3a1b9c8d7e6f50",
+            // URL-safe base64
+            "Ks9-Tq2_Lm8Np4Rv7Wx1Yz3Bc6Df0Gh5",
+        ];
+        for token in tokens {
+            assert_redacted(&format!("deploy --release {token}"), token);
+        }
+
+        // Secrets embedded in a URL path segment.
+        let webhook = "curl -X POST https://hooks.example.com/services/T0AB12CD3/B0EF45GH6/q8Zr3Lp0Xv7Nk2Wm5Ty9Bc4D";
+        assert_redacted(webhook, "q8Zr3Lp0Xv7Nk2Wm5Ty9Bc4D");
+        assert!(scan_command(webhook).starts_with("curl -X POST https://hooks.example."));
+
+        // A random path segment is redacted alone; the path around it stays.
+        assert_eq!(
+            scan_command(
+                "cat /srv/backups/servitor/nightly/IhvyGFJ7qXTi9OlPaHx166oJHCtEdwGy/manifest"
+            ),
+            "cat /srv/backups/servitor/nightly/[REDACTED]/manifest"
+        );
+    }
+
+    #[test]
+    fn value_scan_redacts_pem_private_keys() {
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----";
+        assert_redacted(
+            &format!("printf '%s' '{key}' > id"),
+            "b3BlbnNzaC1rZXktdjEAAAAA",
+        );
+
+        // A key cut off before its END line is still redacted.
+        let open = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAtruncated";
+        assert_redacted(open, "MIIEowIBAAKCAQEAtruncated");
+    }
+
+    #[test]
+    fn value_scan_leaves_ordinary_commands_untouched() {
+        let commands = [
+            "ls -la /var/log",
+            "git status --short",
+            "git log --oneline -5",
+            "git clone git@github.com:pknull/servitor.git",
+            "git commit --author=\"Jane Doe <jane@example.com>\" -m 'fix: tidy'",
+            "docker ps --format '{{.Names}}'",
+            "docker run --rm -v /var/lib/docker/volumes:/data alpine:3.20 ls",
+            "kubectl get pods -n kube-system --field-selector=status.phase=Running",
+            "cargo test --all-features -- --test-threads=1",
+            "grep -rn token src/ --include=*.rs",
+            "systemctl restart prometheus-node-exporter.service",
+            "cat /home/user/Code/Thallus/servitor/src/agent/direct.rs",
+            "journalctl -u egregore --since 2026-10-15T19:00:00Z",
+            "tar czf egregore-2.0.1-x86_64-unknown-linux-gnu.tar.gz dist/",
+            "curl -fsSL https://example.com/install.sh -o /tmp/install.sh",
+            "ffmpeg -i input_1920x1080_60fps.mp4 -c:v libx264 output_720p.mp4",
+            "python3 -m pip install --upgrade setuptools==75.1.0",
+            "echo the session is about to expire",
+            "echo my-secret-recipe for cake",
+            // CamelCase identifiers with digits switch class at word starts only.
+            "cargo test --lib Http2ConnectionManagerFactory",
+            "rg parseHTTP2ResponseHeaders src/ Base64EncodedPayloadReader",
+        ];
+        for command in commands {
+            assert_eq!(scan_command(command), command, "ordinary command altered");
+        }
+    }
+
+    #[test]
+    fn value_scan_runs_before_truncation() {
+        // The token straddles the 1KB truncation point; scanning a truncated
+        // copy would see only a short, low-confidence prefix and let it through.
+        let token = "q8Zr3Lp0Xv7Nk2Wm5Ty9Bc4D";
+        let text = format!("{}{token}", "a ".repeat(506));
+        assert!(text.len() > MAX_VALUE_LENGTH);
+        let out = scan_command(&text);
+        assert!(!out.contains(&token[..12]), "token prefix leaked: {out}");
+    }
+
+    #[test]
+    fn value_scan_marks_truncation_when_redaction_shrinks_a_long_value() {
+        // Redacting the scanned prefix leaves it short, but bytes past the
+        // scan window were still dropped and must be marked as such.
+        let key = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+            "A".repeat(6000)
+        );
+        let out = scan_command(&key);
+        assert!(out.starts_with(REDACTED), "{out}");
+        assert!(
+            out.contains(&format!("[truncated, {} bytes total]", key.len())),
+            "{out}"
+        );
+    }
+
+    // Tests for the span arguments attribute
+
+    #[test]
+    fn span_arguments_within_cap_stay_structured() {
+        let args = json!({ "command": "ls -la", "api_key": "sk-secret" });
+        let attribute = span_arguments_attribute(&args);
+        assert_eq!(attribute, sanitize_argument_value(&args));
+        assert_eq!(attribute["api_key"], REDACTED);
+    }
+
+    #[test]
+    fn span_arguments_over_cap_are_truncated() {
+        let mut args = Map::new();
+        for i in 0..50 {
+            args.insert(format!("field_{i}"), Value::String("x".repeat(1000)));
+        }
+        let attribute = span_arguments_attribute(&Value::Object(args));
+        let serialized = serde_json::to_string(&attribute).unwrap();
+        assert!(
+            serialized.len() <= MAX_SPAN_ARGUMENTS_BYTES,
+            "{}",
+            serialized.len()
+        );
+        assert!(attribute.as_str().unwrap().contains("[truncated,"));
+    }
+
+    #[test]
+    fn span_arguments_cap_accounts_for_json_escaping() {
+        // Every '"' in the value grows when the preview is itself JSON-encoded.
+        let mut args = Map::new();
+        for i in 0..50 {
+            args.insert(format!("field_{i}"), Value::String("\"\\".repeat(450)));
+        }
+        let attribute = span_arguments_attribute(&Value::Object(args));
+        let serialized = serde_json::to_string(&attribute).unwrap();
+        assert!(
+            serialized.len() <= MAX_SPAN_ARGUMENTS_BYTES,
+            "{}",
+            serialized.len()
+        );
+    }
+
+    #[test]
+    fn span_arguments_cap_keeps_multibyte_text_valid() {
+        let args = json!({ "content": "🎉".repeat(5000) });
+        let attribute = span_arguments_attribute(&Value::Array(vec![args; 6]));
+        let preview = attribute
+            .as_str()
+            .expect("over-cap arguments become a preview");
+        assert!(preview.contains("🎉"));
+        let serialized = serde_json::to_string(&attribute).unwrap();
+        assert!(
+            serialized.len() <= MAX_SPAN_ARGUMENTS_BYTES,
+            "{}",
+            serialized.len()
+        );
     }
 
     // Tests for sanitize_tool_result

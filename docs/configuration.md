@@ -138,6 +138,8 @@ tool calls, task execution, and task lifecycle events.
 
 - `timeout_secs`: default execution timeout
 - `publish_trace_spans`: opt-in tracing over egregore
+- `trace_span_arguments`: opt-in tool-call arguments on tool spans (default
+  `false`; no effect unless `publish_trace_spans` is also set)
 
 Servitor no longer owns planning or multi-turn reasoning. Any older
 planner-oriented fields should be treated as legacy residue, not part of the
@@ -147,6 +149,16 @@ When `publish_trace_spans = true`, Servitor emits task-level and per-tool
 `trace_span` messages. If inbound work already carries top-level Egregore
 `trace_id` / `span_id` fields, Servitor reuses that trace context instead of
 starting an unrelated trace tree.
+
+Tool spans carry only the tool name, provider, timing, and status unless
+`trace_span_arguments = true` is also set. Then each tool span gains an
+`arguments` attribute: the call's arguments after field-name redaction and a
+value scan for credential-shaped content (authorization headers, `name=value`
+secrets, `--flag value` secrets, URL passwords, known token formats, PEM
+private keys, high-entropy tokens), with string values truncated at 1KB.
+Arguments whose serialized form exceeds 4KB become a truncated string preview
+of the sanitized JSON. The scan prefers over-redaction: hex digests, UUIDs,
+and long identifiers mixing case and digits may be redacted.
 
 ## `task`
 

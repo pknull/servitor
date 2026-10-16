@@ -93,6 +93,9 @@ publish_trace_spans = true
 ```
 
 These settings publish more feed data and should be turned on deliberately.
+`trace_span_arguments = true` additionally records what each tool call was
+asked to do; arguments are sanitized before publication, but the feed is
+append-only and replicated, so enable it only where that record is wanted.
 
 ## Scheduling and Watchers
 

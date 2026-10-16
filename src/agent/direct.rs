@@ -18,7 +18,7 @@ use crate::egregore::messages::{
 use crate::egregore::EgregoreClient;
 use crate::error::{Result, ServitorError};
 use crate::identity::Identity;
-use crate::mcp::{McpPool, ToolCallResult};
+use crate::mcp::McpPool;
 use crate::metrics::{self, Timer, ToolCallStatus};
 use crate::scope::ScopeEnforcer;
 
@@ -106,16 +106,22 @@ pub async fn execute_direct(
         if let (Some(ref trace_id), Some(ref root_span_id), Some(tool_start)) =
             (&trace_id, &root_span_id, tool_start)
         {
-            publish_tool_span(
-                egregore,
+            let span = build_tool_span(ToolSpanInput {
                 trace_id,
-                root_span_id,
+                span_id: new_uuid(),
+                parent_span_id: root_span_id,
                 provider_name,
                 tool_name,
-                tool_start,
-                &result,
-            )
-            .await;
+                start_ts: tool_start,
+                end_ts: Utc::now(),
+                status: match &result {
+                    Ok(output) if !output.is_error => TraceSpanStatus::Ok,
+                    _ => TraceSpanStatus::Error,
+                },
+                arguments: &planned.arguments,
+                include_arguments: config.trace_span_arguments,
+            });
+            publish_tool_span(egregore, &span).await;
         }
 
         match result {
@@ -398,34 +404,50 @@ fn new_uuid() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
-async fn publish_tool_span(
-    egregore: Option<&EgregoreClient>,
-    trace_id: &str,
-    parent_span_id: &str,
-    provider_name: &str,
-    tool_name: &str,
+/// Inputs for one tool-call trace span.
+struct ToolSpanInput<'a> {
+    trace_id: &'a str,
+    span_id: String,
+    parent_span_id: &'a str,
+    provider_name: &'a str,
+    tool_name: &'a str,
     start_ts: chrono::DateTime<Utc>,
-    result: &Result<ToolCallResult>,
-) {
+    end_ts: chrono::DateTime<Utc>,
+    status: TraceSpanStatus,
+    arguments: &'a serde_json::Value,
+    /// `agent.trace_span_arguments`: attach sanitized arguments to the span.
+    include_arguments: bool,
+}
+
+/// Build the trace span for one tool call.
+///
+/// Pure: ids and timestamps come from the caller, so argument inclusion is
+/// testable without an egregore client. Arguments are attached only when
+/// `include_arguments` is set, and always through the sanitizer.
+fn build_tool_span(input: ToolSpanInput<'_>) -> TraceSpan {
+    let mut span = TraceSpan::new(
+        input.trace_id,
+        input.span_id,
+        Some(input.parent_span_id.to_string()),
+        format!("direct:{}:{}", input.provider_name, input.tool_name),
+        "servitor",
+        input.start_ts,
+        input.end_ts,
+        input.status,
+    );
+    if input.include_arguments {
+        span.attributes.insert(
+            "arguments".to_string(),
+            crate::agent::sanitize::span_arguments_attribute(input.arguments),
+        );
+    }
+    span
+}
+
+async fn publish_tool_span(egregore: Option<&EgregoreClient>, span: &TraceSpan) {
     let Some(egregore) = egregore else { return };
 
-    let status = match result {
-        Ok(output) if !output.is_error => TraceSpanStatus::Ok,
-        _ => TraceSpanStatus::Error,
-    };
-
-    let span = TraceSpan::new(
-        trace_id,
-        new_uuid(),
-        Some(parent_span_id.to_string()),
-        format!("direct:{}:{}", provider_name, tool_name),
-        "servitor",
-        start_ts,
-        Utc::now(),
-        status,
-    );
-
-    if let Err(e) = egregore.publish_trace_span(&span).await {
+    if let Err(e) = egregore.publish_trace_span(span).await {
         tracing::debug!(error = %e, "failed to publish direct tool trace span");
     }
 }
@@ -572,6 +594,88 @@ mod tests {
             &trace_id,
         );
         assert_ne!(h1, h2);
+    }
+
+    fn tool_span_input<'a>(
+        arguments: &'a serde_json::Value,
+        include_arguments: bool,
+    ) -> ToolSpanInput<'a> {
+        let start_ts = Utc::now();
+        ToolSpanInput {
+            trace_id: "trace-1",
+            span_id: "span-1".to_string(),
+            parent_span_id: "root-1",
+            provider_name: "shell",
+            tool_name: "execute",
+            start_ts,
+            end_ts: start_ts,
+            status: TraceSpanStatus::Ok,
+            arguments,
+            include_arguments,
+        }
+    }
+
+    #[test]
+    fn tool_span_without_arguments_matches_legacy_span() {
+        let arguments = serde_json::json!({ "command": "rm -rf /tmp/scratch" });
+        let input = tool_span_input(&arguments, AgentConfig::default().trace_span_arguments);
+        let legacy = TraceSpan::new(
+            input.trace_id,
+            input.span_id.clone(),
+            Some(input.parent_span_id.to_string()),
+            "direct:shell:execute",
+            "servitor",
+            input.start_ts,
+            input.end_ts,
+            TraceSpanStatus::Ok,
+        );
+
+        let span = build_tool_span(input);
+
+        assert!(!span.attributes.contains_key("arguments"));
+        assert_eq!(
+            serde_json::to_value(&span).unwrap(),
+            serde_json::to_value(&legacy).unwrap()
+        );
+    }
+
+    #[test]
+    fn tool_span_with_arguments_carries_sanitized_arguments() {
+        let arguments = serde_json::json!({
+            "command": "curl -H 'Authorization: Bearer abc123def456' https://api.example.com",
+            "api_key": "sk-field-level-secret",
+            "path": "/tmp/scratch"
+        });
+
+        let span = build_tool_span(tool_span_input(&arguments, true));
+
+        let attribute = &span.attributes["arguments"];
+        let serialized = serde_json::to_string(attribute).unwrap();
+        assert!(!serialized.contains("abc123def456"), "{serialized}");
+        assert!(
+            !serialized.contains("sk-field-level-secret"),
+            "{serialized}"
+        );
+        assert_eq!(attribute["api_key"], "[REDACTED]");
+        assert_eq!(attribute["path"], "/tmp/scratch");
+        assert!(attribute["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("curl -H 'Authorization: "));
+    }
+
+    #[test]
+    fn tool_span_arguments_are_capped_at_4kb() {
+        let mut fields = serde_json::Map::new();
+        for i in 0..20 {
+            fields.insert(format!("field_{i}"), serde_json::json!("y".repeat(1000)));
+        }
+        let arguments = serde_json::Value::Object(fields);
+
+        let span = build_tool_span(tool_span_input(&arguments, true));
+
+        let serialized = serde_json::to_string(&span.attributes["arguments"]).unwrap();
+        assert!(serialized.len() <= 4096, "{}", serialized.len());
     }
 
     /// Locks the byte-format of the hashed payload. If a future refactor

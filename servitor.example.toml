@@ -19,6 +19,10 @@ subscribe = false
 timeout_secs = 300
 # Optional: publish trace_span messages for task and tool execution
 publish_trace_spans = false
+# Optional: attach sanitized tool-call arguments to tool spans (needs
+# publish_trace_spans). Arguments are redacted by field name and by value,
+# then capped at 4KB per span.
+trace_span_arguments = false
 
 [task]
 # Offer time-to-live before the servitor withdraws an unassigned offer

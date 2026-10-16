@@ -196,3 +196,5 @@ tool execution.
 ## Tracing
 
 Detailed `trace_span` messages are disabled by default. Set `agent.publish_trace_spans = true` to emit task and tool spans.
+Tool spans omit call arguments unless `agent.trace_span_arguments = true`; then
+they carry a sanitized `arguments` attribute of at most 4KB serialized.

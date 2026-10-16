@@ -227,6 +227,11 @@ pub struct AgentConfig {
     /// Publish detailed trace spans for task and tool execution.
     #[serde(default)]
     pub publish_trace_spans: bool,
+
+    /// Include sanitized tool-call arguments in published tool spans.
+    /// Has no effect unless `publish_trace_spans` is also enabled.
+    #[serde(default)]
+    pub trace_span_arguments: bool,
 }
 
 impl Default for AgentConfig {
@@ -234,6 +239,7 @@ impl Default for AgentConfig {
         Self {
             timeout_secs: default_task_timeout(),
             publish_trace_spans: false,
+            trace_span_arguments: false,
         }
     }
 }

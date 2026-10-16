@@ -241,6 +241,31 @@ timeout_secs = 120
     }
 
     #[test]
+    fn trace_span_arguments_defaults_off() {
+        assert!(!AgentConfig::default().trace_span_arguments);
+
+        // Enabling tracing alone must not start publishing arguments.
+        let toml = r#"
+[agent]
+publish_trace_spans = true
+"#;
+        let config = Config::from_str(toml).unwrap();
+        assert!(config.agent.publish_trace_spans);
+        assert!(!config.agent.trace_span_arguments);
+    }
+
+    #[test]
+    fn parse_trace_span_arguments() {
+        let toml = r#"
+[agent]
+publish_trace_spans = true
+trace_span_arguments = true
+"#;
+        let config = Config::from_str(toml).unwrap();
+        assert!(config.agent.trace_span_arguments);
+    }
+
+    #[test]
     fn parse_executor_config() {
         let toml = r#"
 [a2a_server]
