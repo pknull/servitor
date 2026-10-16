@@ -31,7 +31,7 @@ impl ScopeMatcher {
                     "glob pattern too long ({} chars, max {}): '{}'",
                     pattern.len(),
                     MAX_PATTERN_LENGTH,
-                    &pattern[..50]
+                    &pattern[..pattern.floor_char_boundary(50)]
                 ),
             });
         }
@@ -155,6 +155,15 @@ mod tests {
         let long_pattern = "a".repeat(300);
         let result = ScopeMatcher::new(&long_pattern);
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("too long"));
+    }
+
+    #[test]
+    fn rejects_pattern_too_long_with_multibyte_at_preview_cut() {
+        // 'é' is two bytes and straddles the 50-byte error preview cut.
+        let long_pattern = format!("{}é{}", "a".repeat(49), "b".repeat(300));
+        let result = ScopeMatcher::new(&long_pattern);
         let err = result.unwrap_err().to_string();
         assert!(err.contains("too long"));
     }

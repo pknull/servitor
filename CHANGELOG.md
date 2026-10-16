@@ -27,6 +27,10 @@ All notable changes to servitor are documented here. The format follows [Keep a 
   `include_self=true` and bounded pagination, replacing the obsolete
   `/v1/query` path so startup recovery and assignment-result checks can see
   local owner records.
+- Output defense no longer panics when an oversized tool output has a
+  multibyte character at the 8KB cut, and a task scope override pattern over
+  the length limit no longer panics when a multibyte character sits at the
+  error preview cut. Both truncate on a character boundary.
 
 ## [0.3.0] - 2026-04-27
 

@@ -86,11 +86,12 @@ pub fn enforce_size_limit(output: &str) -> String {
     if output.len() <= MAX_TOOL_OUTPUT_BYTES {
         output.to_string()
     } else {
+        let end = output.floor_char_boundary(MAX_TOOL_OUTPUT_BYTES);
         format!(
             "{}\n\n[TRUNCATED: {} bytes, showing first {}]",
-            &output[..MAX_TOOL_OUTPUT_BYTES],
+            &output[..end],
             output.len(),
-            MAX_TOOL_OUTPUT_BYTES
+            end
         )
     }
 }
@@ -150,6 +151,19 @@ mod tests {
         let result = enforce_size_limit(&big);
         assert!(result.contains("TRUNCATED"));
         assert!(result.len() < 9000);
+    }
+
+    #[test]
+    fn size_limit_does_not_split_multibyte_char() {
+        // 'é' is two bytes and straddles the cut at MAX_TOOL_OUTPUT_BYTES.
+        let big = format!(
+            "{}é{}",
+            "x".repeat(MAX_TOOL_OUTPUT_BYTES - 1),
+            "y".repeat(100)
+        );
+        let result = enforce_size_limit(&big);
+        assert!(result.starts_with(&"x".repeat(MAX_TOOL_OUTPUT_BYTES - 1)));
+        assert!(result.contains("TRUNCATED"));
     }
 
     #[test]
