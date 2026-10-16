@@ -340,7 +340,11 @@ pub fn redact_credential_values(text: &str) -> String {
     }
     out = redact_ranges(&out, &short_flag_secret_ranges(&out));
     out = secret_assignment_pattern()
-        .replace_all(&out, redact_keeping_quotes)
+        .replace_all(&out, |caps: &Captures| match (caps.get(1), caps.get(2)) {
+            (Some(_), Some(value)) if value.is_empty() => caps[0].to_string(),
+            (Some(name), Some(_)) => format!("{}{REDACTED}", name.as_str()),
+            _ => redact_keeping_quotes(&caps[3], &caps[4]),
+        })
         .into_owned();
     out = secret_flag_pattern()
         .replace_all(&out, |caps: &Captures| {
@@ -348,7 +352,7 @@ pub fn redact_credential_values(text: &str) -> String {
             if caps[1].trim_end().to_ascii_lowercase().ends_with("-stdin") {
                 caps[0].to_string()
             } else {
-                redact_keeping_quotes(caps)
+                redact_keeping_quotes(&caps[1], &caps[2])
             }
         })
         .into_owned();
@@ -373,11 +377,19 @@ fn fixed_credential_patterns() -> &'static [(Regex, &'static str)] {
                 "${1}[REDACTED]",
             ),
             (r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}", "${1}[REDACTED]"),
+            // The password runs to the first `@` followed by a host segment
+            // and the end of the authority, so a raw `@` inside it is
+            // covered. It crosses `/`, `?` or `#` only after a non-digit,
+            // so a numeric `host:port` followed by an `@` in the path or
+            // query is not read as `user:password`. Group 2 re-emits the
+            // host segment.
             (
-                r#"(?i)\b([a-z][a-z0-9+.-]*://[^\s/?#@:"']*:)[^\s/?#@"']+@"#,
-                "${1}[REDACTED]@",
+                r#"(?i)\b([a-z][a-z0-9+.-]*://[^\s/?#@:"']*:)(?:[^\s/?#"']+?|[^\s/?#"']*[^\s/?#"'0-9][^\s"']*?)@([^\s/?#@"']*(?:[/?#\s"']|$))"#,
+                "${1}[REDACTED]@${2}",
             ),
-            (r#"(?i)([?&](?:key|sig|code)=)[^&#\s"']+"#, "${1}[REDACTED]"),
+            // A query value cannot hold a raw `&` or `#`; quotes may be
+            // part of it, so they do not end it.
+            (r"(?i)([?&](?:key|sig|code)=)[^&#\s]+", "${1}[REDACTED]"),
         ]
         .into_iter()
         .map(|(pattern, replacement)| (Regex::new(pattern).unwrap(), replacement))
@@ -386,12 +398,19 @@ fn fixed_credential_patterns() -> &'static [(Regex, &'static str)] {
 }
 
 /// `name=value` or `name: value` where the name carries a secret word.
-/// Group 1 is the name and separator, group 2 the value.
+///
+/// A query or form parameter (`?name=value`, `&name=value`) cannot hold a
+/// raw `&` or `#`, so its value ends at either, keeping the parameters after
+/// it; groups 1 and 2 are the name and value. Any other value runs to the
+/// closing quote when quoted and otherwise to whitespace, since `,`, `;` and
+/// `&` can all appear in a password; groups 3 and 4 are the name with its
+/// separator, and the value. Leftmost matching starts a parameter at its
+/// `?` or `&`, so the query form wins there.
 fn secret_assignment_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         Regex::new(&format!(
-            r#"(?i)([a-z0-9_.-]*{SECRET_NAME}[a-z0-9_.-]*["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s"'&;,]+)"#
+            r#"(?i)([?&][a-z0-9_.-]*{SECRET_NAME}[a-z0-9_.-]*=)([^&#\s]*)|([a-z0-9_.-]*{SECRET_NAME}[a-z0-9_.-]*["']?\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#
         ))
         .unwrap()
     })
@@ -399,12 +418,13 @@ fn secret_assignment_pattern() -> &'static Regex {
 
 /// `--flag value` where the flag starts a word and carries a secret word, and
 /// the value is not itself a flag. Group 1 is the flag (with the character
-/// before it) and whitespace, group 2 the value.
+/// before it) and whitespace, group 2 the value: quoted, or running to
+/// whitespace.
 fn secret_flag_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         Regex::new(&format!(
-            r#"(?i)((?:^|[\s"'])--?[a-z0-9_-]*{SECRET_NAME}[a-z0-9_-]*\s+)("[^"]*"|'[^']*'|[^\s"'-][^\s"']*)"#
+            r#"(?i)((?:^|[\s"'])--?[a-z0-9_-]*{SECRET_NAME}[a-z0-9_-]*\s+)("[^"]*"|'[^']*'|[^\s-]\S*)"#
         ))
         .unwrap()
     })
@@ -606,14 +626,12 @@ fn redact_ranges(text: &str, ranges: &[Range<usize>]) -> String {
     out
 }
 
-/// Replace capture group 2 with the redaction marker, keeping its quotes.
-fn redact_keeping_quotes(caps: &Captures) -> String {
-    let value = &caps[2];
-    let quote = match value.chars().next() {
-        Some(q @ ('"' | '\'')) => q.to_string(),
-        _ => String::new(),
-    };
-    format!("{}{quote}{REDACTED}{quote}", &caps[1])
+/// `prefix` followed by the redaction marker in place of `value`, keeping
+/// the value's quotes when it is a quoted string.
+fn redact_keeping_quotes(prefix: &str, value: &str) -> String {
+    let unquoted = without_quotes(value, 0..value.len());
+    let quote = &value[..unquoted.start];
+    format!("{prefix}{quote}{REDACTED}{quote}")
 }
 
 /// Redact tokens that read as random, and random segments of `/` paths.
@@ -1064,6 +1082,117 @@ mod tests {
 
         let out = scan_command("PGPASSWORD=hunter2 psql -h db.internal app");
         assert_eq!(out, "PGPASSWORD=[REDACTED] psql -h db.internal app");
+    }
+
+    #[test]
+    fn value_scan_runs_unquoted_secret_values_to_whitespace() {
+        // `,`, `;` and `&` can all appear in a password; only whitespace (or
+        // the closing quote of a quoted value) ends it.
+        let cases = [
+            ("password=abc,def end", "password=[REDACTED] end"),
+            (
+                "PGPASSWORD=abc;def psql app",
+                "PGPASSWORD=[REDACTED] psql app",
+            ),
+            (
+                "export GITHUB_TOKEN=abc&def",
+                "export GITHUB_TOKEN=[REDACTED]",
+            ),
+            (
+                "client_secret: x,y;z&w next",
+                "client_secret: [REDACTED] next",
+            ),
+            ("api_key=k1,k2 --verbose", "api_key=[REDACTED] --verbose"),
+            (
+                "password=\"abc,def ghi\" end",
+                "password=\"[REDACTED]\" end",
+            ),
+            ("password='abc;def' end", "password='[REDACTED]' end"),
+            // An unterminated quote gains no closing quote.
+            ("password=\"abc,def", "password=[REDACTED]"),
+            (
+                "tool --password abc'def --verbose",
+                "tool --password [REDACTED] --verbose",
+            ),
+            (
+                "tool --token a,b;c --verbose",
+                "tool --token [REDACTED] --verbose",
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(scan_command(text), expected, "input: {text}");
+        }
+    }
+
+    #[test]
+    fn value_scan_ends_query_parameter_secrets_at_the_next_parameter() {
+        // A URL query or form value cannot hold a raw `&` or `#`, so those
+        // end it and the parameters after it stay readable.
+        let cases = [
+            (
+                "curl 'https://api.example.com/v1?password=abc&user=x'",
+                "curl 'https://api.example.com/v1?password=[REDACTED]&user=x'",
+            ),
+            (
+                "curl https://api.example.com/v1?token=abc,def&page=2",
+                "curl https://api.example.com/v1?token=[REDACTED]&page=2",
+            ),
+            (
+                "curl -d 'user=x&client_secret=a;b&scope=read' https://auth.example.com",
+                "curl -d 'user=x&client_secret=[REDACTED]&scope=read' https://auth.example.com",
+            ),
+            (
+                "open https://app.example.com/cb?access_token=abc#state",
+                "open https://app.example.com/cb?access_token=[REDACTED]#state",
+            ),
+            (
+                "curl https://maps.example.com/api?key=ab'cd&q=x",
+                "curl https://maps.example.com/api?key=[REDACTED]&q=x",
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(scan_command(text), expected, "input: {text}");
+        }
+    }
+
+    #[test]
+    fn value_scan_redacts_url_userinfo_passwords_with_delimiters() {
+        // A password holding `@`, `#`, `/` or `?` ends at the `@` before the
+        // host, not at its first delimiter.
+        let cases = [
+            (
+                "psql postgres://admin:p@ss@db:5432/app",
+                "psql postgres://admin:[REDACTED]@db:5432/app",
+            ),
+            ("mysql://app:pa#ss@db/app", "mysql://app:[REDACTED]@db/app"),
+            (
+                "redis-cli -u redis://:pa/ss?x@cache:6379",
+                "redis-cli -u redis://:[REDACTED]@cache:6379",
+            ),
+            (
+                "curl https://user:pass@medium.com/@handle",
+                "curl https://user:[REDACTED]@medium.com/@handle",
+            ),
+            (
+                "curl \"https://user:p,a;s&s@example.com\" -o out",
+                "curl \"https://user:[REDACTED]@example.com\" -o out",
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(scan_command(text), expected, "input: {text}");
+        }
+        // No userinfo password: nothing to redact. A numeric port is not a
+        // password, even with an `@` later in the URL.
+        for text in [
+            "curl https://medium.com/@handle",
+            "git clone git@github.com:pknull/servitor.git",
+            "ssh://git@host:22/repo.git",
+            "curl http://localhost:8080/users?email=jane@example.com",
+            "npm view https://registry.example.com:443/@scope/pkg",
+            "open http://localhost:3000#/login?next=a@b",
+        ] {
+            assert_eq!(scan_command(text), text);
+        }
     }
 
     #[test]
