@@ -17,10 +17,6 @@ use std::sync::OnceLock;
 /// Maximum length for a single string value before truncation.
 const MAX_VALUE_LENGTH: usize = 1024;
 
-/// Bytes scanned past the truncation point, so a secret that starts before
-/// the cut is seen whole (an RSA 4096 private key PEM is about 3.3KB).
-const SCAN_MARGIN: usize = 4096;
-
 /// Maximum serialized size, in bytes, of the arguments attribute on one span.
 pub const MAX_SPAN_ARGUMENTS_BYTES: usize = 4096;
 
@@ -174,17 +170,14 @@ fn sanitize_value(value: &Value, field_name: Option<&str>, depth: usize) -> Valu
             Value::Array(sanitized)
         }
         Value::String(s) => {
-            // Scan before truncating: a secret straddling the cut would
-            // otherwise leave a prefix too short to recognize. Only the kept
-            // prefix plus a margin is scanned, bounding work on huge values.
-            let window = &s[..s.floor_char_boundary(MAX_VALUE_LENGTH + SCAN_MARGIN)];
-            let scanned = redact_credential_values(window);
-            if scanned.len() > MAX_VALUE_LENGTH || window.len() < s.len() {
-                // Find safe UTF-8 boundary for truncation
-                let mut end = MAX_VALUE_LENGTH.min(scanned.len());
-                while end > 0 && !scanned.is_char_boundary(end) {
-                    end -= 1;
-                }
+            // Scan the whole value before truncating. A secret straddling the
+            // cut would otherwise leave a prefix too short to recognize, and
+            // redactions can pull text from anywhere in the value into the
+            // kept prefix, so no shorter scan window is safe. Every pattern
+            // is linear time, so the scan stays linear in the value's length.
+            let scanned = redact_credential_values(s);
+            if scanned.len() > MAX_VALUE_LENGTH {
+                let end = scanned.floor_char_boundary(MAX_VALUE_LENGTH);
                 let truncated = format!(
                     "{}... [truncated, {} bytes total]",
                     &scanned[..end],
@@ -1009,19 +1002,54 @@ mod tests {
     }
 
     #[test]
-    fn value_scan_marks_truncation_when_redaction_shrinks_a_long_value() {
-        // Redacting the scanned prefix leaves it short, but bytes past the
-        // scan window were still dropped and must be marked as such.
+    fn value_scan_covers_text_shifted_into_kept_prefix_by_redaction() {
+        // Redacting a ~4.6KB private key shrinks the value by more than 4KB,
+        // pulling text from deep in the string into the kept 1KB. A token
+        // cut by a bounded scan window (the old one ended at byte 5120)
+        // leaves a prefix too short to recognize, which would leak.
+        let key = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+            "A".repeat(4600)
+        );
+        let token = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+        let old_window_edge = 5120;
+        let filler = " ".repeat(old_window_edge - 12 - key.len() - 1);
+        let text = format!("{key} {filler}{token} tail");
+        assert_eq!(&text[old_window_edge - 12..old_window_edge], &token[..12]);
+
+        let out = scan_command(&text);
+        assert!(!out.contains(&token[..12]), "token fragment leaked: {out}");
+        assert!(!out.contains("AAAAAAAA"), "key material leaked: {out}");
+    }
+
+    #[test]
+    fn value_scan_keeps_whole_value_when_redaction_shrinks_it_under_the_cap() {
+        // The whole value is scanned, so a long value that redaction brings
+        // under the cap loses nothing and carries no truncation marker.
         let key = format!(
             "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
             "A".repeat(6000)
         );
-        let out = scan_command(&key);
-        assert!(out.starts_with(REDACTED), "{out}");
+        let out = scan_command(&format!("{key} > id_rsa"));
+        assert_eq!(out, format!("{REDACTED} > id_rsa"));
+    }
+
+    #[test]
+    fn value_scan_truncates_long_redacted_value_on_char_boundary() {
+        // A token beyond the kept prefix is redacted, then the result is cut
+        // at the cap on a char boundary and marked with the original length.
+        let text = format!(
+            "{}{}",
+            "🎉".repeat(300),
+            " ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"
+        );
+        let out = scan_command(&text);
+        assert!(!out.contains("ghp_"), "{out}");
         assert!(
-            out.contains(&format!("[truncated, {} bytes total]", key.len())),
+            out.ends_with(&format!("... [truncated, {} bytes total]", text.len())),
             "{out}"
         );
+        assert_eq!(out.matches('🎉').count(), MAX_VALUE_LENGTH / 4);
     }
 
     // Tests for the span arguments attribute
