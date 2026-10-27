@@ -5,12 +5,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::a2a::A2aPool;
 use crate::agent::output_defense::defense_pipeline;
-use crate::agent::sanitize::sanitize_arguments;
 use crate::config::Config;
 use crate::egregore::{
     DeploymentTargetSummary, EnvironmentSnapshot, ScopeConstraints, ServitorManifest,
     ServitorProfile, SnapshotSensitivity, TargetSummary, ToolSummary, ToolsetSummary,
 };
+use crate::error::{LocalDiagnostic, ServitorError};
 use crate::identity::Identity;
 use crate::mcp::McpPool;
 use crate::runtime::RuntimeStats;
@@ -203,41 +203,51 @@ pub async fn build_environment_snapshots(
         let mut probe_results = Vec::new();
 
         for probe in &target.snapshot_tool_calls {
-            let outcome = match mcp_pool
-                .call_tool(&probe.name, probe.arguments.clone())
-                .await
-            {
-                Ok(result) => {
-                    let sanitized_arguments = serde_json::from_str::<serde_json::Value>(
-                        &sanitize_arguments(&probe.arguments),
-                    )
-                    .unwrap_or_else(|_| serde_json::json!({}));
-                    let (sanitized_output, _) =
-                        defense_pipeline(&probe.name, &result.text_content());
-                    if result.is_error {
-                        status = "degraded".to_string();
-                    } else if status == "configured" {
-                        status = "probed".to_string();
+            // A probe record names a registered tool, says whether the probe
+            // succeeded, and carries the tool's output (payload, through the
+            // output-defense pipeline) or a bounded error code. The probe's
+            // arguments and raw error text stay local.
+            let outcome = if mcp_pool.registered_tool(&probe.name).is_none() {
+                tracing::warn!(
+                    target_id = %target.target_id,
+                    tool = %LocalDiagnostic::new(&probe.name),
+                    "snapshot probe names an unregistered tool"
+                );
+                status = "degraded".to_string();
+                serde_json::json!({ "ok": false, "error_code": "unknown_tool" })
+            } else {
+                match mcp_pool
+                    .call_tool(&probe.name, probe.arguments.clone())
+                    .await
+                {
+                    Ok(result) => {
+                        let (sanitized_output, _) =
+                            defense_pipeline(&probe.name, &result.text_content());
+                        if result.is_error {
+                            status = "degraded".to_string();
+                        } else if status == "configured" {
+                            status = "probed".to_string();
+                        }
+                        serde_json::json!({
+                            "tool": probe.name,
+                            "ok": !result.is_error,
+                            "output": sanitized_output,
+                        })
                     }
-                    serde_json::json!({
-                        "tool": probe.name,
-                        "arguments": sanitized_arguments,
-                        "ok": !result.is_error,
-                        "output": sanitized_output,
-                    })
-                }
-                Err(error) => {
-                    let sanitized_arguments = serde_json::from_str::<serde_json::Value>(
-                        &sanitize_arguments(&probe.arguments),
-                    )
-                    .unwrap_or_else(|_| serde_json::json!({}));
-                    status = "degraded".to_string();
-                    serde_json::json!({
-                        "tool": probe.name,
-                        "arguments": sanitized_arguments,
-                        "ok": false,
-                        "error": error.to_string(),
-                    })
+                    Err(error) => {
+                        tracing::warn!(
+                            target_id = %target.target_id,
+                            tool = %probe.name,
+                            error = %LocalDiagnostic::new(&error.to_string()),
+                            "snapshot probe failed"
+                        );
+                        status = "degraded".to_string();
+                        serde_json::json!({
+                            "tool": probe.name,
+                            "ok": false,
+                            "error_code": probe_error_code(&error),
+                        })
+                    }
                 }
             };
             probe_results.push(outcome);
@@ -275,4 +285,111 @@ pub async fn build_environment_snapshots(
     }
 
     snapshots
+}
+
+/// Bounded code for a failed snapshot probe call.
+fn probe_error_code(error: &ServitorError) -> &'static str {
+    match error {
+        ServitorError::McpValidation { .. } => "invalid_arguments",
+        ServitorError::McpServerNotFound { .. } => "server_unavailable",
+        ServitorError::Timeout { .. } => "timeout",
+        _ => "call_failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    use super::*;
+    use crate::mcp::McpClient;
+    use crate::test_support::{assert_same_bytes, ScriptedClient, SecretGen};
+
+    /// One target probing `shell_execute` once per entry in `probes`.
+    fn config_with_probes(probes: &[(&str, Value)]) -> Config {
+        let mut config = Config::from_str("").unwrap();
+        let calls = probes
+            .iter()
+            .map(|(name, arguments)| json!({ "name": name, "arguments": arguments }))
+            .collect::<Vec<_>>();
+        config.profile.targets = serde_json::from_value(json!([{
+            "target_id": "db",
+            "kind": "host",
+            "summary": "database host",
+            "snapshot_tool_calls": calls,
+        }]))
+        .unwrap();
+        config
+    }
+
+    async fn probe_results(config: &Config, client: Box<dyn McpClient>) -> Value {
+        let mut pool = McpPool::new();
+        pool.register_test_tool("shell", "execute", client);
+        let snapshots =
+            build_environment_snapshots(&Identity::generate(), &pool, config, "manifest").await;
+        assert_eq!(snapshots.len(), 1);
+        snapshots[0].state["probe_results"].clone()
+    }
+
+    #[tokio::test]
+    async fn probe_failures_publish_a_code_not_the_error_text() {
+        let canary = SecretGen::CANARY;
+        let config = config_with_probes(&[
+            ("shell_execute", json!({ "command": "status" })),
+            (&format!("shell_{canary}"), json!({})),
+        ]);
+
+        let results = probe_results(
+            &config,
+            ScriptedClient::call_error(format!("connect failed: password {canary}")),
+        )
+        .await;
+
+        let text = results.to_string();
+        assert!(!text.contains(canary), "{text}");
+        assert_eq!(
+            results,
+            json!([
+                { "tool": "shell_execute", "ok": false, "error_code": "call_failed" },
+                { "ok": false, "error_code": "unknown_tool" },
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_arguments_are_not_published() {
+        let canary = SecretGen::CANARY;
+        let config = config_with_probes(&[(
+            "shell_execute",
+            json!({ "command": format!("mysql -u monitor -p{canary} -e 'show status'") }),
+        )]);
+
+        let results = probe_results(&config, ScriptedClient::output("Uptime 42")).await;
+
+        assert!(!results.to_string().contains(canary), "{results}");
+        assert_eq!(
+            results,
+            json!([{ "tool": "shell_execute", "ok": true, "output": "Uptime 42" }])
+        );
+    }
+
+    /// Information-flow property for the snapshot's probe record: varying
+    /// a probe's arguments and its call error leaves the published probe
+    /// results unchanged.
+    #[tokio::test]
+    async fn probe_results_ignore_arguments_and_error_text() {
+        let mut reference: Option<Vec<u8>> = None;
+        for seed in 0..32 {
+            let mut gen = SecretGen::new(seed);
+            let config = config_with_probes(&[("shell_execute", gen.arguments())]);
+            let results = probe_results(&config, ScriptedClient::call_error(gen.secret())).await;
+            let bytes = serde_json::to_vec(&results).unwrap();
+            match &reference {
+                None => reference = Some(bytes),
+                Some(expected) => assert_same_bytes(expected, &bytes, &format!("seed {seed}")),
+            }
+        }
+        let reference = String::from_utf8(reference.unwrap()).unwrap();
+        assert!(!reference.contains(SecretGen::CANARY), "{reference}");
+    }
 }
