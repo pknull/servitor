@@ -6,8 +6,9 @@ use serde::Serialize;
 use crate::egregore::messages::{
     AssignTaskResultV1, AuthDenied, EnvironmentSnapshot, Notification, ServitorManifest,
     ServitorProfile, TaskClaim, TaskFailed, TaskOffer, TaskOfferWithdraw, TaskResult, TaskStarted,
-    TaskStatusMessage, TraceSpan,
+    TaskStatusMessage,
 };
+use crate::egregore::telemetry::{TraceSpan, TraceSpanStatus};
 use crate::error::{Result, ServitorError};
 
 const FEED_PAGE_LIMIT: usize = 200;
@@ -284,25 +285,25 @@ impl EgregoreClient {
 
     /// Publish a trace span message.
     pub async fn publish_trace_span(&self, span: &TraceSpan) -> Result<String> {
-        let status_tag = match span.status {
-            crate::egregore::messages::TraceSpanStatus::Ok => "ok",
-            crate::egregore::messages::TraceSpanStatus::Error => "error",
-            crate::egregore::messages::TraceSpanStatus::Timeout => "timeout",
+        let status_tag = match span.status() {
+            TraceSpanStatus::Ok => "ok",
+            TraceSpanStatus::Error => "error",
+            TraceSpanStatus::Timeout => "timeout",
         };
 
         let response = self
             .publish(
                 span,
                 &["trace_span", status_tag],
-                Some(&span.trace_id),
-                Some(&span.span_id),
+                Some(span.trace_id().as_str()),
+                Some(span.span_id().as_str()),
             )
             .await?;
         tracing::debug!(
             hash = %response.hash,
-            trace_id = %span.trace_id,
-            span_id = %span.span_id,
-            name = %span.name,
+            trace_id = %span.trace_id().as_str(),
+            span_id = %span.span_id().as_str(),
+            name = %span.name(),
             "published trace span"
         );
         Ok(response.hash)

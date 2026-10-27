@@ -1,14 +1,17 @@
-//! Argument sanitization for trace spans.
+//! Best-effort credential scrubbing.
 //!
 //! Implements security-conscious sanitization rules from component-model.md:
 //! - Redacts fields matching sensitive patterns: *key*, *secret*, *password*, *token*, *credential*, *api_key*
 //! - Scans string values for credential-shaped content (authorization headers,
 //!   `key=value` secret forms, known token formats, high-entropy tokens)
 //! - Truncates values longer than 1KB to prevent log flooding
-//! - Caps the serialized arguments attribute of one span at 4KB
 //!
-//! Spans enter the append-only, replicated feed, so a missed secret is
-//! permanent: every rule here prefers over-redaction to a miss.
+//! The scanners recognize credential shapes, not every secret, so they are a
+//! net for text that must pass through (tool results, the local log), never
+//! the reason something is safe to publish. Exported telemetry is built from
+//! public metadata alone (see [`crate::egregore::telemetry`]). Where these
+//! rules do run, a miss can be permanent, so every rule prefers
+//! over-redaction to a miss.
 
 use regex::{Captures, Regex};
 use serde_json::{Map, Value};
@@ -17,9 +20,6 @@ use std::sync::OnceLock;
 
 /// Maximum length for a single string value before truncation.
 const MAX_VALUE_LENGTH: usize = 1024;
-
-/// Maximum serialized size, in bytes, of the arguments attribute on one span.
-pub const MAX_SPAN_ARGUMENTS_BYTES: usize = 4096;
 
 /// Minimum alphanumeric length before a token is judged by the entropy check.
 const MIN_RANDOM_TOKEN_ALNUM: usize = 20;
@@ -88,36 +88,6 @@ pub fn sanitize_arguments(arguments: &Value) -> String {
 /// embedded in another JSON document.
 pub fn sanitize_argument_value(arguments: &Value) -> Value {
     sanitize_value(arguments, None, 0, None)
-}
-
-/// Build the `arguments` attribute for a tool-call trace span.
-///
-/// Returns the sanitized arguments as structured JSON when their compact
-/// serialization fits in [`MAX_SPAN_ARGUMENTS_BYTES`]. Larger arguments
-/// become a string preview of the sanitized JSON text, ending in a
-/// truncation marker and sized so that the attribute, serialized, still
-/// fits the cap.
-pub fn span_arguments_attribute(arguments: &Value) -> Value {
-    let sanitized = sanitize_argument_value(arguments);
-    let serialized = serde_json::to_string(&sanitized).unwrap_or_else(|_| "{}".to_string());
-    if serialized.len() <= MAX_SPAN_ARGUMENTS_BYTES {
-        return sanitized;
-    }
-
-    let marker = format!("... [truncated, {} bytes total]", serialized.len());
-    // Two bytes for the quotes around the preview string.
-    let budget = MAX_SPAN_ARGUMENTS_BYTES.saturating_sub(marker.len() + 2);
-    let mut end = serialized.floor_char_boundary(budget);
-    loop {
-        let preview = Value::String(format!("{}{marker}", &serialized[..end]));
-        let encoded_len = serde_json::to_string(&preview).map_or(usize::MAX, |s| s.len());
-        if encoded_len <= MAX_SPAN_ARGUMENTS_BYTES || end == 0 {
-            return preview;
-        }
-        // Escaping quotes and backslashes grew the preview: drop the overflow.
-        let overflow = encoded_len - MAX_SPAN_ARGUMENTS_BYTES;
-        end = serialized.floor_char_boundary(end.saturating_sub(overflow));
-    }
 }
 
 /// Recursively sanitize a JSON value.
@@ -1560,64 +1530,6 @@ mod tests {
             "{out}"
         );
         assert_eq!(out.matches('🎉').count(), MAX_VALUE_LENGTH / 4);
-    }
-
-    // Tests for the span arguments attribute
-
-    #[test]
-    fn span_arguments_within_cap_stay_structured() {
-        let args = json!({ "command": "ls -la", "api_key": "sk-secret" });
-        let attribute = span_arguments_attribute(&args);
-        assert_eq!(attribute, sanitize_argument_value(&args));
-        assert_eq!(attribute["api_key"], REDACTED);
-    }
-
-    #[test]
-    fn span_arguments_over_cap_are_truncated() {
-        let mut args = Map::new();
-        for i in 0..50 {
-            args.insert(format!("field_{i}"), Value::String("x".repeat(1000)));
-        }
-        let attribute = span_arguments_attribute(&Value::Object(args));
-        let serialized = serde_json::to_string(&attribute).unwrap();
-        assert!(
-            serialized.len() <= MAX_SPAN_ARGUMENTS_BYTES,
-            "{}",
-            serialized.len()
-        );
-        assert!(attribute.as_str().unwrap().contains("[truncated,"));
-    }
-
-    #[test]
-    fn span_arguments_cap_accounts_for_json_escaping() {
-        // Every '"' in the value grows when the preview is itself JSON-encoded.
-        let mut args = Map::new();
-        for i in 0..50 {
-            args.insert(format!("field_{i}"), Value::String("\"\\".repeat(450)));
-        }
-        let attribute = span_arguments_attribute(&Value::Object(args));
-        let serialized = serde_json::to_string(&attribute).unwrap();
-        assert!(
-            serialized.len() <= MAX_SPAN_ARGUMENTS_BYTES,
-            "{}",
-            serialized.len()
-        );
-    }
-
-    #[test]
-    fn span_arguments_cap_keeps_multibyte_text_valid() {
-        let args = json!({ "content": "🎉".repeat(5000) });
-        let attribute = span_arguments_attribute(&Value::Array(vec![args; 6]));
-        let preview = attribute
-            .as_str()
-            .expect("over-cap arguments become a preview");
-        assert!(preview.contains("🎉"));
-        let serialized = serde_json::to_string(&attribute).unwrap();
-        assert!(
-            serialized.len() <= MAX_SPAN_ARGUMENTS_BYTES,
-            "{}",
-            serialized.len()
-        );
     }
 
     // Tests for sanitize_tool_result

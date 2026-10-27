@@ -6,16 +6,17 @@
 
 use std::time::Instant;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::authority::Authority;
 use crate::config::AgentConfig;
-use crate::egregore::messages::{
-    PlannedToolCall, Task, TaskResult, TaskStatus, TraceSpan, TraceSpanStatus,
+use crate::egregore::messages::{PlannedToolCall, Task, TaskResult, TaskStatus};
+use crate::egregore::telemetry::{
+    self, ExecutionSpanRecord, TelemetryId, ToolOutcome, ToolSpanRecord, TraceSpan, TraceSpanStatus,
 };
-use crate::egregore::{telemetry, EgregoreClient};
+use crate::egregore::EgregoreClient;
 use crate::error::{CallRejection, LocalDiagnostic, Result, ServitorError};
 use crate::identity::Identity;
 use crate::mcp::{McpPool, RegisteredToolId};
@@ -46,23 +47,14 @@ pub async fn execute_direct(
     keeper_name: Option<&str>,
 ) -> Result<TaskResult> {
     let execution_start = Instant::now();
-    let inherited_trace_id = task_context_string(task, "trace_id");
-    let parent_span_id = task
-        .context_span_id()
-        .or_else(|| task.context_parent_span_id())
-        .or_else(|| task_context_string(task, "parent_span_id"));
-    let trace_enabled = config.publish_trace_spans && egregore.is_some();
-    let trace_id = if trace_enabled {
-        Some(
-            inherited_trace_id
-                .clone()
-                .unwrap_or_else(telemetry::generate_id),
-        )
-    } else {
-        inherited_trace_id
-    };
-    let root_span_id = trace_enabled.then(telemetry::generate_id);
-    let trace_started_at = trace_enabled.then(telemetry::now);
+    let trace = egregore
+        .filter(|_| config.publish_trace_spans)
+        .map(|egregore| ExecutionTrace::start(task, egregore));
+    let trace_id = match &trace {
+        Some(trace) => Some(trace.trace_id.clone()),
+        None => task.context_trace_id(),
+    }
+    .map(|id| id.as_str().to_string());
 
     tracing::info!(
         task_hash = %task.hash,
@@ -74,10 +66,11 @@ pub async fn execute_direct(
     let mut call_results: Vec<DirectCallResult> = Vec::with_capacity(task.tool_calls.len());
 
     for (idx, planned) in task.tool_calls.iter().enumerate() {
-        // Validate scope and authority before execution. Returns the authoritative
-        // (server, tool) split from the MCP pool — reused below for metrics, trace
-        // tags, and the authority-skill string so every downstream observation
-        // matches the registered tool boundary even when tool names contain `_`.
+        // Validate scope and authority before execution. Returns the tool's
+        // registered identity from the MCP pool — reused below for metrics,
+        // trace spans, and the authority-skill string so every downstream
+        // observation matches the registered tool boundary even when tool
+        // names contain `_`.
         let tool = validate_direct_call(
             idx,
             task,
@@ -87,7 +80,6 @@ pub async fn execute_direct(
             authority,
             keeper_name,
         )?;
-        let (provider_name, tool_name) = (tool.provider(), tool.tool());
 
         tracing::debug!(
             idx = idx,
@@ -96,38 +88,25 @@ pub async fn execute_direct(
         );
 
         let timer = Timer::start();
-        let tool_start = trace_enabled.then(telemetry::now);
+        let tool_start = telemetry::now();
         let result = mcp_pool
             .call_tool(&planned.name, planned.arguments.clone())
             .await;
         let duration = timer.elapsed_secs();
-        let status = match &result {
-            Ok(output) if !output.is_error => ToolCallStatus::Success,
-            _ => ToolCallStatus::Error,
+        let outcome = match &result {
+            Ok(output) if !output.is_error => ToolOutcome::Ok,
+            Ok(_) => ToolOutcome::ToolError,
+            Err(_) => ToolOutcome::CallError,
         };
-        metrics::record_tool_call(tool_name, provider_name, status);
-        metrics::record_tool_call_duration(tool_name, duration);
+        let status = match outcome {
+            ToolOutcome::Ok => ToolCallStatus::Success,
+            ToolOutcome::ToolError | ToolOutcome::CallError => ToolCallStatus::Error,
+        };
+        metrics::record_tool_call(tool.tool(), tool.provider(), status);
+        metrics::record_tool_call_duration(tool.tool(), duration);
 
-        // Publish trace span for this tool call
-        if let (Some(ref trace_id), Some(ref root_span_id), Some(tool_start)) =
-            (&trace_id, &root_span_id, tool_start)
-        {
-            let span = build_tool_span(ToolSpanInput {
-                trace_id,
-                span_id: telemetry::generate_id(),
-                parent_span_id: root_span_id,
-                provider_name,
-                tool_name,
-                start_ts: tool_start,
-                end_ts: telemetry::now(),
-                status: match &result {
-                    Ok(output) if !output.is_error => TraceSpanStatus::Ok,
-                    _ => TraceSpanStatus::Error,
-                },
-                arguments: &planned.arguments,
-                include_arguments: config.trace_span_arguments,
-            });
-            publish_tool_span(egregore, &span).await;
+        if let Some(trace) = &trace {
+            trace.publish_tool(tool, idx, tool_start, outcome).await;
         }
 
         match result {
@@ -144,10 +123,7 @@ pub async fn execute_direct(
                         identity,
                         &error_msg,
                         trace_id,
-                        &trace_started_at,
-                        &root_span_id,
-                        parent_span_id.as_deref(),
-                        egregore,
+                        trace.as_ref(),
                         Some(execution_start.elapsed().as_secs()),
                     )
                     .await;
@@ -166,10 +142,7 @@ pub async fn execute_direct(
                     identity,
                     &error_msg,
                     trace_id,
-                    &trace_started_at,
-                    &root_span_id,
-                    parent_span_id.as_deref(),
-                    egregore,
+                    trace.as_ref(),
                     Some(execution_start.elapsed().as_secs()),
                 )
                 .await;
@@ -195,27 +168,88 @@ pub async fn execute_direct(
         TaskStatus::Success,
         Some(result_value),
         None,
-        trace_id.clone(),
+        trace_id,
         Some(elapsed),
     )?;
 
-    // Publish root trace span
-    if let (Some(trace_id), Some(root_span_id), Some(started_at)) =
-        (&trace_id, &root_span_id, trace_started_at)
-    {
-        publish_root_span(
-            egregore,
-            task,
-            trace_id,
-            root_span_id,
-            started_at,
-            &task_result,
-            parent_span_id.as_deref(),
-        )
-        .await;
+    if let Some(trace) = &trace {
+        trace.publish_execution(TraceSpanStatus::Ok).await;
     }
 
     Ok(task_result)
+}
+
+/// Trace state for one execution whose spans are published.
+///
+/// Holds only public metadata: identifiers that are generated or inherited
+/// from the task's trace context, the task's call count, and the start time.
+struct ExecutionTrace<'a> {
+    egregore: &'a EgregoreClient,
+    trace_id: TelemetryId,
+    span_id: TelemetryId,
+    parent_span_id: Option<TelemetryId>,
+    execution_id: TelemetryId,
+    tool_count: usize,
+    start: DateTime<Utc>,
+}
+
+impl<'a> ExecutionTrace<'a> {
+    /// Join the task's trace when its context names one; otherwise start a
+    /// new trace.
+    fn start(task: &Task, egregore: &'a EgregoreClient) -> Self {
+        Self {
+            egregore,
+            trace_id: task
+                .context_trace_id()
+                .unwrap_or_else(TelemetryId::generate),
+            span_id: TelemetryId::generate(),
+            parent_span_id: task
+                .context_span_id()
+                .or_else(|| task.context_parent_span_id()),
+            execution_id: TelemetryId::generate(),
+            tool_count: task.tool_calls.len(),
+            start: telemetry::now(),
+        }
+    }
+
+    async fn publish_tool(
+        &self,
+        tool: RegisteredToolId,
+        call_index: usize,
+        start: DateTime<Utc>,
+        outcome: ToolOutcome,
+    ) {
+        let span = TraceSpan::tool(ToolSpanRecord {
+            trace_id: self.trace_id.clone(),
+            span_id: TelemetryId::generate(),
+            parent_span_id: self.span_id.clone(),
+            execution_id: self.execution_id.clone(),
+            tool,
+            call_index,
+            start,
+            end: telemetry::now(),
+            outcome,
+        });
+        if let Err(e) = self.egregore.publish_trace_span(&span).await {
+            tracing::debug!(error = %e, "failed to publish direct tool trace span");
+        }
+    }
+
+    async fn publish_execution(&self, status: TraceSpanStatus) {
+        let span = TraceSpan::execution(ExecutionSpanRecord {
+            trace_id: self.trace_id.clone(),
+            span_id: self.span_id.clone(),
+            parent_span_id: self.parent_span_id.clone(),
+            execution_id: self.execution_id.clone(),
+            tool_count: self.tool_count,
+            start: self.start,
+            end: telemetry::now(),
+            status,
+        });
+        if let Err(e) = self.egregore.publish_trace_span(&span).await {
+            tracing::debug!(error = %e, "failed to publish direct execution trace span");
+        }
+    }
 }
 
 /// Validate a single direct tool call against scope and authority policies.
@@ -317,16 +351,12 @@ fn build_result(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn build_error_result(
     task: &Task,
     identity: &Identity,
     error_msg: &str,
     trace_id: Option<String>,
-    trace_started_at: &Option<chrono::DateTime<Utc>>,
-    root_span_id: &Option<String>,
-    parent_span_id: Option<&str>,
-    egregore: Option<&EgregoreClient>,
+    trace: Option<&ExecutionTrace<'_>>,
     duration_seconds: Option<u64>,
 ) -> Result<TaskResult> {
     let result = build_result(
@@ -335,23 +365,12 @@ async fn build_error_result(
         TaskStatus::Error,
         None,
         Some(error_msg.to_string()),
-        trace_id.clone(),
+        trace_id,
         duration_seconds,
     )?;
 
-    if let (Some(trace_id), Some(root_span_id), Some(started_at)) =
-        (&trace_id, root_span_id, trace_started_at)
-    {
-        publish_root_span(
-            egregore,
-            task,
-            trace_id,
-            root_span_id,
-            *started_at,
-            &result,
-            parent_span_id,
-        )
-        .await;
+    if let Some(trace) = trace {
+        trace.publish_execution(TraceSpanStatus::Error).await;
     }
 
     Ok(result)
@@ -404,106 +423,6 @@ fn compute_result_hash(
     hasher.update(serde_json::to_vec(&payload).unwrap_or_default());
     let hash = hasher.finalize();
     hash.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn task_context_string(task: &Task, key: &str) -> Option<String> {
-    task.context
-        .get(key)
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-}
-
-/// Inputs for one tool-call trace span.
-struct ToolSpanInput<'a> {
-    trace_id: &'a str,
-    span_id: String,
-    parent_span_id: &'a str,
-    provider_name: &'a str,
-    tool_name: &'a str,
-    start_ts: chrono::DateTime<Utc>,
-    end_ts: chrono::DateTime<Utc>,
-    status: TraceSpanStatus,
-    arguments: &'a serde_json::Value,
-    /// `agent.trace_span_arguments`: attach sanitized arguments to the span.
-    include_arguments: bool,
-}
-
-/// Build the trace span for one tool call.
-///
-/// Pure: ids and timestamps come from the caller, so argument inclusion is
-/// testable without an egregore client. Arguments are attached only when
-/// `include_arguments` is set, and always through the sanitizer.
-fn build_tool_span(input: ToolSpanInput<'_>) -> TraceSpan {
-    let mut span = TraceSpan::new(
-        input.trace_id,
-        input.span_id,
-        Some(input.parent_span_id.to_string()),
-        format!("direct:{}:{}", input.provider_name, input.tool_name),
-        "servitor",
-        input.start_ts,
-        input.end_ts,
-        input.status,
-    );
-    if input.include_arguments {
-        span.attributes.insert(
-            "arguments".to_string(),
-            crate::agent::sanitize::span_arguments_attribute(input.arguments),
-        );
-    }
-    span
-}
-
-async fn publish_tool_span(egregore: Option<&EgregoreClient>, span: &TraceSpan) {
-    let Some(egregore) = egregore else { return };
-
-    if let Err(e) = egregore.publish_trace_span(span).await {
-        tracing::debug!(error = %e, "failed to publish direct tool trace span");
-    }
-}
-
-async fn publish_root_span(
-    egregore: Option<&EgregoreClient>,
-    task: &Task,
-    trace_id: &str,
-    root_span_id: &str,
-    start_ts: chrono::DateTime<Utc>,
-    result: &TaskResult,
-    parent_span_id: Option<&str>,
-) {
-    let Some(egregore) = egregore else { return };
-
-    let status = match result.status {
-        TaskStatus::Success => TraceSpanStatus::Ok,
-        TaskStatus::Error => TraceSpanStatus::Error,
-        TaskStatus::Timeout => TraceSpanStatus::Timeout,
-    };
-
-    let mut span = TraceSpan::new(
-        trace_id,
-        root_span_id,
-        parent_span_id.map(str::to_string),
-        "direct_execution",
-        "servitor",
-        start_ts,
-        telemetry::now(),
-        status,
-    );
-    span.attributes.insert(
-        "task_hash".to_string(),
-        serde_json::Value::String(task.hash.clone()),
-    );
-    span.attributes.insert(
-        "mode".to_string(),
-        serde_json::Value::String("direct".to_string()),
-    );
-    span.attributes.insert(
-        "tool_count".to_string(),
-        serde_json::json!(task.tool_calls.len()),
-    );
-
-    if let Err(e) = egregore.publish_trace_span(&span).await {
-        tracing::debug!(error = %e, "failed to publish direct root trace span");
-    }
 }
 
 #[cfg(test)]
@@ -605,88 +524,6 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
-    fn tool_span_input<'a>(
-        arguments: &'a serde_json::Value,
-        include_arguments: bool,
-    ) -> ToolSpanInput<'a> {
-        let start_ts = Utc::now();
-        ToolSpanInput {
-            trace_id: "trace-1",
-            span_id: "span-1".to_string(),
-            parent_span_id: "root-1",
-            provider_name: "shell",
-            tool_name: "execute",
-            start_ts,
-            end_ts: start_ts,
-            status: TraceSpanStatus::Ok,
-            arguments,
-            include_arguments,
-        }
-    }
-
-    #[test]
-    fn tool_span_without_arguments_matches_legacy_span() {
-        let arguments = serde_json::json!({ "command": "rm -rf /tmp/scratch" });
-        let input = tool_span_input(&arguments, AgentConfig::default().trace_span_arguments);
-        let legacy = TraceSpan::new(
-            input.trace_id,
-            input.span_id.clone(),
-            Some(input.parent_span_id.to_string()),
-            "direct:shell:execute",
-            "servitor",
-            input.start_ts,
-            input.end_ts,
-            TraceSpanStatus::Ok,
-        );
-
-        let span = build_tool_span(input);
-
-        assert!(!span.attributes.contains_key("arguments"));
-        assert_eq!(
-            serde_json::to_value(&span).unwrap(),
-            serde_json::to_value(&legacy).unwrap()
-        );
-    }
-
-    #[test]
-    fn tool_span_with_arguments_carries_sanitized_arguments() {
-        let arguments = serde_json::json!({
-            "command": "curl -H 'Authorization: Bearer abc123def456' https://api.example.com",
-            "api_key": "sk-field-level-secret",
-            "path": "/tmp/scratch"
-        });
-
-        let span = build_tool_span(tool_span_input(&arguments, true));
-
-        let attribute = &span.attributes["arguments"];
-        let serialized = serde_json::to_string(attribute).unwrap();
-        assert!(!serialized.contains("abc123def456"), "{serialized}");
-        assert!(
-            !serialized.contains("sk-field-level-secret"),
-            "{serialized}"
-        );
-        assert_eq!(attribute["api_key"], "[REDACTED]");
-        assert_eq!(attribute["path"], "/tmp/scratch");
-        assert!(attribute["command"]
-            .as_str()
-            .unwrap()
-            .starts_with("curl -H 'Authorization: "));
-    }
-
-    #[test]
-    fn tool_span_arguments_are_capped_at_4kb() {
-        let mut fields = serde_json::Map::new();
-        for i in 0..20 {
-            fields.insert(format!("field_{i}"), serde_json::json!("y".repeat(1000)));
-        }
-        let arguments = serde_json::Value::Object(fields);
-
-        let span = build_tool_span(tool_span_input(&arguments, true));
-
-        let serialized = serde_json::to_string(&span.attributes["arguments"]).unwrap();
-        assert!(serialized.len() <= 4096, "{}", serialized.len());
-    }
-
     /// Locks the byte-format of the hashed payload. If a future refactor
     /// changes field order, switches to serde_json::json!({...}), or otherwise
     /// alters the JSON shape, this test fails — preventing silent
@@ -721,5 +558,300 @@ mod tests {
             hash, "5d46352b090e62dedd916b90ff5f8b2cdcae9758938d84d460891b2084e615b8",
             "result_hash byte-format changed unexpectedly"
         );
+    }
+
+    mod feed_disclosure {
+        use std::collections::{BTreeSet, HashMap};
+
+        use serde_json::{json, Value};
+        use sha2::{Digest, Sha256};
+
+        use chrono::Utc;
+
+        use super::super::execute_direct;
+        use crate::config::{AgentConfig, Config};
+        use crate::egregore::{telemetry, PlannedToolCall, Task};
+        use crate::identity::Identity;
+        use crate::mcp::{McpClient, McpPool};
+        use crate::scope::ScopeEnforcer;
+        use crate::test_support::{assert_same_bytes, CaptureNode, ScriptedClient, SecretGen};
+
+        const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+        const PARENT_SPAN_ID: &str = "00f067aa0ba902b7";
+
+        /// Tracing configurations to cover. One that fails to load is not a
+        /// supported deployment and is skipped; plain tracing must load.
+        const TRACING_CONFIGS: &[&str] = &[
+            "[agent]\npublish_trace_spans = true\n",
+            "[agent]\npublish_trace_spans = true\ntrace_span_arguments = false\n",
+            "[agent]\npublish_trace_spans = true\ntrace_span_arguments = true\n",
+        ];
+
+        #[derive(Debug, Clone, Copy)]
+        enum Outcome {
+            Output,
+            ToolError,
+            CallError,
+        }
+
+        fn loadable_tracing_configs() -> Vec<(&'static str, AgentConfig)> {
+            let configs: Vec<_> = TRACING_CONFIGS
+                .iter()
+                .filter_map(|toml| Some((*toml, Config::from_str(toml).ok()?.agent)))
+                .collect();
+            assert!(
+                configs.iter().any(|(toml, _)| *toml == TRACING_CONFIGS[0]),
+                "plain tracing must load"
+            );
+            configs
+        }
+
+        /// A task as `servitor exec` builds one: its hash derives from the
+        /// planned call, so it is payload rather than public metadata. Its
+        /// trace context is public and held fixed.
+        fn exec_task(gen: &mut SecretGen, context: HashMap<String, Value>) -> Task {
+            let call = PlannedToolCall {
+                id: "call-1".to_string(),
+                name: "shell_execute".to_string(),
+                arguments: gen.arguments(),
+            };
+            let mut hasher = Sha256::new();
+            hasher.update(call.name.as_bytes());
+            hasher.update(serde_json::to_vec(&call.arguments).unwrap());
+            let hash: String = hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            Task {
+                msg_type: "task".to_string(),
+                id: None,
+                hash,
+                task_type: None,
+                request: Some(gen.secret()),
+                requestor: None,
+                prompt: gen.secret(),
+                required_caps: vec![],
+                parent_id: None,
+                context,
+                priority: 0,
+                timeout_secs: None,
+                author: None,
+                keeper: None,
+                scope_override: None,
+                tool_calls: vec![call],
+                depends_on: vec![],
+            }
+        }
+
+        fn public_trace_context() -> HashMap<String, Value> {
+            HashMap::from([
+                ("trace_id".to_string(), json!(TRACE_ID)),
+                ("span_id".to_string(), json!(PARENT_SPAN_ID)),
+            ])
+        }
+
+        fn scripted(outcome: Outcome, gen: &mut SecretGen) -> Box<dyn McpClient> {
+            match outcome {
+                Outcome::Output => ScriptedClient::output(gen.secret()),
+                Outcome::ToolError => ScriptedClient::tool_error(gen.secret()),
+                Outcome::CallError => ScriptedClient::call_error(gen.secret()),
+            }
+        }
+
+        thread_local! {
+            static SERVITOR: Identity = Identity::generate();
+        }
+
+        /// Execute `task` against a `shell_execute` tool answering with
+        /// `client`, as one fixed servitor, returning the published
+        /// `trace_span` bodies.
+        async fn published_spans(
+            node: &CaptureNode,
+            config: &AgentConfig,
+            task: &Task,
+            client: Box<dyn McpClient>,
+        ) -> Vec<Vec<u8>> {
+            let mut pool = McpPool::new();
+            pool.register_test_tool("shell", "execute", client);
+            let identity = SERVITOR.with(Identity::clone);
+            node.clear();
+            execute_direct(
+                task,
+                &pool,
+                &ScopeEnforcer::new(),
+                &identity,
+                config,
+                Some(&node.client),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            node.bodies_of_type("trace_span")
+        }
+
+        /// Information-flow property: with public metadata held fixed (tool,
+        /// call count, trace context, outcome, clock), no change to the
+        /// arguments, output, error text or prompt changes the published
+        /// span bytes, under every tracing configuration that loads.
+        #[tokio::test]
+        async fn trace_span_bytes_ignore_payloads() {
+            let node = CaptureNode::start().await;
+            let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+
+            for (toml, config) in loadable_tracing_configs() {
+                for outcome in [Outcome::Output, Outcome::ToolError, Outcome::CallError] {
+                    let mut reference: Option<Vec<Vec<u8>>> = None;
+                    for seed in 0..32 {
+                        let mut gen = SecretGen::new(seed);
+                        let task = exec_task(&mut gen, public_trace_context());
+                        let client = scripted(outcome, &mut gen);
+                        let _frozen = telemetry::freeze(at);
+                        let spans = published_spans(&node, &config, &task, client).await;
+
+                        let label = format!("{toml:?} {outcome:?} seed {seed}");
+                        assert_eq!(spans.len(), 2, "{label}");
+                        match &reference {
+                            None => reference = Some(spans),
+                            Some(expected) => {
+                                for (expected, actual) in expected.iter().zip(&spans) {
+                                    assert_same_bytes(expected, actual, &label);
+                                }
+                            }
+                        }
+                    }
+                    for span in reference.unwrap() {
+                        let span = String::from_utf8(span).unwrap();
+                        assert!(!span.contains(SecretGen::CANARY), "{span}");
+                    }
+                }
+            }
+        }
+
+        fn keys(value: &Value) -> BTreeSet<&str> {
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect()
+        }
+
+        fn is_generated_id(value: &Value) -> bool {
+            value.as_str().is_some_and(|id| {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        }
+
+        /// Structural check of everything a published span carries: exact
+        /// keys at every level, and each value from its approved domain.
+        #[tokio::test]
+        async fn spans_carry_exactly_the_approved_metadata() {
+            let node = CaptureNode::start().await;
+            let config = Config::from_str(TRACING_CONFIGS[0]).unwrap().agent;
+            let task = exec_task(&mut SecretGen::new(7), public_trace_context());
+            let spans = published_spans(&node, &config, &task, ScriptedClient::output("ok")).await;
+            let [tool, root] =
+                [&spans[0], &spans[1]].map(|body| serde_json::from_slice::<Value>(body).unwrap());
+
+            let envelope_keys = BTreeSet::from(["content", "span_id", "tags", "trace_id"]);
+            let span_keys = BTreeSet::from([
+                "attributes",
+                "end_ts",
+                "name",
+                "parent_span_id",
+                "service",
+                "span_id",
+                "start_ts",
+                "status",
+                "trace_id",
+                "type",
+            ]);
+            for envelope in [&tool, &root] {
+                assert_eq!(keys(envelope), envelope_keys);
+                let span = &envelope["content"];
+                assert_eq!(keys(span), span_keys);
+                assert_eq!(span["type"], "trace_span");
+                assert_eq!(span["service"], "servitor");
+                assert_eq!(span["status"], "ok");
+                assert_eq!(span["trace_id"], TRACE_ID);
+                assert_eq!(envelope["trace_id"], TRACE_ID);
+                assert!(is_generated_id(&span["span_id"]), "{span}");
+                assert_eq!(envelope["span_id"], span["span_id"]);
+                assert_eq!(envelope["tags"], json!(["trace_span", "ok"]));
+                for ts in ["start_ts", "end_ts"] {
+                    let ts = span[ts].as_str().unwrap();
+                    assert!(chrono::DateTime::parse_from_rfc3339(ts).is_ok(), "{ts}");
+                }
+            }
+
+            let (tool, root) = (&tool["content"], &root["content"]);
+            assert_eq!(tool["name"], "direct:shell:execute");
+            assert_eq!(tool["parent_span_id"], root["span_id"]);
+            assert_eq!(
+                keys(&tool["attributes"]),
+                BTreeSet::from([
+                    "call_index",
+                    "duration_ms",
+                    "execution_id",
+                    "outcome",
+                    "provider",
+                    "tool"
+                ])
+            );
+            let attributes = &tool["attributes"];
+            assert_eq!(attributes["provider"], "shell");
+            assert_eq!(attributes["tool"], "execute");
+            assert_eq!(attributes["call_index"], 0);
+            assert_eq!(attributes["outcome"], "ok");
+            assert!(attributes["duration_ms"].is_u64());
+            assert!(is_generated_id(&attributes["execution_id"]));
+
+            assert_eq!(root["name"], "direct_execution");
+            assert_eq!(root["parent_span_id"], PARENT_SPAN_ID);
+            assert_eq!(
+                keys(&root["attributes"]),
+                BTreeSet::from(["duration_ms", "execution_id", "mode", "tool_count"])
+            );
+            assert_eq!(
+                root["attributes"]["execution_id"],
+                attributes["execution_id"]
+            );
+            assert_eq!(root["attributes"]["mode"], "direct");
+            assert_eq!(root["attributes"]["tool_count"], 1);
+            assert!(root["attributes"]["duration_ms"].is_u64());
+        }
+
+        /// Inherited trace context is reused only when it has identifier
+        /// syntax; anything else is replaced, never published.
+        #[tokio::test]
+        async fn malformed_inherited_trace_ids_are_not_published() {
+            let node = CaptureNode::start().await;
+            let config = Config::from_str(TRACING_CONFIGS[0]).unwrap().agent;
+            let canary = SecretGen::CANARY;
+            let context = HashMap::from([
+                ("trace_id".to_string(), json!(format!("trace {canary}"))),
+                ("span_id".to_string(), json!(canary)),
+            ]);
+            let task = exec_task(&mut SecretGen::new(3), context);
+
+            let spans = published_spans(&node, &config, &task, ScriptedClient::output("ok")).await;
+
+            assert_eq!(spans.len(), 2);
+            for body in &spans {
+                let text = String::from_utf8_lossy(body);
+                assert!(!text.contains(canary), "{text}");
+                let span = &serde_json::from_slice::<Value>(body).unwrap()["content"];
+                assert!(is_generated_id(&span["trace_id"]), "{span}");
+            }
+            let root = &serde_json::from_slice::<Value>(&spans[1]).unwrap()["content"];
+            assert!(root.get("parent_span_id").is_none(), "{root}");
+        }
     }
 }

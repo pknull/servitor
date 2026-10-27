@@ -185,35 +185,34 @@ fn task_result_trace_id_roundtrip() {
 #[test]
 fn trace_span_serialization() {
     use chrono::Utc;
-    use servitor::egregore::messages::{TraceEvent, TraceSpan, TraceSpanStatus};
-    use std::collections::HashMap;
+    use servitor::egregore::telemetry::{
+        ExecutionSpanRecord, TelemetryId, TraceSpan, TraceSpanStatus,
+    };
 
-    let mut span = TraceSpan::new(
-        "trace-123",
-        "span-abc",
-        Some("parent-xyz".to_string()),
-        "task_execution",
-        "@servitor.ed25519",
-        Utc::now(),
-        Utc::now(),
-        TraceSpanStatus::Ok,
-    );
-    span.attributes
-        .insert("task_id".to_string(), serde_json::json!("task-123"));
-    span.events.push(TraceEvent {
-        ts: Utc::now(),
-        name: "image_pulled".to_string(),
-        attributes: HashMap::new(),
+    let execution_id = TelemetryId::generate();
+    let span = TraceSpan::execution(ExecutionSpanRecord {
+        trace_id: TelemetryId::inherit("4bf92f3577b34da6a3ce929d0e0e4736").unwrap(),
+        span_id: TelemetryId::inherit("00f067aa0ba902b7").unwrap(),
+        parent_span_id: TelemetryId::inherit("a3ce929d0e0e4736"),
+        execution_id: execution_id.clone(),
+        tool_count: 2,
+        start: Utc::now(),
+        end: Utc::now(),
+        status: TraceSpanStatus::Ok,
     });
 
     let json = serde_json::to_value(&span).unwrap();
     assert_eq!(json["type"], "trace_span");
-    assert_eq!(json["trace_id"], "trace-123");
-    assert_eq!(json["span_id"], "span-abc");
-    assert_eq!(json["parent_span_id"], "parent-xyz");
+    assert_eq!(json["trace_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
+    assert_eq!(json["span_id"], "00f067aa0ba902b7");
+    assert_eq!(json["parent_span_id"], "a3ce929d0e0e4736");
+    assert_eq!(json["name"], "direct_execution");
+    assert_eq!(json["service"], "servitor");
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["attributes"]["task_id"], "task-123");
-    assert_eq!(json["events"][0]["name"], "image_pulled");
+    assert_eq!(json["attributes"]["execution_id"], execution_id.as_str());
+    assert_eq!(json["attributes"]["mode"], "direct");
+    assert_eq!(json["attributes"]["tool_count"], 2);
+    assert!(json.get("events").is_none());
 }
 
 // LLM-specific tests removed: provider_capabilities, agent_context

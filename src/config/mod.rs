@@ -63,6 +63,17 @@ roles = ["executor"]
 
     /// Validate configuration.
     fn validate(&self) -> Result<()> {
+        if self.agent.trace_span_arguments == Some(true) {
+            return Err(ServitorError::Config {
+                reason: "agent.trace_span_arguments = true is unsupported: trace spans \
+                         published to the feed carry only public metadata, so tool-call \
+                         arguments have no place on them. Set it to false or remove it. \
+                         Capturing arguments for debugging is planned as a local-only \
+                         diagnostics mode that writes to this machine, not the feed."
+                    .into(),
+            });
+        }
+
         // Validate MCP server configs
         for (name, mcp) in &self.mcp {
             match mcp.transport.as_str() {
@@ -241,28 +252,29 @@ timeout_secs = 120
     }
 
     #[test]
-    fn trace_span_arguments_defaults_off() {
-        assert!(!AgentConfig::default().trace_span_arguments);
-
-        // Enabling tracing alone must not start publishing arguments.
-        let toml = r#"
-[agent]
-publish_trace_spans = true
-"#;
-        let config = Config::from_str(toml).unwrap();
-        assert!(config.agent.publish_trace_spans);
-        assert!(!config.agent.trace_span_arguments);
+    fn trace_span_arguments_accepts_only_false() {
+        for toml in [
+            "[agent]\npublish_trace_spans = true\n",
+            "[agent]\npublish_trace_spans = true\ntrace_span_arguments = false\n",
+        ] {
+            let config = Config::from_str(toml).unwrap();
+            assert!(config.agent.publish_trace_spans);
+        }
     }
 
     #[test]
-    fn parse_trace_span_arguments() {
+    fn trace_span_arguments_true_is_rejected_at_load() {
         let toml = r#"
 [agent]
 publish_trace_spans = true
 trace_span_arguments = true
 "#;
-        let config = Config::from_str(toml).unwrap();
-        assert!(config.agent.trace_span_arguments);
+        let error = Config::from_str(toml).unwrap_err().to_string();
+        assert!(
+            error.contains("agent.trace_span_arguments = true"),
+            "{error}"
+        );
+        assert!(error.contains("local-only diagnostics mode"), "{error}");
     }
 
     #[test]

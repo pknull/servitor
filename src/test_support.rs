@@ -93,13 +93,28 @@ pub(crate) fn assert_same_bytes(expected: &[u8], actual: &[u8], label: &str) {
 
 /// An MCP client with a single scripted reply.
 pub(crate) struct ScriptedClient {
-    reply: ToolCallResult,
+    reply: std::result::Result<ToolCallResult, String>,
 }
 
 impl ScriptedClient {
+    /// The tool succeeds with `text`.
     pub(crate) fn output(text: impl Into<String>) -> Box<dyn McpClient> {
         Box::new(Self {
-            reply: ToolCallResult::text(text),
+            reply: Ok(ToolCallResult::text(text)),
+        })
+    }
+
+    /// The tool runs and reports an error result carrying `text`.
+    pub(crate) fn tool_error(text: impl Into<String>) -> Box<dyn McpClient> {
+        Box::new(Self {
+            reply: Ok(ToolCallResult::error(text)),
+        })
+    }
+
+    /// The call itself fails with an MCP error carrying `text`.
+    pub(crate) fn call_error(text: impl Into<String>) -> Box<dyn McpClient> {
+        Box::new(Self {
+            reply: Err(text.into()),
         })
     }
 }
@@ -126,7 +141,9 @@ impl McpClient for ScriptedClient {
         _name: &str,
         _arguments: Value,
     ) -> thallus_core::Result<ToolCallResult> {
-        Ok(self.reply.clone())
+        self.reply
+            .clone()
+            .map_err(|reason| thallus_core::CoreError::Mcp { reason })
     }
 
     async fn ping(&self) -> thallus_core::Result<()> {

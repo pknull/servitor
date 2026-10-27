@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::egregore::telemetry::TelemetryId;
 use crate::error::{CallRejection, ServitorError};
 use crate::identity::PublicId;
 use crate::scope::ScopeRule;
@@ -559,25 +560,29 @@ impl Task {
         self.request.as_deref().unwrap_or(&self.prompt)
     }
 
-    pub fn context_trace_id(&self) -> Option<String> {
-        self.context
-            .get("trace_id")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
+    /// The trace this task belongs to, when its context names one with
+    /// identifier syntax.
+    pub fn context_trace_id(&self) -> Option<TelemetryId> {
+        self.context_id("trace_id")
     }
 
-    pub fn context_span_id(&self) -> Option<String> {
-        self.context
-            .get("span_id")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
+    /// The span that requested this task, when its context names one with
+    /// identifier syntax.
+    pub fn context_span_id(&self) -> Option<TelemetryId> {
+        self.context_id("span_id")
     }
 
-    pub fn context_parent_span_id(&self) -> Option<String> {
+    /// The requesting span's parent, when its context names one with
+    /// identifier syntax.
+    pub fn context_parent_span_id(&self) -> Option<TelemetryId> {
+        self.context_id("parent_span_id")
+    }
+
+    fn context_id(&self, key: &str) -> Option<TelemetryId> {
         self.context
-            .get("parent_span_id")
+            .get(key)
             .and_then(|value| value.as_str())
-            .map(str::to_string)
+            .and_then(TelemetryId::inherit)
     }
 
     /// Whether this task carries pre-planned tool calls for direct execution.
@@ -963,74 +968,6 @@ pub enum NotificationPriority {
     Urgent,
 }
 
-/// Published trace span for task execution and MCP tool activity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TraceSpan {
-    #[serde(rename = "type")]
-    pub msg_type: String,
-
-    /// Distributed trace identifier shared across related spans.
-    pub trace_id: String,
-
-    /// Unique identifier for this span.
-    pub span_id: String,
-
-    /// Optional parent span identifier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_span_id: Option<String>,
-
-    /// Human-readable span name.
-    pub name: String,
-
-    /// Service or node responsible for the span.
-    pub service: String,
-
-    /// Span start timestamp.
-    pub start_ts: DateTime<Utc>,
-
-    /// Span end timestamp.
-    pub end_ts: DateTime<Utc>,
-
-    /// Execution outcome.
-    pub status: TraceSpanStatus,
-
-    /// Additional span attributes.
-    #[serde(default)]
-    pub attributes: HashMap<String, serde_json::Value>,
-
-    /// Time-stamped events recorded during the span.
-    #[serde(default)]
-    pub events: Vec<TraceEvent>,
-}
-
-impl TraceSpan {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        trace_id: impl Into<String>,
-        span_id: impl Into<String>,
-        parent_span_id: Option<String>,
-        name: impl Into<String>,
-        service: impl Into<String>,
-        start_ts: DateTime<Utc>,
-        end_ts: DateTime<Utc>,
-        status: TraceSpanStatus,
-    ) -> Self {
-        Self {
-            msg_type: "trace_span".to_string(),
-            trace_id: trace_id.into(),
-            span_id: span_id.into(),
-            parent_span_id,
-            name: name.into(),
-            service: service.into(),
-            start_ts,
-            end_ts,
-            status,
-            attributes: HashMap::new(),
-            events: Vec::new(),
-        }
-    }
-}
-
 /// Authorization gate where a denial occurred.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -1084,23 +1021,6 @@ impl AuthDenied {
     }
 }
 
-/// Execution outcome for a trace span.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum TraceSpanStatus {
-    Ok,
-    Error,
-    Timeout,
-}
-
-/// Event emitted within a trace span.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TraceEvent {
-    pub ts: DateTime<Utc>,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub attributes: HashMap<String, serde_json::Value>,
-}
 /// Generic egregore message envelope (for hook input and context fetching).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EgregoreMessage {
