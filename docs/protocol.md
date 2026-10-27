@@ -92,7 +92,31 @@ a recorded result, replay produces neither another decision record nor another
 execution; the existing result remains authoritative.
 
 When trace propagation is enabled, offer, start, status, failure, and result
-messages reuse the inherited task trace identifier when present.
+messages reuse the inherited task trace identifier when present. An inherited
+identifier is reused when it has identifier syntax: 8 to 64 hex digits or
+hyphens, the shape of UUIDs and W3C trace ids.
+
+## Task Failure Payload
+
+`task_failed` carries `task_id`, `servitor`, `reason`
+(`execution_error` or `timeout`), `timestamp`, a bounded `code`, and a
+`details` sentence built from public metadata: the failing call's position in
+the plan, the registered tool (`<server>:<tool>`), and a scope rule named by
+its list and index. Policy rule indices refer to the server's `scope.allow` and
+`scope.block` lists as published in `servitor_profile.scopes`; override rule
+indices refer to the task's own `scope_override` lists. The full error text
+stays in the executor's local log.
+
+| `code` | `details` |
+|--------|-----------|
+| `missing_tool_calls` | The task carried no pre-planned `tool_calls` |
+| `unknown_tool` | `tool call <i> names no registered tool` |
+| `unauthorized` | `tool call <i> (<tool>) is not authorized for the requesting keeper` |
+| `scope_blocked` | `tool call <i> (<tool>) blocked by policy block rule <n>` (or `task scope override block rule <n>`) |
+| `scope_not_allowed` | `tool call <i> (<tool>) not permitted by any policy allow rule` (or `task scope override allow rule`) |
+| `invalid_scope_override` | `tool call <i> (<tool>) refused: task scope override <allow\|block> rule <n> is invalid` |
+| `execution_timeout` | `task exceeded <n>s execution timeout` |
+| `execution_error` | `task execution failed` |
 
 ## Direct, Hook, Cron, and Watcher Flow
 
@@ -189,12 +213,28 @@ configured targets. Snapshot publication is driven by
 `profile.targets[*].snapshot_tool_calls`; if no probes are configured, the
 snapshot still publishes a configured-only target view.
 
-Probe arguments are sanitized before inclusion in `environment_snapshot`, and
-probe output passes through the same output-defense pipeline used for direct
-tool execution.
+Each probe record in `environment_snapshot` names the registered tool and
+whether the probe succeeded. A successful or tool-reported result carries the
+probe output, reduced through the same output-defense pipeline used for direct
+tool execution; a failed call carries a bounded `error_code` (`unknown_tool`,
+`invalid_arguments`, `server_unavailable`, `timeout`, `call_failed`). Probe
+arguments stay in configuration, and error text goes to the executor's local
+log.
 
 ## Tracing
 
 Detailed `trace_span` messages are disabled by default. Set `agent.publish_trace_spans = true` to emit task and tool spans.
-Tool spans omit call arguments unless `agent.trace_span_arguments = true`; then
-they carry a sanitized `arguments` attribute of at most 4KB serialized.
+
+Spans are built exclusively from approved public metadata. Every span carries
+`trace_id`, `span_id`, `parent_span_id` when there is one, `name`, `service`
+(`servitor`), `start_ts`, `end_ts`, `status` (`ok`, `error`, `timeout`), and
+`attributes`:
+
+| Span | `name` | `attributes` |
+|------|--------|--------------|
+| Tool call | `direct:<server>:<tool>` | `execution_id`, `provider`, `tool`, `call_index`, `duration_ms`, `outcome` (`ok`, `tool_error`, `call_error`) |
+| Execution | `direct_execution` | `execution_id`, `mode` (`direct`), `tool_count`, `duration_ms` |
+
+`execution_id` and span identifiers are generated per execution, and the
+provider and tool are the names the MCP pool registered. Tool output belongs
+to the task result, and detailed error text to the executor's local log.

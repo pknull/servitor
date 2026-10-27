@@ -138,8 +138,8 @@ tool calls, task execution, and task lifecycle events.
 
 - `timeout_secs`: default execution timeout
 - `publish_trace_spans`: opt-in tracing over egregore
-- `trace_span_arguments`: opt-in tool-call arguments on tool spans (default
-  `false`; no effect unless `publish_trace_spans` is also set)
+- `trace_span_arguments`: accepts only `false` (the default); `true` fails at
+  load, because published spans carry public metadata only
 
 Servitor no longer owns planning or multi-turn reasoning. Any older
 planner-oriented fields should be treated as legacy residue, not part of the
@@ -147,18 +147,17 @@ active contract.
 
 When `publish_trace_spans = true`, Servitor emits task-level and per-tool
 `trace_span` messages. If inbound work already carries top-level Egregore
-`trace_id` / `span_id` fields, Servitor reuses that trace context instead of
-starting an unrelated trace tree.
+`trace_id` / `span_id` fields with identifier syntax (8 to 64 hex digits or
+hyphens), Servitor reuses that trace context instead of starting an unrelated
+trace tree.
 
-Tool spans carry only the tool name, provider, timing, and status unless
-`trace_span_arguments = true` is also set. Then each tool span gains an
-`arguments` attribute: the call's arguments after field-name redaction and a
-value scan for credential-shaped content (authorization headers, `name=value`
-secrets, `--flag value` secrets, URL passwords, known token formats, PEM
-private keys, high-entropy tokens), with string values truncated at 1KB.
-Arguments whose serialized form exceeds 4KB become a truncated string preview
-of the sanitized JSON. The scan prefers over-redaction: hex digests, UUIDs,
-and long identifiers mixing case and digits may be redacted.
+Spans are built exclusively from approved public metadata: generated span and
+execution identifiers, the registered provider and tool, the call's position
+in the plan, timing, and an outcome. Tool output belongs to the task result
+and detailed error text to the local log; the protocol reference lists every
+span field. Capturing arguments for debugging is
+planned as a local-only diagnostics mode that writes to this machine and never
+to the feed.
 
 ## `task`
 
@@ -201,9 +200,11 @@ Each `[[profile.targets]]` entry supports:
 `snapshot_tool_calls` are structured probe calls the servitor runs locally to
 publish `environment_snapshot` state for that target.
 
-Probe arguments are sanitized before publication. Probe output is reduced
-through the same output-defense pipeline used for direct tool execution so the
-published snapshot remains planner-facing rather than raw tool output.
+Each published probe record names the tool and whether the probe succeeded.
+Probe output is reduced through the same output-defense pipeline used for
+direct tool execution so the published snapshot remains planner-facing; a
+failed probe call publishes a bounded `error_code`. Probe arguments stay in
+this configuration, and error text goes to the local log.
 
 ## `schedule`
 

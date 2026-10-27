@@ -13,10 +13,16 @@ All notable changes to servitor are documented here. The format follows [Keep a 
   operator assignments fail closed, durably publishes `AssignTaskResultV1`
   before execution, and suppresses replayed `command_id` mutations using
   recorded owner results.
-- `agent.trace_span_arguments` (default `false`) attaches each tool call's
-  sanitized arguments to its tool `trace_span` as an `arguments` attribute,
-  capped at 4KB serialized. It has no effect unless `publish_trace_spans` is
-  also enabled; with it off, tool spans are unchanged.
+- `task_failed` carries a bounded `code` (`missing_tool_calls`,
+  `unknown_tool`, `unauthorized`, `scope_blocked`, `scope_not_allowed`,
+  `invalid_scope_override`, `execution_timeout`, `execution_error`) alongside
+  a `details` sentence naming the call position, registered tool and scope
+  rule by list and index.
+- Tool spans carry `execution_id`, `provider`, `tool`, `call_index`,
+  `duration_ms` and `outcome` (`ok`, `tool_error`, `call_error`); the
+  execution span carries `execution_id`, `mode`, `tool_count` and
+  `duration_ms`.
+- `environment_snapshot` probe failures carry a bounded `error_code`.
 - Argument sanitization scans string values for credential-shaped content in
   addition to field names: authorization headers, bearer tokens, URL
   passwords, secret query parameters, `name=value` and `--flag value`
@@ -25,14 +31,36 @@ All notable changes to servitor are documented here. The format follows [Keep a 
 
 ### Changed
 
+- Exported execution telemetry is built exclusively from approved public
+  metadata. `trace_span` messages are built from a closed record of generated
+  identifiers, the registered tool, timing and outcome; arguments, output and
+  error text have no field on a span. `agent.trace_span_arguments = true` now
+  fails at config load; `false` or absent still load. Argument capture for
+  debugging is planned as a local-only diagnostics mode.
+- The execution span drops `task_hash`, which `servitor exec` and event
+  templates derive from argument values, and the always-empty `events` list.
+- Inherited trace and span identifiers are reused only with identifier syntax
+  (8 to 64 hex digits or hyphens); other values are dropped rather than
+  published.
+- A malformed task `scope_override` rule refuses the call as
+  `invalid_scope_override` instead of a configuration error.
+- `environment_snapshot` probe records drop their `arguments` echo and their
+  free-text `error`; an unregistered probe tool is reported as
+  `unknown_tool` without its configured name.
+
 - Cross-component reference only: Familiar now binds `task_offer.servitor` to
   the offer's signing author and fails closed unless assignment trust is
   explicitly configured; this does not add a Familiar-side execution path to
   Servitor.
-- `environment_snapshot` probe arguments pass through the same value scan, so
-  they may now redact more than before (never less).
 
 ### Fixed
+
+- Scope rejections published the denied call's whole `command` argument in
+  `task_failed.details`, so a denied command carrying a credential reached
+  the feed. `task_failed` now publishes bounded reason codes, and the full
+  error text goes to the local log through the credential scanner. Unknown
+  tool names, raw snapshot probe errors and input-schema rejections (which
+  quote argument values) are reported by code the same way.
 
 - Feed history queries use Egregore's current `/v1/feed` endpoint with
   `include_self=true` and bounded pagination, replacing the obsolete
