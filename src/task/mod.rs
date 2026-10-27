@@ -83,6 +83,28 @@ pub fn inherit_trace_context(task: &mut Task, message: &EgregoreMessage) {
     }
 }
 
+/// Return a task's requestor when that requestor is the task's signed author.
+///
+/// The offer gate authorizes the requestor, so a task may speak only for the
+/// identity that signed it. Returns `None`, after logging why, when the task
+/// names no requestor or names someone other than `author`. Every path that
+/// accepts a signed task calls this, so the check can't drift between them.
+pub fn signed_requestor(task: &Task, author: &PublicId) -> Option<PublicId> {
+    let Some(requestor) = task.requestor.as_ref() else {
+        tracing::warn!(task_id = %task.effective_id(), "ignoring task without requestor");
+        return None;
+    };
+    if requestor != author {
+        tracing::warn!(
+            task_id = %task.effective_id(),
+            author = %author,
+            "ignoring task with mismatched requestor and envelope author"
+        );
+        return None;
+    }
+    Some(requestor.clone())
+}
+
 /// Check whether a requestor is allowed to ask for this task type.
 pub fn authorize_offer_request(
     authority: &Authority,
@@ -175,6 +197,20 @@ skills = ["assign:*"]
         let task = test_task();
         let result = authorize_offer_request(&auth, task.requestor.as_ref().unwrap(), &task);
         assert!(result.allowed);
+    }
+
+    #[test]
+    fn signed_requestor_requires_requestor_to_be_author() {
+        let mut task = test_task();
+        let requestor = task.requestor.clone().unwrap();
+        let stranger =
+            PublicId("@CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=.ed25519".to_string());
+
+        assert_eq!(signed_requestor(&task, &requestor), Some(requestor.clone()));
+        assert_eq!(signed_requestor(&task, &stranger), None);
+
+        task.requestor = None;
+        assert_eq!(signed_requestor(&task, &requestor), None);
     }
 
     #[test]

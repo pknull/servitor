@@ -17,8 +17,8 @@ use crate::identity::Identity;
 use crate::runtime::{publish_auth_denied_event, RuntimeContext};
 use crate::task::{
     assign_skill, authorize_assignment, authorize_offer_request, inherit_trace_context,
-    request_skill, task_matches_capabilities, AssignmentDecision, TaskCoordinator,
-    TaskLifecycleEvent,
+    request_skill, signed_requestor, task_matches_capabilities, AssignmentDecision,
+    TaskCoordinator, TaskLifecycleEvent,
 };
 
 const ASSIGNMENT_FEED_QUERY_LIMIT: usize = 1_000;
@@ -151,19 +151,9 @@ pub async fn process_sse_message(
             return Ok(None);
         }
 
-        let Some(requestor) = task.requestor.clone() else {
-            tracing::warn!(task_id = %task.effective_id(), "ignoring task without requestor");
+        let Some(requestor) = signed_requestor(&task, &message.author) else {
             return Ok(None);
         };
-
-        if requestor != message.author {
-            tracing::warn!(
-                task_id = %task.effective_id(),
-                author = %message.author,
-                "ignoring task with mismatched requestor and envelope author"
-            );
-            return Ok(None);
-        }
 
         let auth_result = authorize_offer_request(authority, &requestor, &task);
 

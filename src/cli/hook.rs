@@ -12,7 +12,9 @@ use crate::mcp::McpPool;
 use crate::metrics::{self, AuthDecision};
 use crate::runtime::publish_auth_denied_event;
 use crate::scope::ScopeEnforcer;
-use crate::task::{authorize_offer_request, inherit_trace_context, request_skill};
+use crate::task::{
+    authorize_offer_request, inherit_trace_context, request_skill, signed_requestor,
+};
 
 /// Run servitor in hook mode (stdin JSON from egregore).
 ///
@@ -49,18 +51,9 @@ pub async fn run_hook(config: &Config, insecure: bool) -> Result<()> {
     task.normalize(Some(&message.author));
     inherit_trace_context(&mut task, &message);
 
-    let Some(requestor) = task.requestor.clone() else {
-        tracing::warn!(task_id = %task.effective_id(), "ignoring task without requestor");
+    let Some(requestor) = signed_requestor(&task, &message.author) else {
         return Ok(());
     };
-    if requestor != message.author {
-        tracing::warn!(
-            task_id = %task.effective_id(),
-            author = %message.author,
-            "ignoring task with mismatched requestor and envelope author"
-        );
-        return Ok(());
-    }
 
     // Check keeper authorization for this inbound task using the same request gate as SSE mode.
     let auth_result = authorize_offer_request(&authority, &requestor, &task);

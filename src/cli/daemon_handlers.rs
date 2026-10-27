@@ -8,10 +8,10 @@ use crate::a2a::A2aPool;
 use crate::authority::PersonId;
 use crate::config::Config;
 use crate::egregore::{build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskStatus};
-use crate::identity::Identity;
+use crate::identity::{Identity, PublicId};
 use crate::mcp::McpPool;
 use crate::runtime::{publish_auth_denied_event, RuntimeContext, RuntimeStats};
-use crate::task::{authorize_offer_request, request_skill};
+use crate::task::{authorize_offer_request, request_skill, signed_requestor};
 
 /// Authorize and execute a task from the event router (cron or SSE).
 pub async fn handle_event_router_task(
@@ -23,10 +23,10 @@ pub async fn handle_event_router_task(
     // Authorize task if it has an author (from SSE)
     let keeper_name = if let Some(ref author) = task.author {
         let person = PersonId::from_egregore(author);
-        let requestor = task
-            .requestor
-            .clone()
-            .unwrap_or_else(|| crate::identity::PublicId(author.clone()));
+        let Some(requestor) = signed_requestor(&task, &PublicId(author.clone())) else {
+            runtime_stats.discard_task();
+            return;
+        };
         let auth_result = authorize_offer_request(&ctx.authority, &requestor, &task);
 
         if !auth_result.allowed {
@@ -181,6 +181,94 @@ pub async fn handle_lifecycle_timeouts(
 
 #[cfg(test)]
 mod tests {
-    // Handler tests would require significant mocking infrastructure.
-    // The handlers are integration-tested through the daemon tests.
+    use super::*;
+    use crate::authority::{Authority, AuthorityConfig};
+    use crate::egregore::PlannedToolCall;
+    use crate::scope::ScopeEnforcer;
+
+    const KEEPER: &str = "@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519";
+    const STRANGER: &str = "@CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=.ed25519";
+
+    /// A context whose one keeper may request anything. No MCP servers are
+    /// configured and egregore points at a closed port, so a task that passes
+    /// intake fails at execution and every publish fails fast.
+    fn test_context() -> RuntimeContext {
+        let authority = Authority::from_config(
+            AuthorityConfig::from_toml(&format!(
+                "[[keeper]]\nname = \"keeper\"\negregore = \"{KEEPER}\"\n\n\
+                 [[permission]]\nkeeper = \"keeper\"\nskills = [\"*\"]\n"
+            ))
+            .unwrap(),
+        );
+        let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        RuntimeContext {
+            identity: Identity::generate(),
+            authority,
+            mcp_pool: McpPool::new(),
+            a2a_pool: A2aPool::new(),
+            scope_enforcer: ScopeEnforcer::new(),
+            egregore: EgregoreClient::new(&format!("http://127.0.0.1:{closed_port}")),
+        }
+    }
+
+    /// A direct task carrying its signed author, as an SSE event source hands it on.
+    fn signed_task(author: &str, requestor: &str) -> Task {
+        Task {
+            msg_type: "task".to_string(),
+            id: Some("task-1".to_string()),
+            hash: "hash-1".to_string(),
+            task_type: Some("shell".to_string()),
+            request: Some("pwd".to_string()),
+            requestor: Some(PublicId(requestor.to_string())),
+            prompt: "pwd".to_string(),
+            required_caps: vec![],
+            parent_id: None,
+            context: Default::default(),
+            priority: 0,
+            timeout_secs: Some(60),
+            author: Some(author.to_string()),
+            keeper: None,
+            scope_override: None,
+            tool_calls: vec![PlannedToolCall {
+                id: "call-1".to_string(),
+                name: "shell__execute".to_string(),
+                arguments: serde_json::json!({"command": "pwd"}),
+            }],
+            depends_on: vec![],
+        }
+    }
+
+    /// Hand one task to the router handler; true when it passed intake and ran.
+    async fn router_runs(task: Task) -> bool {
+        let ctx = test_context();
+        let config = Config::from_str("").unwrap();
+        let mut stats = RuntimeStats::new();
+        stats.record_task_offer();
+        handle_event_router_task(task, &ctx, &mut stats, &config).await;
+        let stats = stats.stats();
+        stats.tasks_executed + stats.tasks_failed > 0
+    }
+
+    #[tokio::test]
+    async fn router_task_requested_by_its_author_runs() {
+        assert!(router_runs(signed_task(KEEPER, KEEPER)).await);
+    }
+
+    #[tokio::test]
+    async fn router_task_from_unknown_requestor_is_ignored() {
+        assert!(!router_runs(signed_task(STRANGER, STRANGER)).await);
+    }
+
+    #[tokio::test]
+    async fn router_task_whose_requestor_is_not_its_author_is_ignored() {
+        // A stranger signs a task that names the keeper as its requestor.
+        assert!(
+            !router_runs(signed_task(STRANGER, KEEPER)).await,
+            "task ran on the authority of a requestor who did not sign it"
+        );
+    }
 }
