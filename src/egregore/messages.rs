@@ -819,7 +819,7 @@ impl TaskFailed {
             servitor,
             reason,
             details,
-            timestamp: Utc::now(),
+            timestamp: crate::egregore::telemetry::now(),
         }
     }
 }

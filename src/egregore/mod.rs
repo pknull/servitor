@@ -11,6 +11,7 @@ pub mod hook;
 pub mod messages;
 pub mod profile;
 pub mod publish;
+pub mod telemetry;
 
 pub use context::ConversationTurn;
 pub use hook::{parse_message, receive_message};

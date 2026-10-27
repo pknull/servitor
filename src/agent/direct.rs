@@ -15,7 +15,7 @@ use crate::config::AgentConfig;
 use crate::egregore::messages::{
     PlannedToolCall, Task, TaskResult, TaskStatus, TraceSpan, TraceSpanStatus,
 };
-use crate::egregore::EgregoreClient;
+use crate::egregore::{telemetry, EgregoreClient};
 use crate::error::{Result, ServitorError};
 use crate::identity::Identity;
 use crate::mcp::McpPool;
@@ -53,12 +53,16 @@ pub async fn execute_direct(
         .or_else(|| task_context_string(task, "parent_span_id"));
     let trace_enabled = config.publish_trace_spans && egregore.is_some();
     let trace_id = if trace_enabled {
-        Some(inherited_trace_id.clone().unwrap_or_else(new_uuid))
+        Some(
+            inherited_trace_id
+                .clone()
+                .unwrap_or_else(telemetry::generate_id),
+        )
     } else {
         inherited_trace_id
     };
-    let root_span_id = trace_enabled.then(new_uuid);
-    let trace_started_at = trace_enabled.then(Utc::now);
+    let root_span_id = trace_enabled.then(telemetry::generate_id);
+    let trace_started_at = trace_enabled.then(telemetry::now);
 
     tracing::info!(
         task_hash = %task.hash,
@@ -90,7 +94,7 @@ pub async fn execute_direct(
         );
 
         let timer = Timer::start();
-        let tool_start = trace_enabled.then(Utc::now);
+        let tool_start = trace_enabled.then(telemetry::now);
         let result = mcp_pool
             .call_tool(&planned.name, planned.arguments.clone())
             .await;
@@ -108,12 +112,12 @@ pub async fn execute_direct(
         {
             let span = build_tool_span(ToolSpanInput {
                 trace_id,
-                span_id: new_uuid(),
+                span_id: telemetry::generate_id(),
                 parent_span_id: root_span_id,
                 provider_name,
                 tool_name,
                 start_ts: tool_start,
-                end_ts: Utc::now(),
+                end_ts: telemetry::now(),
                 status: match &result {
                     Ok(output) if !output.is_error => TraceSpanStatus::Ok,
                     _ => TraceSpanStatus::Error,
@@ -400,10 +404,6 @@ fn task_context_string(task: &Task, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn new_uuid() -> String {
-    uuid::Uuid::new_v4().simple().to_string()
-}
-
 /// Inputs for one tool-call trace span.
 struct ToolSpanInput<'a> {
     trace_id: &'a str,
@@ -476,7 +476,7 @@ async fn publish_root_span(
         "direct_execution",
         "servitor",
         start_ts,
-        Utc::now(),
+        telemetry::now(),
         status,
     );
     span.attributes.insert(
