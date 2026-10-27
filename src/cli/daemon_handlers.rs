@@ -181,18 +181,53 @@ pub async fn handle_lifecycle_timeouts(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
     use crate::authority::{Authority, AuthorityConfig};
-    use crate::egregore::PlannedToolCall;
+    use crate::config::ToolCallTemplate;
+    use crate::egregore::{PlannedToolCall, ServitorLoad, ServitorStats};
+    use crate::events::task_from_template;
     use crate::scope::ScopeEnforcer;
 
     const KEEPER: &str = "@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519";
     const STRANGER: &str = "@CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=.ed25519";
 
+    /// Upper bound on one test's handler run, so a stall fails instead of hanging CI.
+    const TEST_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// Answer every request on `listener` with a 503, so each publish fails at once.
+    async fn refuse_requests(listener: TcpListener) {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\n\
+                          content-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await;
+                // Drain any body until the client closes, so the socket is not reset.
+                while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {}
+            });
+        }
+    }
+
     /// A context whose one keeper may request anything. No MCP servers are
-    /// configured and egregore points at a closed port, so a task that passes
-    /// intake fails at execution and every publish fails fast.
-    fn test_context() -> RuntimeContext {
+    /// configured, so a task that passes intake fails at execution. Egregore is
+    /// a loopback listener held for the test that answers 503, so every publish
+    /// fails fast.
+    async fn test_context() -> RuntimeContext {
         let authority = Authority::from_config(
             AuthorityConfig::from_toml(&format!(
                 "[[keeper]]\nname = \"keeper\"\negregore = \"{KEEPER}\"\n\n\
@@ -200,18 +235,16 @@ mod tests {
             ))
             .unwrap(),
         );
-        let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let egregore_addr = listener.local_addr().unwrap();
+        tokio::spawn(refuse_requests(listener));
         RuntimeContext {
             identity: Identity::generate(),
             authority,
             mcp_pool: McpPool::new(),
             a2a_pool: A2aPool::new(),
             scope_enforcer: ScopeEnforcer::new(),
-            egregore: EgregoreClient::new(&format!("http://127.0.0.1:{closed_port}")),
+            egregore: EgregoreClient::new(&format!("http://{egregore_addr}")),
         }
     }
 
@@ -242,20 +275,64 @@ mod tests {
         }
     }
 
-    /// Hand one task to the router handler; true when it passed intake and ran.
+    /// A task as a cron or MCP-notification template builds it, with no author.
+    fn local_template_task() -> Task {
+        task_from_template(
+            "local",
+            None,
+            &[ToolCallTemplate {
+                name: "shell__execute".to_string(),
+                arguments: serde_json::json!({"command": "pwd"}),
+            }],
+            Default::default(),
+        )
+    }
+
+    /// Hand one queued task to the router handler, within the test deadline,
+    /// and return the counters it leaves behind.
+    async fn run_router(task: Task) -> (ServitorStats, ServitorLoad) {
+        tokio::time::timeout(TEST_DEADLINE, async {
+            let ctx = test_context().await;
+            let config = Config::from_str("").unwrap();
+            let mut stats = RuntimeStats::new();
+            stats.record_task_offer();
+            handle_event_router_task(task, &ctx, &mut stats, &config).await;
+            (stats.stats(), stats.load())
+        })
+        .await
+        .expect("router handler did not finish within the test deadline")
+    }
+
+    /// True when the task passed intake and an execution was attempted.
     async fn router_runs(task: Task) -> bool {
-        let ctx = test_context();
-        let config = Config::from_str("").unwrap();
-        let mut stats = RuntimeStats::new();
-        stats.record_task_offer();
-        handle_event_router_task(task, &ctx, &mut stats, &config).await;
-        let stats = stats.stats();
+        let (stats, _) = run_router(task).await;
         stats.tasks_executed + stats.tasks_failed > 0
     }
 
     #[tokio::test]
     async fn router_task_requested_by_its_author_runs() {
         assert!(router_runs(signed_task(KEEPER, KEEPER)).await);
+    }
+
+    #[tokio::test]
+    async fn router_runs_authorless_local_template_task() {
+        // No author means a trusted local source: no keeper, scope policy only.
+        assert!(router_runs(local_template_task()).await);
+    }
+
+    #[tokio::test]
+    async fn router_task_with_author_but_no_requestor_is_ignored() {
+        let mut task = signed_task(KEEPER, KEEPER);
+        task.requestor = None;
+
+        let (stats, load) = run_router(task).await;
+        assert_eq!(
+            stats.tasks_executed + stats.tasks_failed,
+            0,
+            "author-bearing task without a requestor passed intake"
+        );
+        assert_eq!(load.tasks_queued, 0, "discarded task left in the queue");
+        assert_eq!(load.tasks_executing, 0, "discarded task left executing");
     }
 
     #[tokio::test]
