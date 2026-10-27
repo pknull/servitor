@@ -457,6 +457,18 @@ skills = ["docker:inspect_*"]
     }
 
     #[test]
+    fn test_authorize_unknown_non_ascii_person_is_denied() {
+        let auth = test_authority();
+
+        let result = auth.authorize(&AuthRequest {
+            person: PersonId::Egregore("@abcdefghijé.ed25519".to_string()),
+            skill: "anything".to_string(),
+        });
+        assert!(!result.allowed);
+        assert_eq!(result.reason, "unknown identity: egregore:@abcdefghij..");
+    }
+
+    #[test]
     fn test_authorize_skill_only() {
         let auth = test_authority();
 

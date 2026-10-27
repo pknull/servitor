@@ -69,7 +69,7 @@ impl PersonId {
         match self {
             PersonId::Egregore(pubkey) => {
                 if pubkey.len() > 12 {
-                    format!("egregore:{}..", &pubkey[..12])
+                    format!("egregore:{}..", &pubkey[..pubkey.floor_char_boundary(12)])
                 } else {
                     format!("egregore:{pubkey}")
                 }
@@ -124,5 +124,12 @@ mod tests {
 
         let http = PersonId::Http("secret-token".to_string());
         assert_eq!(http.display(), "http:<token>");
+    }
+
+    #[test]
+    fn test_person_id_display_truncates_on_char_boundary() {
+        // 'é' is two bytes at 11..13, so byte 12 is not a char boundary.
+        let egregore = PersonId::Egregore("@abcdefghijé.ed25519".to_string());
+        assert_eq!(egregore.display(), "egregore:@abcdefghij..");
     }
 }
