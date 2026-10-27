@@ -54,6 +54,9 @@ pub mod runtime;
 pub mod scope;
 pub mod task;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use authority::{
     authorize_local_exec, load_runtime_authority, AuthRequest, AuthResult, Authority, Keeper,
     PersonId,

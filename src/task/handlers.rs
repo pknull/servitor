@@ -9,7 +9,7 @@ use crate::authority::{Authority, PersonId};
 use crate::config::Config;
 use crate::egregore::{
     AssignTaskResultStatus, AssignTaskResultV1, AssignTaskV1, AuthGate, EgregoreClient,
-    EgregoreMessage, TaskAssign, TaskFailed, TaskFailureReason, TaskPing, TaskStatusMessage,
+    EgregoreMessage, FailureDetail, TaskAssign, TaskFailed, TaskPing, TaskStatusMessage,
 };
 use crate::error::{Result, ServitorError};
 use crate::events::sse::SseSource;
@@ -475,11 +475,13 @@ pub(crate) async fn execute_assigned_task(
                     }
                     Err(error) => {
                         let _ = task_coordinator.finish_execution(&task_id);
+                        // The error text stays in the local log; the feed gets
+                        // a bounded reason code and public context only.
+                        tracing::warn!(task_id = %task_id, error = %error, "assigned task failed");
                         let failed = TaskFailed::new(
                             task_id.clone(),
                             servitor_id.clone(),
-                            TaskFailureReason::ExecutionError,
-                            Some(error.to_string()),
+                            FailureDetail::from_execution_error(&error),
                         );
                         ctx.egregore
                             .publish_failed(&failed, task_trace_id.as_deref(), None)
@@ -494,8 +496,7 @@ pub(crate) async fn execute_assigned_task(
                     let failed = TaskFailed::new(
                         task_id.clone(),
                         servitor_id.clone(),
-                        TaskFailureReason::Timeout,
-                        Some(format!("task exceeded {}s execution timeout", eta_seconds)),
+                        FailureDetail::ExecutionTimeout { seconds: eta_seconds },
                     );
                     ctx.egregore
                         .publish_failed(&failed, task_trace_id.as_deref(), None)
@@ -719,5 +720,194 @@ mod tests {
             &owner,
             &command.command_id,
         ));
+    }
+
+    mod feed_disclosure {
+        use std::collections::HashSet;
+
+        use serde_json::{json, Value};
+
+        use crate::a2a::A2aPool;
+        use crate::authority::Authority;
+        use crate::config::{Config, ScopeConfig};
+        use crate::egregore::{telemetry, PlannedToolCall, Task, TaskStarted};
+        use crate::identity::{Identity, PublicId};
+        use crate::mcp::McpPool;
+        use crate::runtime::RuntimeContext;
+        use crate::scope::ScopeEnforcer;
+        use crate::task::{execute_assigned_task, AssignmentDecision, TaskCoordinator};
+        use crate::test_support::{assert_same_bytes, CaptureNode, ScriptedClient, SecretGen};
+
+        /// A runtime whose `shell_execute` tool sits under the given block
+        /// rules and whose egregore node records every publish.
+        async fn scoped_runtime(block: &[&str]) -> (RuntimeContext, CaptureNode) {
+            let node = CaptureNode::start().await;
+            let mut mcp_pool = McpPool::new();
+            mcp_pool.register_test_tool("shell", "execute", ScriptedClient::output("ran"));
+            let mut scope_enforcer = ScopeEnforcer::new();
+            scope_enforcer
+                .add_policy(
+                    "shell",
+                    &ScopeConfig {
+                        allow: vec![],
+                        block: block.iter().map(|rule| rule.to_string()).collect(),
+                    },
+                )
+                .unwrap();
+            let runtime = RuntimeContext {
+                identity: Identity::generate(),
+                authority: Authority::insecure_open(),
+                mcp_pool,
+                a2a_pool: A2aPool::new(),
+                scope_enforcer,
+                egregore: node.client.clone(),
+            };
+            (runtime, node)
+        }
+
+        /// Run one assigned task carrying `arguments` through the
+        /// production assignment handler.
+        async fn run_assigned(runtime: &RuntimeContext, arguments: Value) {
+            run_call(runtime, "shell_execute", arguments).await;
+        }
+
+        /// Run one assigned task with a single planned call.
+        async fn run_call(runtime: &RuntimeContext, name: &str, arguments: Value) {
+            let requestor = PublicId(format!("@{}.ed25519", "A".repeat(44)));
+            let task = Task {
+                msg_type: "task".to_string(),
+                id: Some("task-1".to_string()),
+                hash: "a".repeat(64),
+                task_type: Some("shell:execute".to_string()),
+                request: None,
+                requestor: Some(requestor.clone()),
+                prompt: String::new(),
+                required_caps: vec!["shell".to_string()],
+                parent_id: None,
+                context: Default::default(),
+                priority: 0,
+                timeout_secs: Some(60),
+                author: None,
+                keeper: None,
+                scope_override: None,
+                tool_calls: vec![PlannedToolCall {
+                    id: "call-1".to_string(),
+                    name: name.to_string(),
+                    arguments,
+                }],
+                depends_on: vec![],
+            };
+            let assigned = AssignmentDecision {
+                task,
+                requestor,
+                started: TaskStarted::new("task-1", runtime.identity.public_id(), 60),
+            };
+            let config = Config::from_str("").unwrap();
+            let mut coordinator =
+                TaskCoordinator::new(runtime.identity.public_id(), config.task.clone());
+            execute_assigned_task(
+                assigned,
+                runtime,
+                &config,
+                None,
+                &mut coordinator,
+                &HashSet::new(),
+            )
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn scope_rejection_does_not_publish_the_denied_command() {
+            let (runtime, node) = scoped_runtime(&["execute:mysql *"]).await;
+            let canary = SecretGen::CANARY;
+
+            run_assigned(
+                &runtime,
+                json!({ "command": format!("mysql -u root -p{canary} -e 'select 1'") }),
+            )
+            .await;
+
+            assert_eq!(node.bodies_of_type("task_failed").len(), 1);
+            for body in node.bodies() {
+                let body = String::from_utf8_lossy(&body);
+                assert!(
+                    !body.contains(canary),
+                    "denied command reached the feed: {body}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn scope_rejection_names_the_tool_and_rule_for_the_requester() {
+            let (runtime, node) = scoped_runtime(&["execute:rm *", "execute:mysql *"]).await;
+
+            run_assigned(&runtime, json!({ "command": "mysql -phunter2" })).await;
+
+            let failed = node.bodies_of_type("task_failed");
+            let body: Value = serde_json::from_slice(&failed[0]).unwrap();
+            let content = &body["content"];
+            assert_eq!(content["reason"], "execution_error");
+            assert_eq!(content["code"], "scope_blocked");
+            assert_eq!(
+                content["details"],
+                "tool call 0 (shell:execute) blocked by policy block rule 1"
+            );
+        }
+
+        #[tokio::test]
+        async fn unknown_tool_rejection_does_not_echo_the_call() {
+            let (runtime, node) = scoped_runtime(&[]).await;
+            let canary = SecretGen::CANARY;
+
+            run_call(
+                &runtime,
+                &format!("shell_{canary}"),
+                json!({ "command": canary }),
+            )
+            .await;
+
+            let failed = node.bodies_of_type("task_failed");
+            let body: Value = serde_json::from_slice(&failed[0]).unwrap();
+            assert_eq!(body["content"]["code"], "unknown_tool");
+            assert_eq!(
+                body["content"]["details"],
+                "tool call 0 names no registered tool"
+            );
+            for body in node.bodies() {
+                let body = String::from_utf8_lossy(&body);
+                assert!(!body.contains(canary), "{body}");
+            }
+        }
+
+        /// Information-flow property: with the task's public metadata held
+        /// fixed, no change to its arguments changes the published
+        /// `task_failed` bytes.
+        #[tokio::test]
+        async fn scope_rejection_failure_bytes_ignore_the_arguments() {
+            let (runtime, node) = scoped_runtime(&["execute:*"]).await;
+            let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+            let mut reference: Option<Vec<u8>> = None;
+
+            for seed in 0..64 {
+                node.clear();
+                let _frozen = telemetry::freeze(at);
+                run_assigned(&runtime, SecretGen::new(seed).arguments()).await;
+
+                let failed = node.bodies_of_type("task_failed");
+                assert_eq!(failed.len(), 1, "seed {seed}");
+                let body = &failed[0];
+                match &reference {
+                    None => reference = Some(body.clone()),
+                    Some(expected) => assert_same_bytes(expected, body, &format!("seed {seed}")),
+                }
+            }
+
+            // Every body equals the reference, so checking it covers all.
+            let reference = String::from_utf8(reference.unwrap()).unwrap();
+            assert!(!reference.contains(SecretGen::CANARY), "{reference}");
+        }
     }
 }

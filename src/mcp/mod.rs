@@ -11,4 +11,4 @@ pub mod stdio;
 
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::{McpClient, McpNotification, ToolCallResult, ToolContent, ToolDefinition};
-pub use pool::{LlmTool, McpPool};
+pub use pool::{LlmTool, McpPool, RegisteredToolId};

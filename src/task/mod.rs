@@ -15,7 +15,7 @@ pub use state::{
 };
 
 use crate::authority::{AuthRequest, AuthResult, Authority, PersonId};
-use crate::egregore::{EgregoreClient, EgregoreMessage, Task, TaskFailed, TaskFailureReason};
+use crate::egregore::{EgregoreClient, EgregoreMessage, FailureDetail, Task, TaskFailed};
 use crate::error::Result;
 use crate::identity::{Identity, PublicId};
 
@@ -43,8 +43,7 @@ pub(crate) async fn publish_missing_tool_calls_rejection(
     let failed = TaskFailed::new(
         task.effective_id().to_string(),
         identity.public_id(),
-        TaskFailureReason::ExecutionError,
-        Some(MISSING_TOOL_CALLS_REJECTION_REASON.into()),
+        FailureDetail::MissingToolCalls,
     );
     egregore
         .publish_failed(&failed, task_trace_id.as_deref(), None)

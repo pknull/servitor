@@ -27,6 +27,36 @@ fn to_core_config(config: &McpServerConfig) -> thallus_core::config::McpServerCo
     }
 }
 
+/// A tool as the MCP pool registered it: the configured server name and the
+/// tool name that server advertised.
+///
+/// Both parts are public metadata, already published in
+/// `servitor_profile.tools`. Only the pool constructs one, from its own
+/// registry, so text taken from a task can never pass as a tool id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredToolId {
+    provider: String,
+    tool: String,
+}
+
+impl RegisteredToolId {
+    /// Configured MCP server name.
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Tool name as the server advertised it.
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+}
+
+impl std::fmt::Display for RegisteredToolId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.provider, self.tool)
+    }
+}
+
 /// Pool of MCP clients with tool introspection.
 pub struct McpPool {
     clients: HashMap<String, Arc<RwLock<Box<dyn McpClient>>>>,
@@ -187,6 +217,14 @@ impl McpPool {
             }
         }
         None
+    }
+
+    /// The registered identity of a prefixed tool name, if the pool holds it.
+    pub fn registered_tool(&self, prefixed: &str) -> Option<RegisteredToolId> {
+        self.tools.get(prefixed).map(|tool| RegisteredToolId {
+            provider: tool.server_name.clone(),
+            tool: tool.definition.name.clone(),
+        })
     }
 
     /// Call a tool by its prefixed name.
@@ -378,6 +416,36 @@ impl McpPool {
             let _ = client.shutdown().await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl McpPool {
+    /// Register `client` as server `server` offering one tool, as
+    /// [`McpPool::initialize_all`] would after listing it.
+    pub(crate) fn register_test_tool(
+        &mut self,
+        server: &str,
+        tool: &str,
+        client: Box<dyn McpClient>,
+    ) {
+        self.clients
+            .insert(server.to_string(), Arc::new(RwLock::new(client)));
+        self.circuit_breakers
+            .insert(server.to_string(), RwLock::new(CircuitBreaker::default()));
+        let definition = ToolDefinition {
+            name: tool.to_string(),
+            description: None,
+            input_schema: None,
+        };
+        self.tools.insert(
+            definition.prefixed_name(server),
+            RegisteredTool {
+                server_name: server.to_string(),
+                definition,
+                validator: None,
+            },
+        );
     }
 }
 

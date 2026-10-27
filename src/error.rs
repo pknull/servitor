@@ -1,6 +1,11 @@
 //! Error types for Servitor.
 
+use std::fmt;
+
 use thiserror::Error;
+
+use crate::mcp::RegisteredToolId;
+use crate::scope::ScopeRule;
 
 /// Main error type for Servitor operations.
 #[derive(Error, Debug)]
@@ -23,8 +28,18 @@ pub enum ServitorError {
     #[error("Invalid arguments for MCP tool '{tool}': {reason}")]
     McpValidation { tool: String, reason: String },
 
-    #[error("Scope violation: {reason}")]
-    ScopeViolation { reason: String },
+    #[error("Scope violation: {diagnostic}")]
+    ScopeViolation {
+        rule: ScopeRule,
+        diagnostic: LocalDiagnostic,
+    },
+
+    #[error("tool call {call_index} rejected: {diagnostic}")]
+    CallRejected {
+        call_index: usize,
+        rejection: CallRejection,
+        diagnostic: LocalDiagnostic,
+    },
 
     #[error("LLM provider error: {reason}")]
     Provider { reason: String },
@@ -67,6 +82,41 @@ pub enum ServitorError {
 }
 
 pub type Result<T> = std::result::Result<T, ServitorError>;
+
+/// Why a planned tool call was refused before it ran, named only by public
+/// metadata: the registered tool and the scope rule, never argument values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallRejection {
+    /// The call names no tool registered in the MCP pool.
+    UnknownTool,
+    /// The requesting keeper lacks the skill for this tool.
+    Unauthorized { tool: RegisteredToolId },
+    /// A scope rule refused the call.
+    Scope {
+        tool: RegisteredToolId,
+        rule: ScopeRule,
+    },
+}
+
+/// Detailed error text for the operator's local log.
+///
+/// Construction runs the text through the credential scanner, which is
+/// best-effort, so this never reaches the feed: it has no `Serialize`, and
+/// feed messages carry closed reason codes instead.
+#[derive(Debug, Clone)]
+pub struct LocalDiagnostic(String);
+
+impl LocalDiagnostic {
+    pub fn new(text: &str) -> Self {
+        Self(crate::agent::sanitize::redact_credential_values(text))
+    }
+}
+
+impl fmt::Display for LocalDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 impl From<thallus_core::CoreError> for ServitorError {
     fn from(err: thallus_core::CoreError) -> Self {

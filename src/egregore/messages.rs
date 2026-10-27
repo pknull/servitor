@@ -7,7 +7,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::error::{CallRejection, ServitorError};
 use crate::identity::PublicId;
+use crate::scope::ScopeRule;
 
 /// Servitor capability profile, published on startup and heartbeat.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -793,32 +795,131 @@ pub enum TaskFailureReason {
     Timeout,
 }
 
+/// Why a task failed, published as a bounded `code` and a `details` sentence.
+///
+/// Every part is public metadata: the position of a call in the task's plan,
+/// a [`RegisteredToolId`](crate::mcp::RegisteredToolId), a
+/// [`ScopeRule`](crate::scope::ScopeRule) reference, or a configured
+/// timeout. No variant holds free text, so argument values and raw error
+/// messages cannot reach the feed through it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailureDetail {
+    /// The task carried no pre-planned `tool_calls`.
+    MissingToolCalls,
+    /// A planned call was refused before it ran.
+    CallRejected {
+        call_index: usize,
+        rejection: CallRejection,
+    },
+    /// Execution outlasted its deadline.
+    ExecutionTimeout { seconds: u64 },
+    /// Execution failed for a reason with no published detail.
+    ExecutionError,
+}
+
+impl FailureDetail {
+    /// The published detail for an execution error. The error's own text
+    /// stays in the local log.
+    pub fn from_execution_error(error: &ServitorError) -> Self {
+        match error {
+            ServitorError::CallRejected {
+                call_index,
+                rejection,
+                ..
+            } => Self::CallRejected {
+                call_index: *call_index,
+                rejection: rejection.clone(),
+            },
+            ServitorError::Timeout { seconds } => Self::ExecutionTimeout { seconds: *seconds },
+            _ => Self::ExecutionError,
+        }
+    }
+
+    /// Bounded reason code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::MissingToolCalls => "missing_tool_calls",
+            Self::CallRejected { rejection, .. } => match rejection {
+                CallRejection::UnknownTool => "unknown_tool",
+                CallRejection::Unauthorized { .. } => "unauthorized",
+                CallRejection::Scope { rule, .. } => match rule {
+                    ScopeRule::Blocked { .. } => "scope_blocked",
+                    ScopeRule::NotAllowed { .. } => "scope_not_allowed",
+                    ScopeRule::InvalidOverride { .. } => "invalid_scope_override",
+                },
+            },
+            Self::ExecutionTimeout { .. } => "execution_timeout",
+            Self::ExecutionError => "execution_error",
+        }
+    }
+
+    fn reason(&self) -> TaskFailureReason {
+        match self {
+            Self::ExecutionTimeout { .. } => TaskFailureReason::Timeout,
+            _ => TaskFailureReason::ExecutionError,
+        }
+    }
+}
+
+impl std::fmt::Display for FailureDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingToolCalls => f.write_str(crate::task::MISSING_TOOL_CALLS_REJECTION_REASON),
+            Self::CallRejected {
+                call_index,
+                rejection,
+            } => match rejection {
+                CallRejection::UnknownTool => {
+                    write!(f, "tool call {call_index} names no registered tool")
+                }
+                CallRejection::Unauthorized { tool } => write!(
+                    f,
+                    "tool call {call_index} ({tool}) is not authorized for the requesting keeper"
+                ),
+                CallRejection::Scope { tool, rule } => {
+                    write!(f, "tool call {call_index} ({tool}) {rule}")
+                }
+            },
+            Self::ExecutionTimeout { seconds } => {
+                write!(f, "task exceeded {seconds}s execution timeout")
+            }
+            Self::ExecutionError => f.write_str("task execution failed"),
+        }
+    }
+}
+
+impl Serialize for FailureDetail {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("code", self.code())?;
+        map.serialize_entry("details", &self.to_string())?;
+        map.end()
+    }
+}
+
 /// Task failure message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TaskFailed {
     #[serde(rename = "type")]
     pub msg_type: String,
     pub task_id: String,
     pub servitor: PublicId,
     pub reason: TaskFailureReason,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<String>,
+    #[serde(flatten)]
+    pub detail: FailureDetail,
     pub timestamp: DateTime<Utc>,
 }
 
 impl TaskFailed {
-    pub fn new(
-        task_id: impl Into<String>,
-        servitor: PublicId,
-        reason: TaskFailureReason,
-        details: Option<String>,
-    ) -> Self {
+    pub fn new(task_id: impl Into<String>, servitor: PublicId, detail: FailureDetail) -> Self {
         Self {
             msg_type: "task_failed".to_string(),
             task_id: task_id.into(),
             servitor,
-            reason,
-            details,
+            reason: detail.reason(),
+            detail,
             timestamp: crate::egregore::telemetry::now(),
         }
     }

@@ -7,4 +7,4 @@ pub mod matcher;
 pub mod policy;
 
 pub use matcher::ScopeMatcher;
-pub use policy::{ScopeEnforcer, ScopePolicy};
+pub use policy::{RuleList, RuleSource, ScopeEnforcer, ScopePolicy, ScopeRule};

@@ -16,9 +16,9 @@ use crate::egregore::messages::{
     PlannedToolCall, Task, TaskResult, TaskStatus, TraceSpan, TraceSpanStatus,
 };
 use crate::egregore::{telemetry, EgregoreClient};
-use crate::error::{Result, ServitorError};
+use crate::error::{CallRejection, LocalDiagnostic, Result, ServitorError};
 use crate::identity::Identity;
-use crate::mcp::McpPool;
+use crate::mcp::{McpPool, RegisteredToolId};
 use crate::metrics::{self, Timer, ToolCallStatus};
 use crate::scope::ScopeEnforcer;
 
@@ -78,7 +78,8 @@ pub async fn execute_direct(
         // (server, tool) split from the MCP pool — reused below for metrics, trace
         // tags, and the authority-skill string so every downstream observation
         // matches the registered tool boundary even when tool names contain `_`.
-        let (provider_name, tool_name) = validate_direct_call(
+        let tool = validate_direct_call(
+            idx,
             task,
             planned,
             mcp_pool,
@@ -86,6 +87,7 @@ pub async fn execute_direct(
             authority,
             keeper_name,
         )?;
+        let (provider_name, tool_name) = (tool.provider(), tool.tool());
 
         tracing::debug!(
             idx = idx,
@@ -217,57 +219,64 @@ pub async fn execute_direct(
 }
 
 /// Validate a single direct tool call against scope and authority policies.
-/// Returns the authoritative (server_name, tool_name) split, resolved against
-/// the MCP pool's actual registration — so policy decisions and observability
-/// downstream key off the registered tool boundary, not a heuristic split.
-fn validate_direct_call<'a>(
+/// Returns the tool's registered identity from the MCP pool, so policy
+/// decisions and observability downstream key off the registered tool
+/// boundary, not a heuristic split.
+///
+/// A refusal is a [`ServitorError::CallRejected`]: a closed
+/// [`CallRejection`] for the requester and a sanitized diagnostic for the
+/// local log.
+fn validate_direct_call(
+    call_index: usize,
     task: &Task,
-    planned: &'a PlannedToolCall,
-    mcp_pool: &'a McpPool,
+    planned: &PlannedToolCall,
+    mcp_pool: &McpPool,
     scope_enforcer: &ScopeEnforcer,
     authority: Option<&Authority>,
     keeper_name: Option<&str>,
-) -> Result<(&'a str, &'a str)> {
-    // Authoritative parse against the registered tool. If this returns None the
-    // tool isn't in the pool — surface as a plan-validation error rather than
-    // falling back to a heuristic split, which would let policy keys drift.
-    let (provider_name, tool_name) =
-        mcp_pool
-            .parse_tool_name(&planned.name)
-            .ok_or_else(|| ServitorError::PlanValidation {
-                reason: format!("unknown tool in direct call: {}", planned.name),
-            })?;
+) -> Result<RegisteredToolId> {
+    let rejected = |rejection, diagnostic: LocalDiagnostic| ServitorError::CallRejected {
+        call_index,
+        rejection,
+        diagnostic,
+    };
+
+    // Authoritative lookup against the registered tool. An unknown tool is a
+    // plan-validation error rather than a heuristic split, which would let
+    // policy keys drift.
+    let Some(tool) = mcp_pool.registered_tool(&planned.name) else {
+        return Err(rejected(
+            CallRejection::UnknownTool,
+            LocalDiagnostic::new(&format!("unknown tool in direct call: {}", planned.name)),
+        ));
+    };
 
     // Check authority (keeper skill permissions)
     if let (Some(authority), Some(keeper)) = (authority, keeper_name) {
-        let skill = format!("{}:{}", provider_name, tool_name);
+        let skill = tool.to_string();
         let auth_result = authority.authorize_skill(keeper, &skill);
         if !auth_result.allowed {
-            return Err(ServitorError::Unauthorized {
-                reason: format!(
-                    "keeper '{}' not authorized for skill '{}': {}",
-                    keeper, skill, auth_result.reason
-                ),
-            });
+            let diagnostic = LocalDiagnostic::new(&format!(
+                "keeper '{}' not authorized for skill '{}': {}",
+                keeper, skill, auth_result.reason
+            ));
+            return Err(rejected(CallRejection::Unauthorized { tool }, diagnostic));
         }
     }
 
     // Check scope policy
-    scope_enforcer
-        .check(
-            provider_name,
-            tool_name,
-            &planned.arguments,
-            task.scope_override.as_ref(),
-        )
-        .map_err(|error| match error {
-            ServitorError::ScopeViolation { reason } => ServitorError::ScopeViolation {
-                reason: format!("direct task '{}' scope violation: {}", task.hash, reason),
-            },
-            other => other,
-        })?;
-
-    Ok((provider_name, tool_name))
+    match scope_enforcer.check(
+        tool.provider(),
+        tool.tool(),
+        &planned.arguments,
+        task.scope_override.as_ref(),
+    ) {
+        Ok(()) => Ok(tool),
+        Err(ServitorError::ScopeViolation { rule, diagnostic }) => {
+            Err(rejected(CallRejection::Scope { tool, rule }, diagnostic))
+        }
+        Err(other) => Err(other),
+    }
 }
 
 fn build_result(

@@ -1,9 +1,81 @@
 //! Scope enforcement policy — allow/block logic.
 
+use std::fmt;
+
 use crate::config::ScopeConfig;
 use crate::egregore::messages::TaskScopeOverride;
-use crate::error::{Result, ServitorError};
+use crate::error::{LocalDiagnostic, Result, ServitorError};
 use crate::scope::matcher::{parse_scoped_pattern, ScopeMatcher};
+
+/// The scope rule behind a denial.
+///
+/// Names the rule by source, list and position, never by the arguments it
+/// matched, so it can be reported to the requester. Policy rules index the
+/// server's `scope.allow` / `scope.block` lists as published in
+/// `servitor_profile.scopes`; override rules index the task's own
+/// `scope_override` lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeRule {
+    /// A block rule matched one of the call's targets.
+    Blocked { source: RuleSource, index: usize },
+    /// Allow rules exist and none matched.
+    NotAllowed { source: RuleSource },
+    /// A task scope override rule is malformed.
+    InvalidOverride { list: RuleList, index: usize },
+}
+
+/// Where a scope rule comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleSource {
+    /// The server's configured scope policy.
+    Policy,
+    /// The task's `scope_override`.
+    TaskOverride,
+}
+
+/// Which list of a scope a rule sits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleList {
+    Allow,
+    Block,
+}
+
+impl fmt::Display for ScopeRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let source = |source: &RuleSource| match source {
+            RuleSource::Policy => "policy",
+            RuleSource::TaskOverride => "task scope override",
+        };
+        match self {
+            Self::Blocked {
+                source: from,
+                index,
+            } => {
+                write!(f, "blocked by {} block rule {index}", source(from))
+            }
+            Self::NotAllowed { source: from } => {
+                write!(f, "not permitted by any {} allow rule", source(from))
+            }
+            Self::InvalidOverride { list, index } => {
+                let list = match list {
+                    RuleList::Allow => "allow",
+                    RuleList::Block => "block",
+                };
+                write!(
+                    f,
+                    "refused: task scope override {list} rule {index} is invalid"
+                )
+            }
+        }
+    }
+}
+
+fn violation(rule: ScopeRule, diagnostic: &str) -> ServitorError {
+    ServitorError::ScopeViolation {
+        rule,
+        diagnostic: LocalDiagnostic::new(diagnostic),
+    }
+}
 
 /// Compiled scope policy for an MCP server.
 #[derive(Debug)]
@@ -36,6 +108,9 @@ impl ScopePolicy {
     }
 
     /// Check if a tool call is allowed with an optional task-level override.
+    ///
+    /// A denial is a [`ServitorError::ScopeViolation`] carrying the
+    /// [`ScopeRule`] that refused the call.
     pub fn check_with_override(
         &self,
         tool_name: &str,
@@ -46,18 +121,29 @@ impl ScopePolicy {
         let targets = extract_targets(tool_name, args);
 
         // Check block patterns first (they take precedence)
-        if let Err(reason) = check_block_patterns(&self.block, tool_name, &targets, "policy") {
-            return Err(ServitorError::ScopeViolation { reason });
+        if let Some((index, target, pattern)) = matching_block(&self.block, &targets, |scope| {
+            scope_matches(scope, tool_name)
+        }) {
+            return Err(violation(
+                ScopeRule::Blocked {
+                    source: RuleSource::Policy,
+                    index,
+                },
+                &format!("blocked by policy: {target} matches block pattern '{pattern}'"),
+            ));
         }
 
         // If no allow patterns, permit by default
         if !self.allow.is_empty() && !matches_allow_patterns(&self.allow, tool_name, &targets) {
-            return Err(ServitorError::ScopeViolation {
-                reason: format!(
+            return Err(violation(
+                ScopeRule::NotAllowed {
+                    source: RuleSource::Policy,
+                },
+                &format!(
                     "not allowed: tool '{}' with targets {:?} not permitted by any allow pattern",
                     tool_name, targets
                 ),
-            });
+            ));
         }
 
         let Some(scope_override) = scope_override else {
@@ -68,26 +154,36 @@ impl ScopePolicy {
             return Ok(());
         }
 
-        let override_block = compile_task_override_patterns(&scope_override.block)?;
+        let override_block =
+            compile_task_override_patterns(&scope_override.block, RuleList::Block)?;
         let full_scope = format!("{}:{}", self.server_name, tool_name);
-        if let Err(reason) = check_override_block_patterns(
-            &override_block,
-            &full_scope,
-            &targets,
-            "task scope override",
-        ) {
-            return Err(ServitorError::ScopeViolation { reason });
+        if let Some((index, target, pattern)) = matching_block(&override_block, &targets, |scope| {
+            override_scope_matches(scope, &full_scope)
+        }) {
+            return Err(violation(
+                ScopeRule::Blocked {
+                    source: RuleSource::TaskOverride,
+                    index,
+                },
+                &format!(
+                    "blocked by task scope override: {target} matches block pattern '{pattern}'"
+                ),
+            ));
         }
 
         if !scope_override.allow.is_empty() {
-            let override_allow = compile_task_override_patterns(&scope_override.allow)?;
+            let override_allow =
+                compile_task_override_patterns(&scope_override.allow, RuleList::Allow)?;
             if !matches_override_allow_patterns(&override_allow, &full_scope, &targets) {
-                return Err(ServitorError::ScopeViolation {
-                    reason: format!(
+                return Err(violation(
+                    ScopeRule::NotAllowed {
+                        source: RuleSource::TaskOverride,
+                    },
+                    &format!(
                         "task scope override does not allow tool '{}' with targets {:?}",
                         tool_name, targets
                     ),
-                });
+                ));
             }
         }
 
@@ -104,11 +200,25 @@ fn compile_patterns(patterns: &[String]) -> Result<Vec<(String, ScopeMatcher)>> 
     Ok(compiled)
 }
 
-fn compile_task_override_patterns(patterns: &[String]) -> Result<Vec<(String, ScopeMatcher)>> {
+/// Compile a task's override rules. A malformed rule refuses the call as
+/// [`ScopeRule::InvalidOverride`], naming its position rather than its text.
+fn compile_task_override_patterns(
+    patterns: &[String],
+    list: RuleList,
+) -> Result<Vec<(String, ScopeMatcher)>> {
     let mut compiled = Vec::new();
-    for pattern in patterns {
-        let (scope, pat) = parse_task_override_pattern(pattern)?;
-        compiled.push((scope, ScopeMatcher::new(&pat)?));
+    for (index, pattern) in patterns.iter().enumerate() {
+        let rule = parse_task_override_pattern(pattern)
+            .and_then(|(scope, pat)| Ok((scope, ScopeMatcher::new(&pat)?)));
+        match rule {
+            Ok(rule) => compiled.push(rule),
+            Err(error) => {
+                return Err(violation(
+                    ScopeRule::InvalidOverride { list, index },
+                    &error.to_string(),
+                ))
+            }
+        }
     }
     Ok(compiled)
 }
@@ -131,27 +241,29 @@ fn parse_task_override_pattern(pattern: &str) -> Result<(String, String)> {
     Ok((format!("{}:{}", server, tool), target.to_string()))
 }
 
-fn check_block_patterns(
-    patterns: &[(String, ScopeMatcher)],
-    tool_name: &str,
-    targets: &[String],
-    source: &str,
-) -> std::result::Result<(), String> {
-    for (scope, matcher) in patterns {
-        for target in targets {
-            if scope_matches(scope, tool_name) && matcher.matches(target) {
-                return Err(format!(
-                    "blocked by {}: {} matches block pattern '{}:{}'",
-                    source,
-                    target,
-                    scope,
-                    matcher.pattern()
-                ));
-            }
-        }
-    }
-
-    Ok(())
+/// The first block rule, in list order, whose scope applies and whose
+/// pattern matches a target: its index, the target, and the rule's text.
+fn matching_block<'a>(
+    patterns: &'a [(String, ScopeMatcher)],
+    targets: &'a [String],
+    applies: impl Fn(&str) -> bool,
+) -> Option<(usize, &'a str, String)> {
+    patterns
+        .iter()
+        .enumerate()
+        .filter(|(_, (scope, _))| applies(scope))
+        .find_map(|(index, (scope, matcher))| {
+            targets
+                .iter()
+                .find(|target| matcher.matches(target))
+                .map(|target| {
+                    (
+                        index,
+                        target.as_str(),
+                        format!("{scope}:{}", matcher.pattern()),
+                    )
+                })
+        })
 }
 
 fn matches_allow_patterns(
@@ -173,29 +285,6 @@ fn matches_allow_patterns(
     }
 
     false
-}
-
-fn check_override_block_patterns(
-    patterns: &[(String, ScopeMatcher)],
-    full_scope: &str,
-    targets: &[String],
-    source: &str,
-) -> std::result::Result<(), String> {
-    for (scope, matcher) in patterns {
-        for target in targets {
-            if override_scope_matches(scope, full_scope) && matcher.matches(target) {
-                return Err(format!(
-                    "blocked by {}: {} matches block pattern '{}:{}'",
-                    source,
-                    target,
-                    scope,
-                    matcher.pattern()
-                ));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn matches_override_allow_patterns(
@@ -436,7 +525,7 @@ mod tests {
         .unwrap();
 
         let scope_override = TaskScopeOverride {
-            allow: vec!["shell".to_string()],
+            allow: vec!["shell:read:*".to_string(), "shell".to_string()],
             block: vec![],
         };
 
@@ -444,7 +533,64 @@ mod tests {
         let error = policy
             .check_with_override("execute", &args, Some(&scope_override))
             .unwrap_err();
-        assert!(matches!(error, ServitorError::Config { .. }));
+        assert_eq!(
+            rule_of(error),
+            ScopeRule::InvalidOverride {
+                list: RuleList::Allow,
+                index: 1,
+            }
+        );
+    }
+
+    fn rule_of(error: ServitorError) -> ScopeRule {
+        match error {
+            ServitorError::ScopeViolation { rule, .. } => rule,
+            other => panic!("expected a scope violation, got {other}"),
+        }
+    }
+
+    #[test]
+    fn denials_name_the_rule_by_list_and_position() {
+        let policy = ScopePolicy::from_config("shell", &test_config()).unwrap();
+        let check = |args: serde_json::Value, scope_override: Option<&TaskScopeOverride>| {
+            rule_of(
+                policy
+                    .check_with_override("execute", &args, scope_override)
+                    .unwrap_err(),
+            )
+        };
+
+        assert_eq!(
+            check(serde_json::json!({ "command": "rm -rf /" }), None),
+            ScopeRule::Blocked {
+                source: RuleSource::Policy,
+                index: 1,
+            }
+        );
+        assert_eq!(
+            check(serde_json::json!({ "command": "/home/user/random" }), None),
+            ScopeRule::NotAllowed {
+                source: RuleSource::Policy,
+            }
+        );
+
+        let scope_override = TaskScopeOverride {
+            allow: vec![],
+            block: vec![
+                "shell:read:*".to_string(),
+                "shell:execute:~/scripts/b*".to_string(),
+            ],
+        };
+        assert_eq!(
+            check(
+                serde_json::json!({ "command": "~/scripts/backup.sh" }),
+                Some(&scope_override)
+            ),
+            ScopeRule::Blocked {
+                source: RuleSource::TaskOverride,
+                index: 1,
+            }
+        );
     }
 
     #[test]
