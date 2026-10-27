@@ -429,6 +429,17 @@ impl McpPool {
         tool: &str,
         client: Box<dyn McpClient>,
     ) {
+        self.register_test_tool_with_schema(server, tool, None, client);
+    }
+
+    /// As [`McpPool::register_test_tool`], with the tool's input schema.
+    pub(crate) fn register_test_tool_with_schema(
+        &mut self,
+        server: &str,
+        tool: &str,
+        input_schema: Option<serde_json::Value>,
+        client: Box<dyn McpClient>,
+    ) {
         self.clients
             .insert(server.to_string(), Arc::new(RwLock::new(client)));
         self.circuit_breakers
@@ -436,14 +447,15 @@ impl McpPool {
         let definition = ToolDefinition {
             name: tool.to_string(),
             description: None,
-            input_schema: None,
+            input_schema,
         };
+        let validator = compile_validator(&definition).unwrap();
         self.tools.insert(
             definition.prefixed_name(server),
             RegisteredTool {
                 server_name: server.to_string(),
                 definition,
-                validator: None,
+                validator,
             },
         );
     }

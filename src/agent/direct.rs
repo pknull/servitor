@@ -134,8 +134,20 @@ pub async fn execute_direct(
                 });
             }
             Err(e) => {
-                let sanitized_error = crate::agent::sanitize::sanitize_tool_result(&e.to_string());
-                let error_msg = format!("tool '{}' failed: {}", planned.name, sanitized_error);
+                let error_msg = match &e {
+                    // Servitor's own schema check quotes the offending
+                    // argument values; the requester gets a code instead.
+                    ServitorError::McpValidation { .. } => format!(
+                        "tool '{}' failed: invalid_arguments (the arguments do not match \
+                         the tool's input schema)",
+                        planned.name
+                    ),
+                    _ => format!(
+                        "tool '{}' failed: {}",
+                        planned.name,
+                        crate::agent::sanitize::sanitize_tool_result(&e.to_string())
+                    ),
+                };
                 tracing::error!(tool = %planned.name, error = %e, "direct call failed");
                 return build_error_result(
                     task,
@@ -826,6 +838,48 @@ mod tests {
             assert_eq!(root["attributes"]["mode"], "direct");
             assert_eq!(root["attributes"]["tool_count"], 1);
             assert!(root["attributes"]["duration_ms"].is_u64());
+        }
+
+        /// The pool's schema check is Servitor's own error and quotes the
+        /// offending argument values; the published result names the
+        /// failure without them.
+        #[tokio::test]
+        async fn schema_rejection_result_does_not_quote_arguments() {
+            let node = CaptureNode::start().await;
+            let canary = SecretGen::CANARY;
+            let mut pool = McpPool::new();
+            pool.register_test_tool_with_schema(
+                "shell",
+                "execute",
+                Some(json!({
+                    "type": "object",
+                    "properties": { "command": { "type": "integer" } }
+                })),
+                ScriptedClient::output("ran"),
+            );
+            let mut task = exec_task(&mut SecretGen::new(5), HashMap::new());
+            task.tool_calls[0].arguments = json!({ "command": format!("mysql -p{canary}") });
+
+            let result = execute_direct(
+                &task,
+                &pool,
+                &ScopeEnforcer::new(),
+                &Identity::generate(),
+                &AgentConfig::default(),
+                Some(&node.client),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            node.client.publish_result(&result).await.unwrap();
+
+            let error = result.error.unwrap();
+            assert!(error.contains("invalid_arguments"), "{error}");
+            for body in node.bodies() {
+                let body = String::from_utf8_lossy(&body);
+                assert!(!body.contains(canary), "{body}");
+            }
         }
 
         /// Inherited trace context is reused only when it has identifier
