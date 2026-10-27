@@ -150,6 +150,15 @@ cargo check
 cargo build --release
 ```
 
+### System packages
+
+Building needs a C toolchain for the TLS crates (`ring`, `aws-lc-sys`). On
+Debian or Ubuntu:
+
+```bash
+sudo apt-get install build-essential
+```
+
 ## License
 
 MIT
