@@ -872,10 +872,11 @@ impl std::fmt::Display for FailureDetail {
                 }
                 CallRejection::Unauthorized { tool } => write!(
                     f,
-                    "tool call {call_index} ({tool}) is not authorized for the requesting keeper"
+                    "tool call {call_index} ({}) is not authorized for the requesting keeper",
+                    tool.public_label()
                 ),
                 CallRejection::Scope { tool, rule } => {
-                    write!(f, "tool call {call_index} ({tool}) {rule}")
+                    write!(f, "tool call {call_index} ({}) {rule}", tool.public_label())
                 }
             },
             Self::ExecutionTimeout { seconds } => {

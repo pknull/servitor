@@ -5,6 +5,46 @@
 //! agent advertises are accepted only as bounded identifiers, and
 //! descriptions are published as bounded single-line text.
 
+/// Label published in place of a tool name the operator has not approved.
+pub const UNLISTED: &str = "unlisted";
+
+/// What the operator approved for publication about one server's tools:
+/// advertised names (exact, or `*` for all) and whether their descriptions.
+#[derive(Debug, Clone, Default)]
+pub struct PublicApproval {
+    names: Vec<String>,
+    descriptions: bool,
+}
+
+impl PublicApproval {
+    pub fn new(names: &[String], descriptions: bool) -> Self {
+        Self {
+            names: names.to_vec(),
+            descriptions,
+        }
+    }
+
+    /// Approve every tool and its description.
+    pub fn all() -> Self {
+        Self::new(&["*".to_string()], true)
+    }
+
+    /// Whether the advertised `tool` name may be published.
+    pub fn approves(&self, tool: &str) -> bool {
+        self.names.iter().any(|name| name == "*" || name == tool)
+    }
+
+    /// The description to publish for `tool`, if both it and descriptions
+    /// are approved.
+    pub fn description(&self, tool: &str, text: Option<&str>) -> Option<String> {
+        if self.descriptions && self.approves(tool) {
+            text.map(public_description)
+        } else {
+            None
+        }
+    }
+}
+
 /// Longest name accepted as a public identifier, in bytes.
 const MAX_NAME_LEN: usize = 64;
 
@@ -49,6 +89,23 @@ fn is_invisible_format(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_names_tools_and_gates_descriptions() {
+        let none = PublicApproval::default();
+        assert!(!none.approves("execute"));
+
+        let names = PublicApproval::new(&["execute".to_string()], false);
+        assert!(names.approves("execute") && !names.approves("other"));
+        assert_eq!(names.description("execute", Some("Run")), None);
+
+        let all = PublicApproval::all();
+        assert!(all.approves("anything"));
+        assert_eq!(
+            all.description("x", Some("Run\nit")).as_deref(),
+            Some("Run it")
+        );
+    }
 
     #[test]
     fn public_names_are_bounded_identifiers() {

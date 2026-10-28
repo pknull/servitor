@@ -13,7 +13,7 @@ use crate::error::{Result, ServitorError};
 use thallus_core::mcp::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use thallus_core::mcp::client::{McpClient, McpNotification, ToolDefinition};
 
-use crate::public::is_public_name;
+use crate::public::{is_public_name, PublicApproval, UNLISTED};
 use thallus_core::mcp::http::HttpMcpClient;
 use thallus_core::mcp::stdio::StdioMcpClient;
 
@@ -39,6 +39,8 @@ fn to_core_config(config: &McpServerConfig) -> thallus_core::config::McpServerCo
 pub struct RegisteredToolId {
     provider: String,
     tool: String,
+    /// Whether the operator approved the tool name for publication.
+    public: bool,
 }
 
 impl RegisteredToolId {
@@ -47,12 +49,34 @@ impl RegisteredToolId {
         &self.provider
     }
 
-    /// Tool name as the server advertised it.
+    /// Tool name as the server advertised it, for local use.
     pub fn tool(&self) -> &str {
         &self.tool
     }
+
+    /// Tool name as the feed may carry it: the advertised name when the
+    /// operator approved it, otherwise `unlisted`.
+    pub fn public_tool(&self) -> &str {
+        if self.public {
+            &self.tool
+        } else {
+            UNLISTED
+        }
+    }
+
+    /// `provider:tool` as the feed may carry it.
+    pub fn public_label(&self) -> String {
+        format!("{}:{}", self.provider, self.public_tool())
+    }
+
+    /// The prefixed tool name (`provider_tool`) as the feed may carry it.
+    pub fn public_prefixed(&self) -> String {
+        format!("{}_{}", self.provider, self.public_tool())
+    }
 }
 
+/// The local form, `provider:tool` with the advertised name: the key for
+/// authorization and logs. Feed text uses [`RegisteredToolId::public_label`].
 impl std::fmt::Display for RegisteredToolId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.provider, self.tool)
@@ -67,6 +91,8 @@ pub struct McpPool {
     circuit_breakers: HashMap<String, RwLock<CircuitBreaker>>,
     /// All tools with prefixed names, mapped to their server.
     tools: HashMap<String, RegisteredTool>,
+    /// What each server's operator approved for publication.
+    approvals: HashMap<String, PublicApproval>,
 }
 
 struct RegisteredTool {
@@ -89,6 +115,7 @@ impl McpPool {
             server_runtime: HashMap::new(),
             circuit_breakers: HashMap::new(),
             tools: HashMap::new(),
+            approvals: HashMap::new(),
         }
     }
 
@@ -118,6 +145,10 @@ impl McpPool {
 
         self.clients
             .insert(name.to_string(), Arc::new(RwLock::new(client)));
+        self.approvals.insert(
+            name.to_string(),
+            PublicApproval::new(&config.public_tools, config.public_descriptions),
+        );
         self.server_runtime.insert(
             name.to_string(),
             McpServerRuntime {
@@ -207,6 +238,23 @@ impl McpPool {
         Ok(())
     }
 
+    /// Tools whose names the operator approved for publication, with the
+    /// description to publish for each.
+    pub fn public_tools(&self) -> Vec<(&str, Option<String>)> {
+        self.tools
+            .iter()
+            .filter_map(|(prefixed, tool)| {
+                let approval = self.approvals.get(&tool.server_name)?;
+                let name = &tool.definition.name;
+                approval.approves(name).then(|| {
+                    let description =
+                        approval.description(name, tool.definition.description.as_deref());
+                    (prefixed.as_str(), description)
+                })
+            })
+            .collect()
+    }
+
     /// Get all available tools with prefixed names.
     pub fn all_tools(&self) -> Vec<(&str, &ToolDefinition)> {
         self.tools
@@ -250,6 +298,10 @@ impl McpPool {
         self.tools.get(prefixed).map(|tool| RegisteredToolId {
             provider: tool.server_name.clone(),
             tool: tool.definition.name.clone(),
+            public: self
+                .approvals
+                .get(&tool.server_name)
+                .is_some_and(|approval| approval.approves(&tool.definition.name)),
         })
     }
 
@@ -447,6 +499,12 @@ impl McpPool {
 
 #[cfg(test)]
 impl McpPool {
+    /// Record what the operator approved for `server`, as `add_client`
+    /// would from its configuration.
+    pub(crate) fn approve_server(&mut self, server: &str, approval: PublicApproval) {
+        self.approvals.insert(server.to_string(), approval);
+    }
+
     /// Register `client` as server `server` offering one tool, as
     /// [`McpPool::initialize_all`] would after listing it.
     pub(crate) fn register_test_tool(
@@ -468,6 +526,9 @@ impl McpPool {
     ) {
         self.clients
             .insert(server.to_string(), Arc::new(RwLock::new(client)));
+        self.approvals
+            .entry(server.to_string())
+            .or_insert_with(PublicApproval::all);
         self.circuit_breakers
             .insert(server.to_string(), RwLock::new(CircuitBreaker::default()));
         let definition = ToolDefinition {

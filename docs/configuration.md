@@ -47,8 +47,17 @@ Each named MCP section declares one tool server.
 Section names under `[mcp.*]` and `[a2a.*]` are published as provider names,
 so they must be 1 to 64 ASCII letters, digits, `_`, `.` or `-`, starting with
 a letter or digit. A tool or skill whose advertised name breaks the same rule
-is not registered, and the manifest publishes each description as one line of
-at most 200 characters.
+is not registered.
+
+Advertised tool names and descriptions are the server's text, so the feed
+carries them only with the operator's approval:
+
+- `public_tools` (`public_skills` under `[a2a.*]`): names the profile,
+  manifest, spans and failure details may carry; exact names, or `"*"` for
+  all. Default: none. An unapproved tool still runs; it publishes as
+  `unlisted` and stays out of the profile and manifest.
+- `public_descriptions`: also publish the approved tools' descriptions in the
+  manifest, as one line of at most 200 characters. Default: `false`.
 
 Supported transports:
 

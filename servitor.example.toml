@@ -74,6 +74,8 @@ bind = "127.0.0.1:9091"
 # auth.token_env = "RESEARCH_AGENT_TOKEN"
 # scope.allow = ["web_search", "summarize"]
 # scope.block = [] # Parsed; the current A2A pool does not consult this field.
+# public_skills = ["web_search"]  # skill names the feed may carry; "*" for all
+# public_descriptions = false
 
 # A2A Server
 # Enables external A2A agents to discover and invoke Servitor's capabilities.
@@ -98,6 +100,12 @@ timeout_secs = 60
 # Scope enforcement
 scope.allow = ["execute:~/scripts/*", "read:*"]
 scope.block = ["execute:/etc/*", "execute:rm *", "execute:sudo *"]
+
+# Publication: advertised tool names the profile, manifest and spans may
+# carry ("*" for all). Unapproved tools still run and publish as "unlisted".
+public_tools = ["execute", "read"]
+# Also publish the approved tools' descriptions in the manifest.
+public_descriptions = false
 # Optional: Convert MCP notifications to structured tasks
 # on_notification = [
 #   { name = "shell__execute", arguments = { command = "echo {{notification}}" } }

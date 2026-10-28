@@ -148,6 +148,16 @@ pub struct McpServerConfig {
     /// Structured tool calls to emit for notifications.
     #[serde(default)]
     pub on_notification: Vec<ToolCallTemplate>,
+
+    /// Advertised tool names approved for publication in the profile,
+    /// manifest, spans and failure details: exact names, or `"*"` for every
+    /// tool. Unapproved tools still run; they publish as `unlisted`.
+    #[serde(default)]
+    pub public_tools: Vec<String>,
+
+    /// Also publish the approved tools' descriptions in the manifest.
+    #[serde(default)]
+    pub public_descriptions: bool,
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -179,6 +189,15 @@ pub struct A2aAgentConfig {
     /// Scope enforcement rules.
     #[serde(default)]
     pub scope: ScopeConfig,
+
+    /// Advertised skill names approved for publication in the profile and
+    /// manifest: exact names, or `"*"` for every skill.
+    #[serde(default)]
+    pub public_skills: Vec<String>,
+
+    /// Also publish the approved skills' descriptions in the manifest.
+    #[serde(default)]
+    pub public_descriptions: bool,
 }
 
 fn default_a2a_timeout() -> u64 {

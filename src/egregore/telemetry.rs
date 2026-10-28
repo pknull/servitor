@@ -217,7 +217,7 @@ impl TraceSpan {
             trace_id: record.trace_id,
             span_id: record.span_id,
             parent_span_id: Some(record.parent_span_id),
-            name: format!("direct:{}:{}", record.tool.provider(), record.tool.tool()),
+            name: format!("direct:{}", record.tool.public_label()),
             service: SERVICE,
             start_ts: record.start,
             end_ts: record.end,
@@ -225,7 +225,7 @@ impl TraceSpan {
             attributes: SpanAttributes::Tool {
                 execution_id: record.execution_id,
                 provider: record.tool.provider().to_string(),
-                tool: record.tool.tool().to_string(),
+                tool: record.tool.public_tool().to_string(),
                 call_index: record.call_index,
                 duration_ms: duration_ms(record.start, record.end),
                 outcome: record.outcome,

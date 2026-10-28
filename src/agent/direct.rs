@@ -106,7 +106,9 @@ pub async fn execute_direct(
         metrics::record_tool_call_duration(tool.tool(), duration);
 
         if let Some(trace) = &trace {
-            trace.publish_tool(tool, idx, tool_start, outcome).await;
+            trace
+                .publish_tool(tool.clone(), idx, tool_start, outcome)
+                .await;
         }
 
         match result {
@@ -115,8 +117,11 @@ pub async fn execute_direct(
                 let (sanitized_text, _) =
                     crate::agent::output_defense::defense_pipeline(&planned.name, &text);
                 if output.is_error {
-                    let error_msg =
-                        format!("tool '{}' returned error: {}", planned.name, sanitized_text);
+                    let error_msg = format!(
+                        "tool '{}' returned error: {}",
+                        tool.public_prefixed(),
+                        sanitized_text
+                    );
                     tracing::warn!(tool = %planned.name, "direct call returned error");
                     return build_error_result(
                         task,
@@ -129,7 +134,7 @@ pub async fn execute_direct(
                     .await;
                 }
                 call_results.push(DirectCallResult {
-                    tool_name: planned.name.clone(),
+                    tool_name: tool.public_prefixed(),
                     output: sanitized_text,
                 });
             }
@@ -137,8 +142,11 @@ pub async fn execute_direct(
                 // Error text comes from the transport, the server or the
                 // schema check and can quote URLs or argument values; the
                 // requester gets a code and the text stays in the local log.
-                let error_msg =
-                    format!("tool '{}' failed: {}", planned.name, call_failure_code(&e));
+                let error_msg = format!(
+                    "tool '{}' failed: {}",
+                    tool.public_prefixed(),
+                    call_failure_code(&e)
+                );
                 tracing::error!(tool = %planned.name, error = %e, "direct call failed");
                 return build_error_result(
                     task,
@@ -587,6 +595,7 @@ mod tests {
         use chrono::Utc;
 
         use super::super::execute_direct;
+        use crate::authority::{Authority, AuthorityConfig};
         use crate::config::{AgentConfig, Config};
         use crate::egregore::{telemetry, PlannedToolCall, Task};
         use crate::identity::Identity;
@@ -926,6 +935,126 @@ mod tests {
             for body in node.bodies() {
                 let body = String::from_utf8_lossy(&body);
                 assert!(!body.contains(canary), "{body}");
+            }
+        }
+
+        /// A tool the operator has not approved for publication runs, but
+        /// its spans and failure result name it `unlisted`.
+        #[tokio::test]
+        async fn unapproved_tool_publishes_as_unlisted() {
+            let node = CaptureNode::start().await;
+            let config = Config::from_str(TRACING_CONFIGS[0]).unwrap().agent;
+            let mut pool = McpPool::new();
+            pool.approve_server("shell", crate::public::PublicApproval::default());
+            pool.register_test_tool("shell", "execute", ScriptedClient::call_error("down"));
+            let task = with_public_trace(exec_task(&mut SecretGen::new(8), HashMap::new()));
+
+            let result = execute_direct(
+                &task,
+                &pool,
+                &ScopeEnforcer::new(),
+                &SERVITOR.with(Identity::clone),
+                &config,
+                Some(&node.client),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                result.error.as_deref(),
+                Some("tool 'shell_unlisted' failed: mcp_error")
+            );
+            let spans: Vec<Value> = node
+                .bodies_of_type("trace_span")
+                .iter()
+                .map(|body| serde_json::from_slice::<Value>(body).unwrap()["content"].clone())
+                .collect();
+            let tool_span = spans
+                .iter()
+                .find(|span| span["name"] != "direct:task")
+                .expect("tool span");
+            assert_eq!(tool_span["name"], "direct:shell:unlisted");
+            for span in &spans {
+                assert!(!span.to_string().contains("execute"), "{span}");
+            }
+        }
+
+        /// Publication approval names what the feed may carry; it never
+        /// changes what a keeper is authorized to run.
+        #[tokio::test]
+        async fn authorization_ignores_publication_approval() {
+            let authority = Authority::from_config(
+                AuthorityConfig::from_toml(
+                    r#"
+[[keeper]]
+name = "operator"
+egregore = "@operator.ed25519"
+
+[[permission]]
+keeper = "operator"
+skills = ["shell:execute"]
+"#,
+                )
+                .unwrap(),
+            );
+            let mut pool = McpPool::new();
+            pool.approve_server("shell", crate::public::PublicApproval::default());
+            pool.register_test_tool("shell", "execute", ScriptedClient::output("ran"));
+            let task = exec_task(&mut SecretGen::new(9), HashMap::new());
+
+            let result = execute_direct(
+                &task,
+                &pool,
+                &ScopeEnforcer::new(),
+                &Identity::generate(),
+                &AgentConfig::default(),
+                None,
+                Some(&authority),
+                Some("operator"),
+            )
+            .await
+            .unwrap();
+
+            assert!(result.error.is_none(), "{:?}", result.error);
+        }
+
+        /// The published result names an unapproved tool `unlisted` on every
+        /// outcome, with tracing off.
+        #[tokio::test]
+        async fn results_name_unapproved_tools_unlisted() {
+            let node = CaptureNode::start().await;
+            for client in [
+                ScriptedClient::output("ran"),
+                ScriptedClient::tool_error("no"),
+                ScriptedClient::call_error("down"),
+            ] {
+                let mut pool = McpPool::new();
+                pool.approve_server("shell", crate::public::PublicApproval::default());
+                pool.register_test_tool("shell", "execute", client);
+                let task = exec_task(&mut SecretGen::new(10), HashMap::new());
+
+                let result = execute_direct(
+                    &task,
+                    &pool,
+                    &ScopeEnforcer::new(),
+                    &Identity::generate(),
+                    &AgentConfig::default(),
+                    Some(&node.client),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                let mut published = serde_json::to_value(&result).unwrap();
+                // The task's own identity fields are the requester's; the
+                // check is on what execution added.
+                published["task_hash"] = Value::Null;
+                let text = published.to_string();
+                assert!(!text.contains("execute"), "{text}");
+                assert!(text.contains("shell_unlisted"), "{text}");
             }
         }
 

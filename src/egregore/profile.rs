@@ -1,6 +1,5 @@
 //! Profile building utilities for egregore network.
 
-use crate::public::public_description;
 use chrono::Utc;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,17 +40,19 @@ pub async fn build_profile(
     profile.capabilities = mcp_pool.capabilities();
     profile.capabilities.extend(a2a_pool.agents());
 
-    // Add tools from MCP pool
+    // Tools whose names the operator approved for publication
     profile.tools = mcp_pool
-        .all_tools()
-        .iter()
+        .public_tools()
+        .into_iter()
         .map(|(name, _)| name.to_string())
         .collect();
-
-    // Add tools from A2A pool
-    for tool in a2a_pool.tools_for_llm() {
-        profile.tools.push(tool.name);
-    }
+    profile.tools.extend(
+        a2a_pool
+            .public_tools()
+            .into_iter()
+            .map(|(_, name, _)| name.to_string()),
+    );
+    profile.tools.sort();
 
     profile.roles = config.profile.roles.clone();
     profile.labels = config.profile.labels.clone();
@@ -84,7 +85,7 @@ pub async fn build_manifest(
     capabilities.dedup();
 
     let mut toolsets_by_server: BTreeMap<String, ToolsetSummary> = BTreeMap::new();
-    for (name, tool) in mcp_pool.all_tools() {
+    for (name, title) in mcp_pool.public_tools() {
         let Some((server_name, _tool_name)) = mcp_pool.parse_tool_name(name) else {
             continue;
         };
@@ -104,7 +105,7 @@ pub async fn build_manifest(
             });
         entry.tools.push(ToolSummary {
             name: name.to_string(),
-            title: tool.description.as_deref().map(public_description),
+            title,
         });
     }
 
@@ -114,10 +115,7 @@ pub async fn build_manifest(
             .sort_by(|left, right| left.name.cmp(&right.name));
     }
 
-    for tool in a2a_pool.tools_for_llm() {
-        let Some((agent_name, _)) = tool.name.split_once('_') else {
-            continue;
-        };
+    for (agent_name, name, title) in a2a_pool.public_tools() {
         let entry = toolsets_by_server
             .entry(agent_name.to_string())
             .or_insert_with(|| ToolsetSummary {
@@ -128,8 +126,8 @@ pub async fn build_manifest(
                 resource_templates: Vec::new(),
             });
         entry.tools.push(ToolSummary {
-            name: tool.name,
-            title: tool.description.as_deref().map(public_description),
+            name: name.to_string(),
+            title,
         });
     }
 
@@ -310,9 +308,38 @@ mod tests {
         snapshots[0].state["probe_results"].clone()
     }
 
+    /// Advertised names and descriptions are published only when the
+    /// operator approves them for that server.
+    #[tokio::test]
+    async fn unapproved_tools_stay_out_of_profile_and_manifest() {
+        let tool = |name: &str| thallus_core::mcp::client::ToolDefinition {
+            name: name.to_string(),
+            description: Some("password=canary_7f3a".to_string()),
+            input_schema: None,
+        };
+        let mut pool = McpPool::new();
+        pool.register_server_tools("hidden", vec![tool("canary_7f3a")])
+            .unwrap();
+        let config = Config::from_str("").unwrap();
+        let identity = Identity::generate();
+        let a2a = A2aPool::new();
+        let stats = RuntimeStats::default();
+
+        let profile = build_profile(&identity, &pool, &a2a, &config, &stats, None).await;
+        let manifest = build_manifest(&identity, &pool, &a2a, &config).await;
+
+        for text in [
+            serde_json::to_string(&profile).unwrap(),
+            serde_json::to_string(&manifest).unwrap(),
+        ] {
+            assert!(!text.contains("canary_7f3a"), "{text}");
+        }
+    }
+
     #[tokio::test]
     async fn manifest_tool_titles_are_single_line_and_bounded() {
         let mut pool = McpPool::new();
+        pool.approve_server("shell", crate::public::PublicApproval::all());
         pool.register_server_tools(
             "shell",
             vec![thallus_core::mcp::client::ToolDefinition {

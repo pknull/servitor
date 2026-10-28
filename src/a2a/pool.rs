@@ -13,6 +13,7 @@ use super::http::{HttpA2aClient, HttpA2aConfig};
 use super::{A2aError, Result};
 use crate::mcp::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use crate::mcp::pool::LlmTool;
+use crate::public::PublicApproval;
 
 /// Pool of A2A clients with tool introspection.
 pub struct A2aPool {
@@ -22,6 +23,8 @@ pub struct A2aPool {
     circuit_breakers: HashMap<String, RwLock<CircuitBreaker>>,
     /// All skills as tools with prefixed names, mapped to their agent.
     tools: HashMap<String, RegisteredA2aTool>,
+    /// What each agent's operator approved for publication.
+    approvals: HashMap<String, PublicApproval>,
 }
 
 struct RegisteredA2aTool {
@@ -52,6 +55,8 @@ pub struct A2aAgentPoolConfig {
     pub poll_interval_ms: u64,
     /// Allowed skills (empty = all).
     pub allow_skills: Vec<String>,
+    /// What the operator approved for publication.
+    pub approval: PublicApproval,
 }
 
 impl A2aPool {
@@ -62,6 +67,7 @@ impl A2aPool {
             agent_runtime: HashMap::new(),
             circuit_breakers: HashMap::new(),
             tools: HashMap::new(),
+            approvals: HashMap::new(),
         }
     }
 
@@ -89,6 +95,10 @@ impl A2aPool {
                 timeout_secs: a2a_config.timeout_secs,
                 poll_interval_ms: a2a_config.poll_interval_ms,
                 allow_skills: a2a_config.scope.allow.clone(),
+                approval: PublicApproval::new(
+                    &a2a_config.public_skills,
+                    a2a_config.public_descriptions,
+                ),
             })?;
         }
 
@@ -113,6 +123,7 @@ impl A2aPool {
 
         self.agent_runtime
             .insert(config.name.clone(), A2aAgentRuntime { initialized: false });
+        self.approvals.insert(config.name.clone(), config.approval);
 
         // Add circuit breaker for this agent
         let cb_config = CircuitBreakerConfig {
@@ -187,6 +198,22 @@ impl A2aPool {
         );
 
         Ok(())
+    }
+
+    /// Skills whose names the operator approved for publication, as
+    /// `(agent, prefixed name, description to publish)`.
+    pub fn public_tools(&self) -> Vec<(&str, &str, Option<String>)> {
+        self.tools
+            .iter()
+            .filter_map(|(prefixed, tool)| {
+                let approval = self.approvals.get(&tool.agent_name)?;
+                let name = &tool.skill.name;
+                approval.approves(name).then(|| {
+                    let description = approval.description(name, tool.skill.description.as_deref());
+                    (tool.agent_name.as_str(), prefixed.as_str(), description)
+                })
+            })
+            .collect()
     }
 
     /// Get tools formatted for LLM consumption.
