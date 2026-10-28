@@ -49,9 +49,6 @@ pub struct Authority {
     /// Index: discord user id -> keeper index.
     keeper_by_discord: HashMap<String, usize>,
 
-    /// Index: http token -> keeper index.
-    keeper_by_http: HashMap<String, usize>,
-
     /// Whether authority is in explicitly insecure open mode.
     open_mode: bool,
 }
@@ -70,7 +67,6 @@ impl Authority {
             permissions: Vec::new(),
             keeper_by_egregore: HashMap::new(),
             keeper_by_discord: HashMap::new(),
-            keeper_by_http: HashMap::new(),
             open_mode: false,
         }
     }
@@ -82,7 +78,6 @@ impl Authority {
             permissions: Vec::new(),
             keeper_by_egregore: HashMap::new(),
             keeper_by_discord: HashMap::new(),
-            keeper_by_http: HashMap::new(),
             open_mode: true,
         }
     }
@@ -110,7 +105,6 @@ impl Authority {
     pub fn from_config(config: AuthorityConfig) -> Self {
         let mut keeper_by_egregore = HashMap::new();
         let mut keeper_by_discord = HashMap::new();
-        let mut keeper_by_http = HashMap::new();
 
         for (i, keeper) in config.keepers.iter().enumerate() {
             if let Some(ref pubkey) = keeper.egregore {
@@ -119,9 +113,6 @@ impl Authority {
             if let Some(ref user_id) = keeper.discord {
                 keeper_by_discord.insert(user_id.clone(), i);
             }
-            if let Some(ref token) = keeper.http_token {
-                keeper_by_http.insert(token.clone(), i);
-            }
         }
 
         Self {
@@ -129,7 +120,6 @@ impl Authority {
             permissions: config.permissions,
             keeper_by_egregore,
             keeper_by_discord,
-            keeper_by_http,
             open_mode: false,
         }
     }
@@ -142,17 +132,36 @@ impl Authority {
     /// Identify a keeper from a person identity.
     pub fn identify(&self, person: &PersonId) -> Option<&Keeper> {
         let idx = match person {
-            PersonId::Egregore(pubkey) => self.keeper_by_egregore.get(pubkey),
-            PersonId::Discord(user_id) => self.keeper_by_discord.get(user_id),
+            PersonId::Egregore(pubkey) => self.keeper_by_egregore.get(pubkey).copied(),
+            PersonId::Discord(user_id) => self.keeper_by_discord.get(user_id).copied(),
             PersonId::Http(token) => {
-                // Try exact match first
-                self.keeper_by_http
-                    .get(token)
-                    // Fall back to wildcard match
-                    .or_else(|| self.keeper_by_http.get("*"))
+                if token.trim().is_empty() {
+                    return None;
+                }
+                // Scan every keeper without stopping at a match; each check is
+                // a constant-time digest comparison (`token_eq`). As on the
+                // other planes, a token configured twice resolves to the last
+                // keeper.
+                let exact = self
+                    .keepers
+                    .iter()
+                    .enumerate()
+                    .fold(None, |found, (i, keeper)| {
+                        if keeper.matches(person) {
+                            Some(i)
+                        } else {
+                            found
+                        }
+                    });
+                // Fall back to wildcard match
+                exact.or_else(|| {
+                    self.keepers
+                        .iter()
+                        .rposition(|keeper| keeper.http_token.as_deref() == Some("*"))
+                })
             }
         };
-        idx.map(|&i| &self.keepers[i])
+        idx.map(|i| &self.keepers[i])
     }
 
     /// Get a keeper by name.
@@ -560,5 +569,97 @@ skills = ["*"]
         });
         assert!(result.allowed);
         assert_eq!(result.keeper, Some("wildcard-user".to_string()));
+    }
+
+    #[test]
+    fn test_http_token_must_match_exactly() {
+        let config = AuthorityConfig::from_toml(
+            r#"
+[[keeper]]
+name = "bot"
+http_token = "secure-token"
+"#,
+        )
+        .unwrap();
+        let auth = Authority::from_config(config);
+
+        let found = auth.identify(&PersonId::Http("secure-token".to_string()));
+        assert_eq!(found.map(|k| k.name.as_str()), Some("bot"));
+        for token in [
+            "secure",
+            "secure-token-extra",
+            "Secure-token",
+            "secure-tokem",
+        ] {
+            assert!(
+                auth.identify(&PersonId::Http(token.to_string())).is_none(),
+                "{token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_blank_http_token_identifies_nobody() {
+        let config = AuthorityConfig::from_toml(
+            r#"
+[[keeper]]
+name = "misconfigured"
+http_token = ""
+
+[[keeper]]
+name = "spaces"
+http_token = "  "
+
+[[keeper]]
+name = "wildcard-user"
+http_token = "*"
+"#,
+        )
+        .unwrap();
+        let auth = Authority::from_config(config);
+
+        // A blank token is no token: it reaches neither a blank configured
+        // token nor the wildcard. A whitespace-only configured token admits
+        // nobody either.
+        for token in ["", " ", "  "] {
+            assert!(
+                auth.identify(&PersonId::Http(token.to_string())).is_none(),
+                "{token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_duplicate_http_tokens_resolve_to_the_last_keeper() {
+        let config = AuthorityConfig::from_toml(
+            r#"
+[[keeper]]
+name = "first-wildcard"
+http_token = "*"
+
+[[keeper]]
+name = "first"
+http_token = "shared-token"
+
+[[keeper]]
+name = "second"
+http_token = "shared-token"
+
+[[keeper]]
+name = "second-wildcard"
+http_token = "*"
+"#,
+        )
+        .unwrap();
+        let auth = Authority::from_config(config);
+        let name = |token: &str| {
+            auth.identify(&PersonId::Http(token.to_string()))
+                .map(|k| k.name.clone())
+        };
+
+        assert_eq!(name("shared-token").as_deref(), Some("second"));
+        assert_eq!(name("unlisted").as_deref(), Some("second-wildcard"));
+        // The literal `*` matches the wildcard entries exactly.
+        assert_eq!(name("*").as_deref(), Some("second-wildcard"));
     }
 }

@@ -152,6 +152,7 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string())
 }
 
@@ -890,6 +891,10 @@ skills = {skills:?}
         assert_eq!(extract_bearer_token(&headers), Some("abc123".to_string()));
 
         headers.insert("authorization", "Basic xyz".parse().unwrap());
+        assert!(extract_bearer_token(&headers).is_none());
+
+        // An empty bearer reads as no bearer.
+        headers.insert("authorization", "Bearer ".parse().unwrap());
         assert!(extract_bearer_token(&headers).is_none());
     }
 }

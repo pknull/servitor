@@ -4,6 +4,22 @@
 //! PersonId represents a single-plane identity used for authentication.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
+/// Compare a presented bearer token with a configured one in constant time.
+///
+/// Both sides are hashed to fixed-size digests, compared with constant-time
+/// equality, so the comparison never stops at the first differing byte. A
+/// blank token is no token and matches nothing.
+pub(crate) fn token_eq(configured: &str, presented: &str) -> bool {
+    if configured.trim().is_empty() || presented.trim().is_empty() {
+        return false;
+    }
+    let configured = Sha256::digest(configured.as_bytes());
+    let presented = Sha256::digest(presented.as_bytes());
+    configured.ct_eq(&presented).into()
+}
 
 /// A Keeper (person) with identities across planes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +46,10 @@ impl Keeper {
         match person {
             PersonId::Egregore(pubkey) => self.egregore.as_ref() == Some(pubkey),
             PersonId::Discord(user_id) => self.discord.as_ref() == Some(user_id),
-            PersonId::Http(token) => self.http_token.as_ref() == Some(token),
+            PersonId::Http(token) => self
+                .http_token
+                .as_deref()
+                .is_some_and(|configured| token_eq(configured, token)),
         }
     }
 }
@@ -110,6 +129,32 @@ mod tests {
         assert!(keeper.matches(&PersonId::Discord("187488812471943168".to_string())));
         assert!(!keeper.matches(&PersonId::Discord("other".to_string())));
         assert!(!keeper.matches(&PersonId::Egregore("@abc.ed25519".to_string())));
+    }
+
+    #[test]
+    fn test_keeper_matches_http() {
+        let keeper = Keeper {
+            name: "bot".to_string(),
+            egregore: None,
+            discord: None,
+            http_token: Some("secure-token".to_string()),
+        };
+
+        assert!(keeper.matches(&PersonId::Http("secure-token".to_string())));
+        for token in ["", "secure", "secure-token-extra", "secure-tokem"] {
+            assert!(
+                !keeper.matches(&PersonId::Http(token.to_string())),
+                "{token:?}"
+            );
+        }
+        assert!(!keeper.matches(&PersonId::Egregore("secure-token".to_string())));
+
+        // A blank configured token admits nobody, not even a blank one.
+        let blank = Keeper {
+            http_token: Some(String::new()),
+            ..keeper
+        };
+        assert!(!blank.matches(&PersonId::Http(String::new())));
     }
 
     #[test]
