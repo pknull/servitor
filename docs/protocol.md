@@ -2,7 +2,7 @@
 
 Servitor participates in two closely related message flows on Egregore:
 
-1. direct execution flows, used by hook mode, cron tasks, watcher-triggered tasks, and local CLI execution
+1. direct execution flows, used by cron tasks, watcher-triggered tasks, and local CLI execution
 2. coordinated network execution, used when `servitor run` subscribes to the Egregore SSE feed and participates in offer/assignment
 
 All Egregore messages are signed by the publishing node. Servitor adds local authorization and scope enforcement before offering or executing work.
@@ -119,22 +119,16 @@ local log.
 | `execution_timeout` | `task exceeded <n>s execution timeout` |
 | `execution_error` | `task execution failed` |
 
-## Direct, Hook, Cron, and Watcher Flow
+## Direct, Cron, and Watcher Flow
 
 The simpler execution path is used outside SSE assignment:
 
-1. Task enters from hook stdin, cron, watcher expansion, or direct execution
+1. Task enters from cron, watcher expansion, or direct execution
 2. Servitor may publish an advisory `task_claim`
 3. Servitor executes the task locally
 4. Servitor publishes `task_result`
 
 `task_claim` is advisory only. It is not the coordination mechanism for SSE task assignment.
-
-Hook mode uses the same request gate as SSE offer evaluation:
-
-- Servitor normalizes the task using the envelope author
-- the normalized `requestor` must match the envelope author
-- the requestor must be authorized for `request:<task_type>`
 
 For local `servitor exec`, the input is a JSON array of pre-planned tool calls, not a natural-language planning request.
 

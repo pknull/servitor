@@ -256,11 +256,8 @@ Relevant concepts:
 
 - Keepers map identities across egregore, Discord, and HTTP bearer tokens
 - Permissions match `place` and `skill` patterns
-- Request authorization uses `request:<task_type>` in both SSE and hook mode
+- Request authorization uses `request:<task_type>` for SSE tasks
 - Assignment delegation uses `assign:<task_type>`
 
-Hook mode also requires the normalized task requestor to match the Egregore
-envelope author before execution proceeds.
-
-Without `authority.toml`, daemon and hook execution refuse work unless
+Without `authority.toml`, daemon execution refuses work unless
 `--insecure` is supplied explicitly.

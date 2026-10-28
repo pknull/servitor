@@ -1010,7 +1010,7 @@ impl AuthDenied {
     }
 }
 
-/// Generic egregore message envelope (for hook input and context fetching).
+/// Generic egregore message envelope (for SSE input and context fetching).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EgregoreMessage {
     pub author: PublicId,

@@ -37,7 +37,7 @@ Execute a structured direct task locally:
 servitor exec '[{"name":"shell__execute","arguments":{"command":"pwd"}}]'
 ```
 
-Daemon and hook modes refuse work unless `authority.toml` is present or `--insecure` is set explicitly for local development. Local `servitor exec` runs authorize as the servitor's own egregore identity when authority is configured.
+Daemon mode refuses work unless `authority.toml` is present or `--insecure` is set explicitly for local development. Local `servitor exec` runs authorize as the servitor's own egregore identity when authority is configured.
 
 ## Documentation
 
@@ -81,14 +81,13 @@ Planning and user interaction belong to Familiar, not Servitor.
 |------|---------|---------|
 | Direct exec | `servitor exec '<json tool calls>'` | Local one-shot execution of pre-planned tool calls |
 | Daemon | `servitor run` | SSE subscription, cron, MCP notification routing, and profile publishing |
-| Hook | `servitor run --hook` | Read one egregore `task` envelope from stdin |
 | Info | `servitor info` | Show identity, capabilities, and authority state |
 
 ## Protocol Overview
 
 Servitor currently uses two related task paths:
 
-1. Direct, hook, cron, and MCP notification execution:
+1. Direct, cron, and MCP notification execution:
    `task -> optional task_claim -> task_result`
 2. SSE-coordinated network execution:
    `task -> task_offer -> task_assign -> task_started -> task_status/task_failed -> task_result`

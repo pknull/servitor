@@ -27,7 +27,7 @@ Familiar ──► egregore feed ──► Servitor ──► MCP Servers (tools
 | a2a | `src/a2a/` | Agent-to-Agent protocol (client, server, pool) |
 | agent | `src/agent/` | Direct execution, output defense, sanitization |
 | authority | `src/authority/` | Person/Skill authorization |
-| cli | `src/cli/` | Command implementations (daemon, exec, hook, info, init) |
+| cli | `src/cli/` | Command implementations (daemon, exec, info, init) |
 | config | `src/config/` | TOML loading, validation, cron parsing |
 | egregore | `src/egregore/` | Messages, publish, profile building, context fetching |
 | events | `src/events/` | EventRouter, CronSource, SseSource, MCP notifications |
@@ -73,7 +73,6 @@ cargo test                 # Run tests
 ./target/release/servitor info    # Show config + authority status
 ./target/release/servitor exec '[{"name":"shell__execute","arguments":{"command":"pwd"}}]'  # Execute directly
 ./target/release/servitor run     # Daemon mode
-./target/release/servitor run --hook  # Egregore hook mode
 ```
 
 ## Configuration
@@ -99,11 +98,11 @@ Copy `authority.example.toml` to `~/.servitor/authority.toml` for access control
 - **Keeper**: Identity across planes (egregore pubkey, discord ID, http token)
 - **Skill**: Tool patterns (`shell:execute`, `docker:*`)
 
-No `authority.toml` means daemon and hook modes refuse to start. Use `--insecure` only for local development when you intentionally want open mode.
+No `authority.toml` means daemon mode refuses to start. Use `--insecure` only for local development when you intentionally want open mode.
 
 ## Task Execution Flow
 
-1. Task arrives via SSE (or cron/hook/MCP notification)
+1. Task arrives via SSE (or cron/MCP notification)
 2. Capability check: `task.required_caps` must match servitor capabilities
 3. Authority check: requestor must be authorized for the skill pattern
 4. If SSE: publish `task_offer`, wait for `task_assign` from Familiar

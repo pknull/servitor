@@ -36,7 +36,6 @@
 //! - **Cron**: Scheduled tasks via cron expressions
 //! - **SSE**: Egregore feed subscription (real-time)
 //! - **MCP Notifications**: Server-pushed events
-//! - **Hook**: Stdin JSON (for egregore hook mode)
 //! - **Direct**: CLI exec command
 
 pub mod a2a;

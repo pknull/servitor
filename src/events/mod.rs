@@ -4,7 +4,6 @@
 //! - Cron: scheduled tasks
 //! - SSE: egregore feed subscription
 //! - MCP notifications: server-pushed events
-//! - Hook: stdin (for egregore hook mode)
 //! - Direct: CLI exec command
 
 pub mod cron;

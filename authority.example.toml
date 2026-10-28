@@ -5,7 +5,7 @@
 #
 # If no authority.toml exists, Servitor refuses to execute work by default.
 # Copy this file into place and define keepers/permissions before running
-# daemon or hook mode.
+# daemon mode.
 #
 # For local development only, you can opt into open mode with:
 #   servitor run --insecure

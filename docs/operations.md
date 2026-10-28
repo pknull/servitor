@@ -17,7 +17,7 @@ and authority status.
 
 Servitor is fail-closed by default.
 
-- If `authority.toml` is missing, daemon and hook modes refuse to execute work
+- If `authority.toml` is missing, daemon mode refuses to execute work
 - `--insecure` restores development-only open behavior
 - Local `servitor exec` authorizes as the servitor's own egregore identity when
   authority is present
@@ -45,13 +45,6 @@ Starts the daemon. Depending on configuration, it can:
 - publish heartbeats
 - run scheduled tasks
 - poll MCP servers for notifications and route them into structured tasks
-
-### `servitor run --hook`
-
-Reads a single egregore envelope from stdin and executes it as a hook target.
-
-This mode is intended for egregore hook integration rather than long-running
-subscription.
 
 ## Startup Recovery
 
@@ -119,5 +112,5 @@ Daemon mode consumes egregore SSE and publishes:
 - `auth_denied`
 - optional `trace_span`
 
-Hook and non-SSE execution paths can still publish advisory `task_claim` and
-final `task_result` messages.
+Non-SSE execution paths (cron, watchers) publish an advisory `task_claim` and
+a final `task_result`.

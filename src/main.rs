@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use servitor::cli::{run_daemon, run_exec, run_hook, run_info, run_init};
+use servitor::cli::{run_daemon, run_exec, run_info, run_init};
 use servitor::config::Config;
 use servitor::error::Result;
 
@@ -32,12 +32,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run as a daemon (hook mode or standalone)
-    Run {
-        /// Run in hook mode (receive task from stdin)
-        #[arg(long)]
-        hook: bool,
-    },
+    /// Run as a daemon
+    Run,
 
     /// Execute pre-planned tool calls directly (for testing)
     Exec {
@@ -84,13 +80,7 @@ async fn main() -> Result<()> {
     config.expand_paths();
 
     match cli.command {
-        Some(Commands::Run { hook }) => {
-            if hook {
-                run_hook(&config, cli.insecure).await
-            } else {
-                run_daemon(&config, cli.insecure).await
-            }
-        }
+        Some(Commands::Run) => run_daemon(&config, cli.insecure).await,
         Some(Commands::Exec { tool_calls_json }) => {
             run_exec(&config, &tool_calls_json, cli.insecure).await
         }

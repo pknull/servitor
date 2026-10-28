@@ -5,7 +5,7 @@ so this repository does not ship a Servitor OpenAPI document on this branch.
 
 That is intentional and reflects the actual runtime boundary:
 
-- inbound control surfaces are CLI, egregore messages, hook stdin, cron,
+- inbound control surfaces are CLI, egregore messages, cron,
   watchers, and Discord
 - outbound HTTP is used to talk to egregore and to MCP servers configured with
   `transport = "http"`
