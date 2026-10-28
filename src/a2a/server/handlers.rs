@@ -20,6 +20,7 @@ use crate::a2a::client::TaskResult;
 use crate::a2a::A2aPool;
 use crate::authority::{AuthRequest, Authority, PersonId};
 use crate::config::A2aServerConfig;
+use crate::error::ServitorError;
 use crate::mcp::McpPool;
 use crate::scope::ScopeEnforcer;
 
@@ -348,8 +349,13 @@ async fn execute_task(
             .scope_enforcer
             .check(server_name, tool_name, &input, None)
         {
-            let error = format!("Scope violation: {}", e);
-            tracing::warn!(task_id = %task_id, error = %error, "task scope violation");
+            tracing::warn!(task_id = %task_id, error = %e, "task scope violation");
+            // The client learns which rule refused the call; the diagnostic,
+            // which quotes the matched pattern, stays in the local log.
+            let error = match e {
+                ServitorError::ScopeViolation { rule, .. } => format!("Scope violation: {rule}"),
+                _ => "Scope check failed".to_string(),
+            };
             state.task_store.fail(&task_id, error).await;
             return;
         }
@@ -510,6 +516,63 @@ async fn handle_tasks_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::a2a::client::{A2aTask, TaskState};
+    use crate::config::ScopeConfig;
+    use crate::test_support::ScriptedClient;
+
+    /// Run one task for `server`'s `execute` tool, under the given block
+    /// rules, through the server's execution path, and return what
+    /// `tasks/get` would hand the client.
+    async fn run_scoped_task(server: &str, block: &[&str], input: serde_json::Value) -> A2aTask {
+        let mut mcp_pool = McpPool::new();
+        mcp_pool.register_test_tool(server, "execute", ScriptedClient::output("ran"));
+        let mut scope_enforcer = ScopeEnforcer::new();
+        scope_enforcer
+            .add_policy(
+                server,
+                &ScopeConfig {
+                    allow: vec![],
+                    block: block.iter().map(|rule| rule.to_string()).collect(),
+                },
+            )
+            .unwrap();
+        let task_store = A2aTaskStore::new(8, 60);
+        let skill = format!("{server}_execute");
+        let task = task_store
+            .create(skill.clone(), input.clone(), None)
+            .await
+            .unwrap();
+        let state = Arc::new(A2aServerStateRef {
+            mcp_pool: Arc::new(RwLock::new(mcp_pool)),
+            a2a_pool: Arc::new(RwLock::new(A2aPool::new())),
+            authority: Arc::new(Authority::insecure_open()),
+            scope_enforcer: Arc::new(scope_enforcer),
+            task_store: task_store.clone(),
+        });
+        execute_task(state, task.id.clone(), skill, input, None).await;
+        task_store.get(&task.id).await.unwrap().to_client_task()
+    }
+
+    #[tokio::test]
+    async fn scope_violation_names_the_rule_without_its_pattern() {
+        let task = run_scoped_task(
+            "shell",
+            &["execute:/srv/sentinel-pattern-*"],
+            serde_json::json!({ "command": "/srv/sentinel-pattern-run" }),
+        )
+        .await;
+
+        assert_eq!(task.state, TaskState::Failed);
+        assert_eq!(
+            task.error.as_deref(),
+            Some("Scope violation: blocked by policy block rule 0")
+        );
+        let reply = serde_json::to_string(&task).unwrap();
+        assert!(
+            !reply.contains("sentinel-pattern-*"),
+            "tasks/get returns the block pattern: {reply}"
+        );
+    }
 
     #[test]
     fn test_jsonrpc_response_serialization() {

@@ -76,7 +76,8 @@ resolution boundary.
 
 ## Observability
 
-Default heartbeat/profile publishing includes only capability and scope data.
+Default heartbeat/profile publishing includes only capability data. Scope
+rules stay in the executor's local configuration.
 
 Enable runtime monitoring explicitly:
 

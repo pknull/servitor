@@ -7,8 +7,8 @@ use crate::a2a::A2aPool;
 use crate::agent::output_defense::defense_pipeline;
 use crate::config::Config;
 use crate::egregore::{
-    DeploymentTargetSummary, EnvironmentSnapshot, ScopeConstraints, ServitorManifest,
-    ServitorProfile, SnapshotSensitivity, TargetSummary, ToolSummary, ToolsetSummary,
+    DeploymentTargetSummary, EnvironmentSnapshot, ServitorManifest, ServitorProfile,
+    SnapshotSensitivity, TargetSummary, ToolSummary, ToolsetSummary,
 };
 use crate::error::{LocalDiagnostic, ServitorError};
 use crate::identity::Identity;
@@ -50,28 +50,6 @@ pub async fn build_profile(
     // Add tools from A2A pool
     for tool in a2a_pool.tools_for_llm() {
         profile.tools.push(tool.name);
-    }
-
-    // Add MCP scopes
-    for (name, mcp_config) in &config.mcp {
-        profile.scopes.insert(
-            name.clone(),
-            ScopeConstraints {
-                allow: mcp_config.scope.allow.clone(),
-                block: mcp_config.scope.block.clone(),
-            },
-        );
-    }
-
-    // Add A2A scopes
-    for (name, a2a_config) in &config.a2a {
-        profile.scopes.insert(
-            name.clone(),
-            ScopeConstraints {
-                allow: a2a_config.scope.allow.clone(),
-                block: a2a_config.scope.block.clone(),
-            },
-        );
     }
 
     profile.roles = config.profile.roles.clone();

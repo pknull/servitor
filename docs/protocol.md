@@ -102,10 +102,11 @@ hyphens, the shape of UUIDs and W3C trace ids.
 (`execution_error` or `timeout`), `timestamp`, a bounded `code`, and a
 `details` sentence built from public metadata: the failing call's position in
 the plan, the registered tool (`<server>:<tool>`), and a scope rule named by
-its list and index. Policy rule indices refer to the server's `scope.allow` and
-`scope.block` lists as published in `servitor_profile.scopes`; override rule
-indices refer to the task's own `scope_override` lists. The full error text
-stays in the executor's local log.
+its list and index. Policy rule indices refer to the server's configured
+`scope.allow` and `scope.block` lists, which stay in the executor's local
+configuration and are never published; override rule indices refer to the
+task's own `scope_override` lists. The full error text stays in the executor's
+local log.
 
 | `code` | `details` |
 |--------|-----------|
@@ -190,7 +191,6 @@ Always included:
 - `servitor_id`
 - `capabilities`
 - `tools`
-- `scopes`
 - `resource_limits`
 - `heartbeat_interval_ms`
 - `version`

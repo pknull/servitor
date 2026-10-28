@@ -11,9 +11,9 @@ use crate::scope::matcher::{parse_scoped_pattern, ScopeMatcher};
 ///
 /// Names the rule by source, list and position, never by the arguments it
 /// matched, so it can be reported to the requester. Policy rules index the
-/// server's `scope.allow` / `scope.block` lists as published in
-/// `servitor_profile.scopes`; override rules index the task's own
-/// `scope_override` lists.
+/// server's configured `scope.allow` / `scope.block` lists, which stay local
+/// to the executor; override rules index the task's own `scope_override`
+/// lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeRule {
     /// A block rule matched one of the call's targets.

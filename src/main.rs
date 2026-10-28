@@ -271,7 +271,6 @@ scope.allow = ["execute:/tmp/*"]
         assert_eq!(profile.mcp_servers.len(), 1);
         assert_eq!(profile.mcp_servers[0].name, "shell");
         assert_eq!(profile.mcp_servers[0].transport, "stdio");
-        assert_eq!(profile.scopes["shell"].allow, vec!["execute:/tmp/*"]);
         assert_eq!(profile.manifest_ref.as_deref(), Some("manifest-hash"));
         assert_eq!(
             profile.mcp_servers[0].status,
@@ -314,5 +313,49 @@ scope.allow = ["execute:/tmp/*"]
         assert_eq!(profile.stats, ServitorStats::default());
         assert!(profile.last_task_ts.is_none());
         assert!(profile.manifest_ref.is_none());
+    }
+
+    #[tokio::test]
+    async fn build_profile_never_publishes_scope_rule_text() {
+        let config = Config::from_str(
+            r#"
+[mcp.shell]
+transport = "stdio"
+command = "nonexistent-mcp-server"
+scope.allow = ["execute:/sentinel-mcp-allow/*"]
+scope.block = ["execute:/sentinel-mcp-block/*"]
+
+[a2a.research]
+url = "http://127.0.0.1:8766"
+scope.allow = ["sentinel-a2a-allow"]
+scope.block = ["sentinel-a2a-block"]
+"#,
+        )
+        .unwrap();
+        let identity = Identity::generate();
+        let mcp_pool = McpPool::from_config(&config).unwrap();
+        let a2a_pool = A2aPool::new();
+        let runtime_stats = RuntimeStats::new();
+
+        let profile = build_profile(
+            &identity,
+            &mcp_pool,
+            &a2a_pool,
+            &config,
+            &runtime_stats,
+            None,
+        )
+        .await;
+        let published = serde_json::to_value(&profile).unwrap();
+        assert!(published.get("scopes").is_none());
+        let text = published.to_string();
+        for sentinel in [
+            "sentinel-mcp-allow",
+            "sentinel-mcp-block",
+            "sentinel-a2a-allow",
+            "sentinel-a2a-block",
+        ] {
+            assert!(!text.contains(sentinel), "profile publishes {sentinel}");
+        }
     }
 }

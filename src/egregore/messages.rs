@@ -27,9 +27,6 @@ pub struct ServitorProfile {
     /// Tool names available (prefixed with MCP server name).
     pub tools: Vec<String>,
 
-    /// Scope constraints per capability.
-    pub scopes: HashMap<String, ScopeConstraints>,
-
     /// Resource limits.
     #[serde(default)]
     pub resource_limits: ResourceLimits,
@@ -93,7 +90,6 @@ impl ServitorProfile {
             servitor_id,
             capabilities: vec![],
             tools: vec![],
-            scopes: HashMap::new(),
             resource_limits: ResourceLimits::default(),
             heartbeat_interval_ms,
             version: default_version(),
@@ -274,13 +270,6 @@ impl ServitorStats {
     pub fn is_empty(&self) -> bool {
         self.tasks_offered == 0 && self.tasks_executed == 0 && self.tasks_failed == 0
     }
-}
-
-/// Scope constraints for a capability.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ScopeConstraints {
-    pub allow: Vec<String>,
-    pub block: Vec<String>,
 }
 
 /// Task-scoped credential override.
