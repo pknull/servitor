@@ -123,6 +123,17 @@ impl A2aServerTask {
     }
 }
 
+/// Outcome of a cancel request.
+#[derive(Debug)]
+pub enum CancelOutcome {
+    /// The task was cancelled.
+    Cancelled(Box<A2aServerTask>),
+    /// The task had already finished, in this state.
+    Terminal(TaskState),
+    /// No task the caller can reach has this ID.
+    NotFound,
+}
+
 /// In-memory task store with bounded capacity.
 #[derive(Clone)]
 pub struct A2aTaskStore {
@@ -213,15 +224,39 @@ impl A2aTaskStore {
         None
     }
 
-    /// Cancel a task. Returns None if task not found or already terminal.
-    pub async fn cancel(&self, task_id: &str) -> Option<A2aServerTask> {
+    /// Get a task by ID if `reaches` admits it.
+    ///
+    /// The check uses the borrowed stored task, so a rejected request never
+    /// clones task contents.
+    pub async fn get_reachable(
+        &self,
+        task_id: &str,
+        reaches: impl Fn(&A2aServerTask) -> bool,
+    ) -> Option<A2aServerTask> {
+        let inner = self.inner.read().await;
+        inner
+            .tasks
+            .get(task_id)
+            .filter(|task| reaches(task))
+            .cloned()
+    }
+
+    /// Cancel a task if `reaches` admits it, checking and cancelling under one
+    /// lock. A task the caller cannot reach reads as not found.
+    pub async fn cancel(
+        &self,
+        task_id: &str,
+        reaches: impl Fn(&A2aServerTask) -> bool,
+    ) -> CancelOutcome {
         let mut inner = self.inner.write().await;
-        if let Some(task) = inner.tasks.get_mut(task_id) {
-            if task.cancel() {
-                return Some(task.clone());
-            }
+        let Some(task) = inner.tasks.get_mut(task_id).filter(|task| reaches(task)) else {
+            return CancelOutcome::NotFound;
+        };
+        if task.cancel() {
+            CancelOutcome::Cancelled(Box::new(task.clone()))
+        } else {
+            CancelOutcome::Terminal(task.state)
         }
-        None
     }
 
     /// Get count of active (non-terminal) tasks.
@@ -305,12 +340,36 @@ mod tests {
             .unwrap();
 
         // Cancel works on non-terminal
-        let cancelled = store.cancel(&task.id).await;
-        assert!(cancelled.is_some());
-        assert_eq!(cancelled.unwrap().state, TaskState::Cancelled);
+        let cancelled = store.cancel(&task.id, |_| true).await;
+        assert!(
+            matches!(&cancelled, CancelOutcome::Cancelled(t) if t.state == TaskState::Cancelled),
+            "{cancelled:?}"
+        );
 
-        // Cancel again returns None (already terminal)
-        let again = store.cancel(&task.id).await;
-        assert!(again.is_none());
+        // Cancel again reports the terminal state
+        let again = store.cancel(&task.id, |_| true).await;
+        assert!(
+            matches!(again, CancelOutcome::Terminal(TaskState::Cancelled)),
+            "{again:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unreachable_task_reads_as_missing_and_stays_untouched() {
+        let store = A2aTaskStore::new(10, 300);
+        let task = store
+            .create("skill".to_string(), serde_json::json!({}), None)
+            .await
+            .unwrap();
+
+        assert!(store.get_reachable(&task.id, |_| false).await.is_none());
+        assert!(matches!(
+            store.cancel(&task.id, |_| false).await,
+            CancelOutcome::NotFound
+        ));
+        assert_eq!(
+            store.get(&task.id).await.unwrap().state,
+            TaskState::Submitted
+        );
     }
 }

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use super::card::build_agent_card;
-use super::state::A2aTaskStore;
+use super::state::{A2aServerTask, A2aTaskStore, CancelOutcome};
 use crate::a2a::client::TaskResult;
 use crate::a2a::A2aPool;
 use crate::authority::{AuthRequest, Authority, PersonId};
@@ -130,8 +130,12 @@ pub async fn handle_jsonrpc(
         "tasks/send" => {
             handle_tasks_send(&state, request.id.clone(), request.params, bearer_token).await
         }
-        "tasks/get" => handle_tasks_get(&state, request.id.clone(), request.params).await,
-        "tasks/cancel" => handle_tasks_cancel(&state, request.id.clone(), request.params).await,
+        "tasks/get" => {
+            handle_tasks_get(&state, request.id.clone(), request.params, bearer_token).await
+        }
+        "tasks/cancel" => {
+            handle_tasks_cancel(&state, request.id.clone(), request.params, bearer_token).await
+        }
         _ => JsonRpcResponse::error(
             request.id,
             METHOD_NOT_FOUND,
@@ -437,12 +441,51 @@ struct TasksGetParams {
     task_id: String,
 }
 
+/// Who a task read or cancel acts for.
+enum TaskAccess {
+    /// Open mode: every task is reachable.
+    Open,
+    /// An identified keeper reaches only its own tasks.
+    Keeper(String),
+}
+
+impl TaskAccess {
+    /// Resolve the caller. Outside open mode the bearer token must identify
+    /// a configured keeper.
+    fn for_request(state: &A2aServerState, bearer_token: Option<String>) -> Result<Self, &str> {
+        if state.authority.is_open_mode() {
+            return Ok(Self::Open);
+        }
+        let Some(token) = bearer_token else {
+            return Err("Authorization required");
+        };
+        state
+            .authority
+            .identify(&PersonId::from_http(token))
+            .map(|keeper| Self::Keeper(keeper.name.clone()))
+            .ok_or("Unknown identity")
+    }
+
+    fn reaches(&self, task: &A2aServerTask) -> bool {
+        match self {
+            Self::Open => true,
+            Self::Keeper(name) => task.keeper.as_deref() == Some(name.as_str()),
+        }
+    }
+}
+
 /// Handle tasks/get method.
 async fn handle_tasks_get(
     state: &A2aServerState,
     id: serde_json::Value,
     params: Option<serde_json::Value>,
+    bearer_token: Option<String>,
 ) -> JsonRpcResponse {
+    let access = match TaskAccess::for_request(state, bearer_token) {
+        Ok(access) => access,
+        Err(reason) => return JsonRpcResponse::error(id, UNAUTHORIZED, reason),
+    };
+
     let params: TasksGetParams = match params {
         Some(p) => match serde_json::from_value(p) {
             Ok(p) => p,
@@ -459,7 +502,12 @@ async fn handle_tasks_get(
         }
     };
 
-    match state.task_store.get(&params.task_id).await {
+    // Another keeper's task reads as not found
+    match state
+        .task_store
+        .get_reachable(&params.task_id, |task| access.reaches(task))
+        .await
+    {
         Some(task) => {
             let client_task = task.to_client_task();
             match serde_json::to_value(client_task) {
@@ -487,7 +535,13 @@ async fn handle_tasks_cancel(
     state: &A2aServerState,
     id: serde_json::Value,
     params: Option<serde_json::Value>,
+    bearer_token: Option<String>,
 ) -> JsonRpcResponse {
+    let access = match TaskAccess::for_request(state, bearer_token) {
+        Ok(access) => access,
+        Err(reason) => return JsonRpcResponse::error(id, UNAUTHORIZED, reason),
+    };
+
     let params: TasksCancelParams = match params {
         Some(p) => match serde_json::from_value(p) {
             Ok(p) => p,
@@ -504,29 +558,29 @@ async fn handle_tasks_cancel(
         }
     };
 
-    match state.task_store.cancel(&params.task_id).await {
-        Some(task) => {
+    // Another keeper's task reads as not found and stays untouched
+    match state
+        .task_store
+        .cancel(&params.task_id, |task| access.reaches(task))
+        .await
+    {
+        CancelOutcome::Cancelled(task) => {
             let client_task = task.to_client_task();
             match serde_json::to_value(client_task) {
                 Ok(v) => JsonRpcResponse::success(id, v),
                 Err(_) => JsonRpcResponse::error(id, -32603, "Internal serialization error"),
             }
         }
-        None => {
-            // Could be not found or already terminal
-            match state.task_store.get(&params.task_id).await {
-                Some(task) => JsonRpcResponse::error(
-                    id,
-                    INVALID_REQUEST,
-                    format!("Task already in terminal state: {:?}", task.state),
-                ),
-                None => JsonRpcResponse::error(
-                    id,
-                    TASK_NOT_FOUND,
-                    format!("Task not found: {}", params.task_id),
-                ),
-            }
-        }
+        CancelOutcome::Terminal(task_state) => JsonRpcResponse::error(
+            id,
+            INVALID_REQUEST,
+            format!("Task already in terminal state: {:?}", task_state),
+        ),
+        CancelOutcome::NotFound => JsonRpcResponse::error(
+            id,
+            TASK_NOT_FOUND,
+            format!("Task not found: {}", params.task_id),
+        ),
     }
 }
 
@@ -607,8 +661,9 @@ mod tests {
         );
     }
 
-    /// A restricted server offering `execute` on each provider, with one
-    /// keeper holding bearer token `operator-token` and the given skills.
+    /// A restricted server offering `execute` on each provider, with keepers
+    /// `operator` and `other` holding bearer tokens `operator-token` and
+    /// `other-token` and the given skills.
     fn restricted_server(providers: &[&str], skills: &[&str]) -> A2aServerState {
         let mut mcp_pool = McpPool::new();
         for provider in providers {
@@ -621,8 +676,16 @@ mod tests {
 name = "operator"
 http_token = "operator-token"
 
+[[keeper]]
+name = "other"
+http_token = "other-token"
+
 [[permission]]
 keeper = "operator"
+skills = {skills:?}
+
+[[permission]]
+keeper = "other"
 skills = {skills:?}
 "#
             ))
@@ -665,6 +728,134 @@ skills = {skills:?}
         let state = restricted_server(&["shell", "shell_admin"], &["shell_*"]);
         let response = send(&state, "shell_admin_execute", Some("operator-token")).await;
         assert_eq!(response.error.map(|e| e.code), Some(UNAUTHORIZED));
+    }
+
+    /// Call a JSON-RPC method through the dispatcher and return the response
+    /// body.
+    async fn call(
+        state: &Arc<A2aServerState>,
+        method: &str,
+        params: serde_json::Value,
+        token: Option<&str>,
+    ) -> serde_json::Value {
+        let mut headers = HeaderMap::new();
+        if let Some(token) = token {
+            headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        }
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(1),
+            method: method.to_string(),
+            params: Some(params),
+        };
+        let response = handle_jsonrpc(State(state.clone()), headers, Json(request))
+            .await
+            .into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// A restricted server holding one submitted task owned by `operator`.
+    async fn server_with_operator_task() -> (Arc<A2aServerState>, String) {
+        let state = restricted_server(&["shell"], &["*"]);
+        let task = state
+            .task_store
+            .create(
+                "shell_execute".to_string(),
+                serde_json::json!({}),
+                Some("operator".to_string()),
+            )
+            .await
+            .unwrap();
+        (Arc::new(state), task.id)
+    }
+
+    #[tokio::test]
+    async fn task_reads_and_cancels_require_a_known_keeper() {
+        let (state, task_id) = server_with_operator_task().await;
+        for method in ["tasks/get", "tasks/cancel"] {
+            for token in [None, Some("unknown-token")] {
+                let reply = call(
+                    &state,
+                    method,
+                    serde_json::json!({ "taskId": task_id }),
+                    token,
+                )
+                .await;
+                assert_eq!(
+                    reply["error"]["code"], UNAUTHORIZED,
+                    "{method} with token {token:?}: {reply}"
+                );
+            }
+        }
+        let task = state.task_store.get(&task_id).await.unwrap();
+        assert_eq!(task.state, TaskState::Submitted);
+    }
+
+    #[tokio::test]
+    async fn another_keepers_task_reads_as_not_found() {
+        let (state, task_id) = server_with_operator_task().await;
+        let missing_id = "00000000-0000-4000-8000-000000000000";
+        for method in ["tasks/get", "tasks/cancel"] {
+            let reply = call(
+                &state,
+                method,
+                serde_json::json!({ "taskId": task_id }),
+                Some("other-token"),
+            )
+            .await;
+            assert_eq!(reply["error"]["code"], TASK_NOT_FOUND, "{method}: {reply}");
+            // The reply is the one a missing task gets, apart from the ID.
+            let missing = call(
+                &state,
+                method,
+                serde_json::json!({ "taskId": missing_id }),
+                Some("other-token"),
+            )
+            .await;
+            assert_eq!(
+                reply.to_string().replace(&task_id, "ID"),
+                missing.to_string().replace(missing_id, "ID"),
+                "{method}"
+            );
+        }
+        let task = state.task_store.get(&task_id).await.unwrap();
+        assert_eq!(task.state, TaskState::Submitted);
+    }
+
+    #[tokio::test]
+    async fn the_owning_keeper_reads_and_cancels_its_task() {
+        let (state, task_id) = server_with_operator_task().await;
+        let params = serde_json::json!({ "taskId": task_id });
+        let reply = call(&state, "tasks/get", params.clone(), Some("operator-token")).await;
+        assert_eq!(reply["result"]["id"], task_id.as_str(), "{reply}");
+        let reply = call(&state, "tasks/cancel", params, Some("operator-token")).await;
+        assert_eq!(reply["result"]["state"], "cancelled", "{reply}");
+    }
+
+    #[tokio::test]
+    async fn open_mode_reads_and_cancels_tasks_without_a_token() {
+        let task_store = A2aTaskStore::new(8, 60);
+        let task = task_store
+            .create("shell_execute".to_string(), serde_json::json!({}), None)
+            .await
+            .unwrap();
+        let state = Arc::new(A2aServerState {
+            config: A2aServerConfig::default(),
+            mcp_pool: Arc::new(RwLock::new(McpPool::new())),
+            a2a_pool: Arc::new(RwLock::new(A2aPool::new())),
+            authority: Arc::new(Authority::insecure_open()),
+            scope_enforcer: Arc::new(ScopeEnforcer::new()),
+            task_store,
+            base_url: "http://127.0.0.1:0".to_string(),
+        });
+        let params = serde_json::json!({ "taskId": task.id });
+        let reply = call(&state, "tasks/get", params.clone(), None).await;
+        assert_eq!(reply["result"]["id"], task.id.as_str(), "{reply}");
+        let reply = call(&state, "tasks/cancel", params, None).await;
+        assert_eq!(reply["result"]["state"], "cancelled", "{reply}");
     }
 
     #[tokio::test]
