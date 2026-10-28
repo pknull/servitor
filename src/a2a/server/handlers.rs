@@ -238,45 +238,43 @@ async fn handle_tasks_send(
         }
     };
 
-    // Authenticate via bearer token
-    let keeper_name = if let Some(token) = bearer_token {
-        let person = PersonId::from_http(token);
-        let auth_result = state.authority.authorize(&AuthRequest {
-            person,
-            skill: params.skill.clone(),
-        });
-
-        if !auth_result.allowed {
-            tracing::warn!(
-                skill = %params.skill,
-                reason = %auth_result.reason,
-                "A2A server request unauthorized"
-            );
-            return JsonRpcResponse::error(id, UNAUTHORIZED, auth_result.reason);
-        }
-
-        auth_result.keeper
-    } else if state.authority.is_open_mode() {
-        // Open mode allows anonymous requests
-        None
-    } else {
+    // Open mode allows anonymous requests; otherwise a bearer token is required
+    if bearer_token.is_none() && !state.authority.is_open_mode() {
         return JsonRpcResponse::error(id, UNAUTHORIZED, "Authorization required");
-    };
+    }
 
-    // Check if skill exists
-    let skill_exists = {
-        let mcp_pool = state.mcp_pool.read().await;
-        let a2a_pool = state.a2a_pool.read().await;
-        mcp_pool.parse_tool_name(&params.skill).is_some() || a2a_pool.has_tool(&params.skill)
-    };
-
-    if !skill_exists {
+    let Some((provider, tool)) =
+        registered_skill(&state.mcp_pool, &state.a2a_pool, &params.skill).await
+    else {
         return JsonRpcResponse::error(
             id,
             INVALID_PARAMS,
             format!("Unknown skill: {}", params.skill),
         );
-    }
+    };
+
+    // Authenticate via bearer token, authorizing the registered provider:tool
+    // as direct execution does
+    let keeper_name = match bearer_token {
+        Some(token) => {
+            let auth_result = state.authority.authorize(&AuthRequest {
+                person: PersonId::from_http(token),
+                skill: format!("{provider}:{tool}"),
+            });
+
+            if !auth_result.allowed {
+                tracing::warn!(
+                    skill = %params.skill,
+                    reason = %auth_result.reason,
+                    "A2A server request unauthorized"
+                );
+                return JsonRpcResponse::error(id, UNAUTHORIZED, auth_result.reason);
+            }
+
+            auth_result.keeper
+        }
+        None => None,
+    };
 
     // Extract input from either direct input or message format
     let input = params.extract_input();
@@ -318,6 +316,24 @@ async fn handle_tasks_send(
     )
 }
 
+/// Resolve an advertised skill name to its registered provider and tool.
+///
+/// Authority and scope both key on this identity, never on a split of the
+/// skill name, which would misplace providers whose names hold an
+/// underscore. The MCP pool is consulted first, as execution does.
+async fn registered_skill(
+    mcp_pool: &RwLock<McpPool>,
+    a2a_pool: &RwLock<A2aPool>,
+    skill: &str,
+) -> Option<(String, String)> {
+    let mcp_pool = mcp_pool.read().await;
+    let a2a_pool = a2a_pool.read().await;
+    mcp_pool
+        .parse_tool_name(skill)
+        .or_else(|| a2a_pool.parse_tool_name(skill))
+        .map(|(provider, tool)| (provider.to_string(), tool.to_string()))
+}
+
 /// Lightweight state reference for spawned tasks.
 struct A2aServerStateRef {
     mcp_pool: Arc<RwLock<McpPool>>,
@@ -341,18 +357,9 @@ async fn execute_task(
 
     tracing::info!(task_id = %task_id, skill = %skill, "executing A2A task");
 
-    // Check scope enforcement (always, regardless of auth status). The policy
-    // key is the registered provider name, never a split of the skill name,
-    // which would miss providers whose names hold an underscore.
-    let registered = {
-        let mcp_pool = state.mcp_pool.read().await;
-        let a2a_pool = state.a2a_pool.read().await;
-        mcp_pool
-            .parse_tool_name(&skill)
-            .or_else(|| a2a_pool.parse_tool_name(&skill))
-            .map(|(provider, tool)| (provider.to_string(), tool.to_string()))
-    };
-    let Some((provider, tool)) = registered else {
+    // Check scope enforcement (always, regardless of auth status)
+    let Some((provider, tool)) = registered_skill(&state.mcp_pool, &state.a2a_pool, &skill).await
+    else {
         state
             .task_store
             .fail(&task_id, format!("Unknown skill: {}", skill))
@@ -598,6 +605,75 @@ mod tests {
             task.error.as_deref(),
             Some("Scope violation: blocked by policy block rule 0")
         );
+    }
+
+    /// A restricted server offering `execute` on each provider, with one
+    /// keeper holding bearer token `operator-token` and the given skills.
+    fn restricted_server(providers: &[&str], skills: &[&str]) -> A2aServerState {
+        let mut mcp_pool = McpPool::new();
+        for provider in providers {
+            mcp_pool.register_test_tool(provider, "execute", ScriptedClient::output("ran"));
+        }
+        let authority = Authority::from_config(
+            crate::authority::AuthorityConfig::from_toml(&format!(
+                r#"
+[[keeper]]
+name = "operator"
+http_token = "operator-token"
+
+[[permission]]
+keeper = "operator"
+skills = {skills:?}
+"#
+            ))
+            .unwrap(),
+        );
+        A2aServerState {
+            config: A2aServerConfig::default(),
+            mcp_pool: Arc::new(RwLock::new(mcp_pool)),
+            a2a_pool: Arc::new(RwLock::new(A2aPool::new())),
+            authority: Arc::new(authority),
+            scope_enforcer: Arc::new(ScopeEnforcer::new()),
+            task_store: A2aTaskStore::new(8, 60),
+            base_url: "http://127.0.0.1:0".to_string(),
+        }
+    }
+
+    async fn send(state: &A2aServerState, skill: &str, token: Option<&str>) -> JsonRpcResponse {
+        handle_tasks_send(
+            state,
+            serde_json::json!(1),
+            Some(serde_json::json!({ "skill": skill, "input": {} })),
+            token.map(str::to_string),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn skill_permissions_match_the_registered_provider_and_tool() {
+        let state = restricted_server(&["shell"], &["shell:*"]);
+        let response = send(&state, "shell_execute", Some("operator-token")).await;
+        assert!(
+            response.error.is_none(),
+            "shell:* must authorize shell's execute tool: {:?}",
+            response.error.map(|e| e.message)
+        );
+    }
+
+    #[tokio::test]
+    async fn underscore_permission_does_not_reach_another_provider() {
+        let state = restricted_server(&["shell", "shell_admin"], &["shell_*"]);
+        let response = send(&state, "shell_admin_execute", Some("operator-token")).await;
+        assert_eq!(response.error.map(|e| e.code), Some(UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn anonymous_request_is_refused_before_skill_lookup() {
+        let state = restricted_server(&["shell"], &["*"]);
+        let response = send(&state, "no_such_skill", None).await;
+        let error = response.error.unwrap();
+        assert_eq!(error.code, UNAUTHORIZED);
+        assert_eq!(error.message, "Authorization required");
     }
 
     #[test]

@@ -114,6 +114,11 @@ Enable Servitor to receive structured tasks from external A2A agents.
 - `task_timeout_secs`: max execution time per task
 - `max_concurrent_tasks`: bounded in-flight tasks
 
+Outside open mode, `tasks/send` carries a keeper's HTTP bearer token
+(`http_token` in `authority.toml`). The keeper's `skills` patterns match the
+registered `provider:tool`, as on every other execution path, so `shell:*`
+authorizes the skill the AgentCard advertises as `shell_execute`.
+
 Example:
 
 ```toml
