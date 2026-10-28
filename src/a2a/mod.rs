@@ -64,11 +64,25 @@ pub enum A2aError {
     #[error("A2A authentication failed: {reason}")]
     AuthFailed { reason: String },
 
+    /// Bounded: kind and status only, never the URL or a response body.
     #[error("A2A HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(thallus_core::error::HttpError),
 
+    /// Bounded: category and position only, never the input.
     #[error("A2A JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(thallus_core::error::JsonError),
+}
+
+impl From<reqwest::Error> for A2aError {
+    fn from(err: reqwest::Error) -> Self {
+        Self::Http(err.into())
+    }
+}
+
+impl From<serde_json::Error> for A2aError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Json(err.into())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, A2aError>;

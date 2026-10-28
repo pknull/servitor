@@ -135,6 +135,12 @@ The simpler execution path is used outside SSE assignment:
 
 `task_claim` is advisory only. It is not the coordination mechanism for SSE task assignment.
 
+When a tool call itself fails, `task_result.error` names the tool and a code
+(`invalid_arguments`, `server_unavailable`, `transport_error`,
+`decode_error`, `mcp_error`, `call_failed`); the error text goes to the local
+log. A tool that runs and reports an error returns its own result text,
+reduced through output defense.
+
 For local `servitor exec`, the input is a JSON array of pre-planned tool calls, not a natural-language planning request.
 
 ## Message Types

@@ -134,20 +134,11 @@ pub async fn execute_direct(
                 });
             }
             Err(e) => {
-                let error_msg = match &e {
-                    // Servitor's own schema check quotes the offending
-                    // argument values; the requester gets a code instead.
-                    ServitorError::McpValidation { .. } => format!(
-                        "tool '{}' failed: invalid_arguments (the arguments do not match \
-                         the tool's input schema)",
-                        planned.name
-                    ),
-                    _ => format!(
-                        "tool '{}' failed: {}",
-                        planned.name,
-                        crate::agent::sanitize::sanitize_tool_result(&e.to_string())
-                    ),
-                };
+                // Error text comes from the transport, the server or the
+                // schema check and can quote URLs or argument values; the
+                // requester gets a code and the text stays in the local log.
+                let error_msg =
+                    format!("tool '{}' failed: {}", planned.name, call_failure_code(&e));
                 tracing::error!(tool = %planned.name, error = %e, "direct call failed");
                 return build_error_result(
                     task,
@@ -359,6 +350,20 @@ fn build_result(
         duration_seconds,
         trace_id,
     })
+}
+
+/// The bounded reason a failed tool call publishes in `task_result.error`.
+fn call_failure_code(error: &ServitorError) -> &'static str {
+    match error {
+        ServitorError::McpValidation { .. } => {
+            "invalid_arguments (the arguments do not match the tool's input schema)"
+        }
+        ServitorError::McpServerNotFound { .. } => "server_unavailable",
+        ServitorError::Http(_) => "transport_error",
+        ServitorError::Json(_) => "decode_error",
+        ServitorError::Mcp { .. } => "mcp_error",
+        _ => "call_failed",
+    }
 }
 
 async fn build_error_result(
@@ -880,6 +885,44 @@ mod tests {
 
             let error = result.error.unwrap();
             assert!(error.contains("invalid_arguments"), "{error}");
+            for body in node.bodies() {
+                let body = String::from_utf8_lossy(&body);
+                assert!(!body.contains(canary), "{body}");
+            }
+        }
+
+        /// A failed call's error text comes from the transport or the server,
+        /// so the published result carries a code and the text stays local.
+        #[tokio::test]
+        async fn call_failure_result_publishes_a_code_not_the_error_text() {
+            let node = CaptureNode::start().await;
+            let canary = SecretGen::CANARY;
+            let mut pool = McpPool::new();
+            pool.register_test_tool(
+                "shell",
+                "execute",
+                ScriptedClient::call_error(format!("rpc failed at http://u:{canary}@host/x")),
+            );
+            let task = exec_task(&mut SecretGen::new(6), HashMap::new());
+
+            let result = execute_direct(
+                &task,
+                &pool,
+                &ScopeEnforcer::new(),
+                &Identity::generate(),
+                &AgentConfig::default(),
+                Some(&node.client),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            node.client.publish_result(&result).await.unwrap();
+
+            assert_eq!(
+                result.error.as_deref(),
+                Some("tool 'shell_execute' failed: mcp_error")
+            );
             for body in node.bodies() {
                 let body = String::from_utf8_lossy(&body);
                 assert!(!body.contains(canary), "{body}");

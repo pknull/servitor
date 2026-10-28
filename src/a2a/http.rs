@@ -60,7 +60,7 @@ impl HttpA2aClient {
             .default_headers(headers)
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()
-            .map_err(A2aError::Http)?;
+            .map_err(A2aError::from)?;
 
         let card_url = config.card_url.unwrap_or_else(|| {
             format!(
@@ -106,7 +106,7 @@ impl HttpA2aClient {
             .json(&request)
             .send()
             .await
-            .map_err(A2aError::Http)?;
+            .map_err(A2aError::from)?;
 
         if !response.status().is_success() {
             return Err(A2aError::Protocol {
@@ -114,7 +114,7 @@ impl HttpA2aClient {
             });
         }
 
-        let rpc_response: JsonRpcResponse = response.json().await.map_err(A2aError::Http)?;
+        let rpc_response: JsonRpcResponse = response.json().await.map_err(A2aError::from)?;
 
         if rpc_response.id != id {
             return Err(A2aError::Protocol {
@@ -135,7 +135,7 @@ impl HttpA2aClient {
             reason: "response missing result".into(),
         })?;
 
-        serde_json::from_value(result).map_err(A2aError::Json)
+        serde_json::from_value(result).map_err(A2aError::from)
     }
 
     /// Poll task until terminal state or timeout.
