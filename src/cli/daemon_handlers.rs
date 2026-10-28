@@ -275,6 +275,7 @@ mod tests {
                 arguments: serde_json::json!({"command": "pwd"}),
             }],
             depends_on: vec![],
+            trace_parent: None,
         }
     }
 

@@ -52,7 +52,7 @@ pub async fn execute_direct(
         .map(|egregore| ExecutionTrace::start(task, egregore));
     let trace_id = match &trace {
         Some(trace) => Some(trace.trace_id.clone()),
-        None => task.context_trace_id(),
+        None => task.inherited_trace_id(),
     }
     .map(|id| id.as_str().to_string());
 
@@ -212,12 +212,10 @@ impl<'a> ExecutionTrace<'a> {
         Self {
             egregore,
             trace_id: task
-                .context_trace_id()
+                .inherited_trace_id()
                 .unwrap_or_else(TelemetryId::generate),
             span_id: TelemetryId::generate(),
-            parent_span_id: task
-                .context_span_id()
-                .or_else(|| task.context_parent_span_id()),
+            parent_span_id: task.inherited_span_id(),
             execution_id: TelemetryId::generate(),
             tool_count: task.tool_calls.len(),
             start: telemetry::now(),
@@ -575,6 +573,9 @@ mod tests {
     mod feed_disclosure {
         use std::collections::{BTreeSet, HashMap};
 
+        use crate::egregore::telemetry::TelemetryId;
+        use crate::egregore::TraceParent;
+
         use serde_json::{json, Value};
         use sha2::{Digest, Sha256};
 
@@ -653,14 +654,17 @@ mod tests {
                 scope_override: None,
                 tool_calls: vec![call],
                 depends_on: vec![],
+                trace_parent: None,
             }
         }
 
-        fn public_trace_context() -> HashMap<String, Value> {
-            HashMap::from([
-                ("trace_id".to_string(), json!(TRACE_ID)),
-                ("span_id".to_string(), json!(PARENT_SPAN_ID)),
-            ])
+        /// Attach the trace context an authorized request's envelope carries.
+        fn with_public_trace(mut task: Task) -> Task {
+            task.trace_parent = Some(TraceParent {
+                trace_id: TelemetryId::inherit(TRACE_ID).unwrap(),
+                span_id: TelemetryId::inherit(PARENT_SPAN_ID),
+            });
+            task
         }
 
         fn scripted(outcome: Outcome, gen: &mut SecretGen) -> Box<dyn McpClient> {
@@ -719,7 +723,7 @@ mod tests {
                     let mut reference: Option<Vec<Vec<u8>>> = None;
                     for seed in 0..32 {
                         let mut gen = SecretGen::new(seed);
-                        let task = exec_task(&mut gen, public_trace_context());
+                        let task = with_public_trace(exec_task(&mut gen, HashMap::new()));
                         let client = scripted(outcome, &mut gen);
                         let _frozen = telemetry::freeze(at);
                         let spans = published_spans(&node, &config, &task, client).await;
@@ -767,7 +771,7 @@ mod tests {
         async fn spans_carry_exactly_the_approved_metadata() {
             let node = CaptureNode::start().await;
             let config = Config::from_str(TRACING_CONFIGS[0]).unwrap().agent;
-            let task = exec_task(&mut SecretGen::new(7), public_trace_context());
+            let task = with_public_trace(exec_task(&mut SecretGen::new(7), HashMap::new()));
             let spans = published_spans(&node, &config, &task, ScriptedClient::output("ok")).await;
             let [tool, root] =
                 [&spans[0], &spans[1]].map(|body| serde_json::from_slice::<Value>(body).unwrap());
@@ -882,8 +886,8 @@ mod tests {
             }
         }
 
-        /// Inherited trace context is reused only when it has identifier
-        /// syntax; anything else is replaced, never published.
+        /// Trace ids written into task content are ignored, so they are
+        /// never published.
         #[tokio::test]
         async fn malformed_inherited_trace_ids_are_not_published() {
             let node = CaptureNode::start().await;

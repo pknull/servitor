@@ -154,10 +154,11 @@ planner-oriented fields should be treated as legacy residue, not part of the
 active contract.
 
 When `publish_trace_spans = true`, Servitor emits task-level and per-tool
-`trace_span` messages. If inbound work already carries top-level Egregore
-`trace_id` / `span_id` fields with identifier syntax (8 to 64 hex digits or
-hyphens), Servitor reuses that trace context instead of starting an unrelated
-trace tree.
+`trace_span` messages. When an authorized SSE request's signed envelope
+carries top-level `trace_id` / `span_id` fields with identifier syntax (8 to
+64 hex digits or hyphens), Servitor joins that trace instead of starting an
+unrelated one. Trace keys inside task content are ignored, and every other
+task starts a fresh trace.
 
 Spans are built exclusively from approved public metadata: generated span and
 execution identifiers, the registered provider and tool, the call's position

@@ -106,6 +106,7 @@ fn task_message_construction() {
         keeper: None,
         tool_calls: vec![],
         depends_on: vec![],
+        trace_parent: None,
     };
 
     let json = serde_json::to_string(&task).unwrap();

@@ -224,6 +224,7 @@ mod tests {
             scope_override: None,
             tool_calls: vec![],
             depends_on: vec![],
+            trace_parent: None,
         }
     }
 

@@ -145,7 +145,6 @@ pub async fn process_sse_message(
     if let Some(mut task) = message.as_task() {
         task.author = Some(message.author.0.clone());
         task.normalize(Some(&message.author));
-        inherit_trace_context(&mut task, message);
 
         if !task_matches_capabilities(&task, capability_set) {
             return Ok(None);
@@ -180,8 +179,9 @@ pub async fn process_sse_message(
         }
 
         task.keeper = auth_result.keeper;
+        inherit_trace_context(&mut task, message);
 
-        let task_trace_id = task.context_trace_id();
+        let task_trace_id = task.inherited_trace_id();
         let task_id = task.effective_id().to_string();
         let offer = task_coordinator
             .register_offer(
@@ -433,7 +433,7 @@ pub(crate) async fn execute_assigned_task(
     let task_id = assigned.task.effective_id().to_string();
     let servitor_id = ctx.identity.public_id();
     let eta_seconds = assigned.started.eta_seconds;
-    let task_trace_id = assigned.task.context_trace_id();
+    let task_trace_id = assigned.task.inherited_trace_id();
 
     // Reject tasks without pre-planned tool calls
     if !assigned.task.is_direct() {
@@ -801,6 +801,7 @@ mod tests {
                     arguments,
                 }],
                 depends_on: vec![],
+                trace_parent: None,
             };
             let assigned = AssignmentDecision {
                 task,

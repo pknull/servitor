@@ -138,5 +138,6 @@ pub fn task_from_template(
         keeper: None,
         tool_calls: planned_tool_calls,
         depends_on: vec![],
+        trace_parent: None,
     }
 }

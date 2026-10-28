@@ -444,6 +444,13 @@ pub struct PlannedToolCall {
 }
 
 /// Task message received from egregore.
+/// Trace context a task inherits from the signed envelope of its request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceParent {
+    pub trace_id: TelemetryId,
+    pub span_id: Option<TelemetryId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     #[serde(rename = "type")]
@@ -516,6 +523,12 @@ pub struct Task {
     /// audit trails and Scry dependency visualization.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+
+    /// Trace context inherited from the signed envelope of an authorized
+    /// request (`task::inherit_trace_context`). Task content cannot set it:
+    /// trace keys in `context` are ignored.
+    #[serde(skip)]
+    pub trace_parent: Option<TraceParent>,
 }
 
 impl Task {
@@ -550,29 +563,19 @@ impl Task {
         self.request.as_deref().unwrap_or(&self.prompt)
     }
 
-    /// The trace this task belongs to, when its context names one with
-    /// identifier syntax.
-    pub fn context_trace_id(&self) -> Option<TelemetryId> {
-        self.context_id("trace_id")
+    /// The trace this task joins, inherited from its request's envelope.
+    pub fn inherited_trace_id(&self) -> Option<TelemetryId> {
+        self.trace_parent
+            .as_ref()
+            .map(|parent| parent.trace_id.clone())
     }
 
-    /// The span that requested this task, when its context names one with
-    /// identifier syntax.
-    pub fn context_span_id(&self) -> Option<TelemetryId> {
-        self.context_id("span_id")
-    }
-
-    /// The requesting span's parent, when its context names one with
-    /// identifier syntax.
-    pub fn context_parent_span_id(&self) -> Option<TelemetryId> {
-        self.context_id("parent_span_id")
-    }
-
-    fn context_id(&self, key: &str) -> Option<TelemetryId> {
-        self.context
-            .get(key)
-            .and_then(|value| value.as_str())
-            .and_then(TelemetryId::inherit)
+    /// The span that requested this task, inherited from its request's
+    /// envelope.
+    pub fn inherited_span_id(&self) -> Option<TelemetryId> {
+        self.trace_parent
+            .as_ref()
+            .and_then(|parent| parent.span_id.clone())
     }
 
     /// Whether this task carries pre-planned tool calls for direct execution.
@@ -1224,6 +1227,26 @@ mod tests {
         assert_eq!(json["labels"]["env"], "staging");
         assert_eq!(json["manifest_ref"], "manifest-123");
         assert_eq!(json["target_summary"]["count"], 1);
+    }
+
+    /// Trace context comes only from the signed envelope of an authorized
+    /// request; ids written into task content are ignored.
+    #[test]
+    fn task_content_cannot_set_trace_context() {
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "type": "task",
+            "hash": "h",
+            "prompt": "p",
+            "context": {
+                "trace_id": "0123456789abcdef0123456789abcdef",
+                "span_id": "fedcba9876543210",
+                "parent_span_id": "00112233445566778899"
+            }
+        }))
+        .unwrap();
+
+        assert!(task.inherited_trace_id().is_none());
+        assert!(task.inherited_span_id().is_none());
     }
 
     #[test]

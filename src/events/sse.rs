@@ -282,6 +282,7 @@ mod tests {
             keeper: None,
             tool_calls: vec![],
             depends_on: vec![],
+            trace_parent: None,
         };
         assert!(source.matches_capabilities(&task1));
 
@@ -304,6 +305,7 @@ mod tests {
             keeper: None,
             tool_calls: vec![],
             depends_on: vec![],
+            trace_parent: None,
         };
         assert!(source.matches_capabilities(&task2));
 
@@ -326,6 +328,7 @@ mod tests {
             keeper: None,
             tool_calls: vec![],
             depends_on: vec![],
+            trace_parent: None,
         };
         assert!(!source.matches_capabilities(&task3));
     }

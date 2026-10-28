@@ -85,6 +85,7 @@ pub async fn run_exec(config: &Config, input: &str, insecure: bool) -> Result<()
         keeper: keeper_name,
         tool_calls,
         depends_on: vec![],
+        trace_parent: None,
     };
 
     let result = crate::agent::direct::execute_direct(

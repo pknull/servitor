@@ -15,7 +15,10 @@ pub use state::{
 };
 
 use crate::authority::{AuthRequest, AuthResult, Authority, PersonId};
-use crate::egregore::{EgregoreClient, EgregoreMessage, FailureDetail, Task, TaskFailed};
+use crate::egregore::telemetry::TelemetryId;
+use crate::egregore::{
+    EgregoreClient, EgregoreMessage, FailureDetail, Task, TaskFailed, TraceParent,
+};
 use crate::error::Result;
 use crate::identity::{Identity, PublicId};
 
@@ -39,7 +42,7 @@ pub(crate) async fn publish_missing_tool_calls_rejection(
     identity: &Identity,
     task: &Task,
 ) -> Result<()> {
-    let task_trace_id = task.context_trace_id();
+    let task_trace_id = task.inherited_trace_id();
     let failed = TaskFailed::new(
         task.effective_id().to_string(),
         identity.public_id(),
@@ -61,25 +64,18 @@ pub fn assign_skill(task: &Task) -> String {
     format!("assign:{}", task.effective_task_type())
 }
 
-/// Copy top-level message trace identifiers into task context when absent.
+/// Adopt the trace context carried by a request's signed envelope, when its
+/// ids have identifier syntax. Call only once the requestor is authorized;
+/// task content never supplies trace context.
 pub fn inherit_trace_context(task: &mut Task, message: &EgregoreMessage) {
-    if !task.context.contains_key("trace_id") {
-        if let Some(trace_id) = &message.trace_id {
-            task.context.insert(
-                "trace_id".to_string(),
-                serde_json::Value::String(trace_id.clone()),
-            );
-        }
-    }
-
-    if !task.context.contains_key("span_id") {
-        if let Some(span_id) = &message.span_id {
-            task.context.insert(
-                "span_id".to_string(),
-                serde_json::Value::String(span_id.clone()),
-            );
-        }
-    }
+    task.trace_parent = message
+        .trace_id
+        .as_deref()
+        .and_then(TelemetryId::inherit)
+        .map(|trace_id| TraceParent {
+            trace_id,
+            span_id: message.span_id.as_deref().and_then(TelemetryId::inherit),
+        });
 }
 
 /// Return a task's requestor when that requestor is the task's signed author.
@@ -187,6 +183,7 @@ skills = ["assign:*"]
             scope_override: None,
             tool_calls: vec![],
             depends_on: vec![],
+            trace_parent: None,
         }
     }
 
@@ -246,19 +243,27 @@ skills = ["assign:*"]
             signature: "sig".to_string(),
             tags: vec![],
             relates: None,
-            trace_id: Some("trace-123".to_string()),
-            span_id: Some("span-456".to_string()),
+            trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
+            span_id: Some("00f067aa0ba902b7".to_string()),
         };
 
         inherit_trace_context(&mut task, &message);
 
         assert_eq!(
-            task.context.get("trace_id").and_then(|v| v.as_str()),
-            Some("trace-123")
+            task.inherited_trace_id().as_deref(),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736")
         );
         assert_eq!(
-            task.context.get("span_id").and_then(|v| v.as_str()),
-            Some("span-456")
+            task.inherited_span_id().as_deref(),
+            Some("00f067aa0ba902b7")
         );
+
+        // Envelope ids without identifier syntax are not adopted.
+        let malformed = EgregoreMessage {
+            trace_id: Some("trace with spaces".to_string()),
+            ..message
+        };
+        inherit_trace_context(&mut task, &malformed);
+        assert!(task.trace_parent.is_none());
     }
 }
