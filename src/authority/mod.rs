@@ -27,7 +27,9 @@ mod permission;
 
 pub use config::AuthorityConfig;
 pub use keeper::{Keeper, PersonId};
-pub use permission::{pattern_matches, skill_pattern_matches, AuthRequest, AuthResult, Permission};
+pub use permission::{
+    pattern_matches, skill_pattern_matches, AuthRequest, AuthResult, DenialReason, Permission,
+};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -164,6 +166,29 @@ impl Authority {
         idx.map(|i| &self.keepers[i])
     }
 
+    /// The skill label an `auth_denied` event may publish for `skill`.
+    ///
+    /// A task type is the requestor's own text, so a `request:` or `assign:`
+    /// skill is published only when a permission names it literally (for
+    /// example `request:deploy`); a pattern with a wildcard approves nothing,
+    /// and any other skill reads as `<gate>:other`.
+    pub fn public_skill_label(&self, skill: &str) -> String {
+        let gate = match skill.split_once(':') {
+            Some((gate @ ("request" | "assign"), _)) => gate,
+            _ => return "other".to_string(),
+        };
+        let named = self
+            .permissions
+            .iter()
+            .flat_map(|permission| &permission.skills)
+            .any(|pattern| pattern == skill && !pattern.contains(['*', '?']));
+        if named {
+            skill.to_string()
+        } else {
+            format!("{gate}:other")
+        }
+    }
+
     /// Get a keeper by name.
     pub fn get_keeper(&self, name: &str) -> Option<&Keeper> {
         self.keepers.iter().find(|k| k.name == name)
@@ -187,6 +212,7 @@ impl Authority {
                 allowed: true,
                 keeper: None,
                 reason: "open mode - no authority configured".to_string(),
+                denial: None,
             };
         }
 
@@ -194,14 +220,21 @@ impl Authority {
         let keeper = match self.identify(&req.person) {
             Some(k) => k,
             None => {
-                return AuthResult::denied(format!("unknown identity: {}", req.person.display()));
+                return AuthResult::denied(
+                    DenialReason::UnknownIdentity,
+                    format!("unknown identity: {}", req.person.display()),
+                );
             }
         };
 
         // Find matching permission
         let permissions = self.permissions_for(&keeper.name);
         if permissions.is_empty() {
-            return AuthResult::denied_keeper(&keeper.name, "no permissions defined for keeper");
+            return AuthResult::denied_keeper(
+                &keeper.name,
+                DenialReason::NoPermissions,
+                "no permissions defined for keeper",
+            );
         }
 
         for perm in permissions {
@@ -215,6 +248,7 @@ impl Authority {
 
         AuthResult::denied_keeper(
             &keeper.name,
+            DenialReason::NoMatchingPermission,
             format!("no matching permission for skill={}", req.skill),
         )
     }
@@ -229,12 +263,17 @@ impl Authority {
                 allowed: true,
                 keeper: Some(keeper_name.to_string()),
                 reason: "open mode - no authority configured".to_string(),
+                denial: None,
             };
         }
 
         let permissions = self.permissions_for(keeper_name);
         if permissions.is_empty() {
-            return AuthResult::denied_keeper(keeper_name, "no permissions defined for keeper");
+            return AuthResult::denied_keeper(
+                keeper_name,
+                DenialReason::NoPermissions,
+                "no permissions defined for keeper",
+            );
         }
 
         // Check if any permission allows this skill
@@ -249,6 +288,7 @@ impl Authority {
 
         AuthResult::denied_keeper(
             keeper_name,
+            DenialReason::NoMatchingPermission,
             format!("no matching permission for skill={skill}"),
         )
     }
@@ -627,6 +667,36 @@ http_token = "*"
                 "{token:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_public_skill_label_names_only_literal_permissions() {
+        let config = AuthorityConfig::from_toml(
+            r#"
+[[keeper]]
+name = "operator"
+egregore = "@operator.ed25519"
+
+[[permission]]
+keeper = "operator"
+skills = ["request:deploy", "request:deploy_*", "assign:*", "shell:*"]
+"#,
+        )
+        .unwrap();
+        let auth = Authority::from_config(config);
+
+        assert_eq!(auth.public_skill_label("request:deploy"), "request:deploy");
+        assert_eq!(
+            auth.public_skill_label("request:other-thing"),
+            "request:other"
+        );
+        // A wildcard grant approves no particular task type for publication,
+        // even when the requestor's text equals the pattern.
+        assert_eq!(auth.public_skill_label("assign:deploy"), "assign:other");
+        assert_eq!(auth.public_skill_label("assign:*"), "assign:other");
+        assert_eq!(auth.public_skill_label("request:deploy_*"), "request:other");
+        assert_eq!(auth.public_skill_label("shell:execute"), "other");
+        assert_eq!(auth.public_skill_label("no-gate"), "other");
     }
 
     #[test]

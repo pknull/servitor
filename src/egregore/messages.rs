@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::authority::DenialReason;
 use crate::egregore::telemetry::TelemetryId;
 use crate::error::{CallRejection, ServitorError};
 use crate::identity::PublicId;
@@ -983,8 +984,8 @@ pub struct AuthDenied {
     /// Authorization gate where the denial occurred.
     pub gate: AuthGate,
 
-    /// Human-readable denial reason.
-    pub reason: String,
+    /// Why the request was refused.
+    pub reason: DenialReason,
 
     /// Timestamp.
     pub timestamp: DateTime<Utc>,
@@ -996,7 +997,7 @@ impl AuthDenied {
         person_id: String,
         skill: String,
         gate: AuthGate,
-        reason: String,
+        reason: DenialReason,
     ) -> Self {
         Self {
             msg_type: "auth_denied".to_string(),
@@ -1233,7 +1234,7 @@ mod tests {
             "discord:123".to_string(),
             "shell:execute".to_string(),
             AuthGate::Offer,
-            "no matching permission".to_string(),
+            DenialReason::NoMatchingPermission,
         );
 
         let json = serde_json::to_string(&denial).unwrap();
@@ -1241,5 +1242,10 @@ mod tests {
         assert_eq!(parsed.msg_type, "auth_denied");
         assert_eq!(parsed.gate, AuthGate::Offer);
         assert_eq!(parsed.person_id, "discord:123");
+        assert_eq!(parsed.reason, DenialReason::NoMatchingPermission);
+        assert!(
+            json.contains("\"reason\":\"no_matching_permission\""),
+            "{json}"
+        );
     }
 }

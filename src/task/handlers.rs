@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use crate::authority::{Authority, PersonId};
+use crate::authority::{Authority, DenialReason, PersonId};
 use crate::config::Config;
 use crate::egregore::{
     AssignTaskResultStatus, AssignTaskResultV1, AssignTaskV1, AuthGate, EgregoreClient,
@@ -161,10 +161,13 @@ pub async fn process_sse_message(
             publish_auth_denied_event(
                 egregore,
                 identity,
+                authority,
                 &PersonId::from_egregore(requestor.0.clone()),
                 &request_skill(&task),
                 AuthGate::Offer,
-                &auth_result.reason,
+                auth_result
+                    .denial
+                    .unwrap_or(DenialReason::NoMatchingPermission),
             )
             .await;
             tracing::info!(
@@ -306,10 +309,11 @@ async fn maybe_accept_typed_assignment(
                     publish_auth_denied_event(
                         egregore,
                         identity,
+                        authority,
                         &PersonId::from_egregore(assign.assigner.0.clone()),
                         &assign_skill(&offered.task),
                         AuthGate::Assignment,
-                        "assignment authorization denied",
+                        DenialReason::AssignmentDenied,
                     )
                     .await;
                 }
@@ -383,10 +387,11 @@ pub async fn maybe_accept_assignment(
         publish_auth_denied_event(
             egregore,
             identity,
+            authority,
             &PersonId::from_egregore(assigner.0.clone()),
             &assign_skill(&task),
             AuthGate::Assignment,
-            "assignment authorization denied",
+            DenialReason::AssignmentDenied,
         )
         .await;
         tracing::info!(

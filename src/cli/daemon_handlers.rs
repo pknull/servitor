@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use crate::a2a::A2aPool;
-use crate::authority::PersonId;
+use crate::authority::{DenialReason, PersonId};
 use crate::config::Config;
 use crate::egregore::{build_profile, AuthGate, EgregoreClient, Task, TaskClaim, TaskStatus};
 use crate::identity::{Identity, PublicId};
@@ -33,10 +33,13 @@ pub async fn handle_event_router_task(
             publish_auth_denied_event(
                 &ctx.egregore,
                 &ctx.identity,
+                &ctx.authority,
                 &person,
                 &request_skill(&task),
                 AuthGate::Offer,
-                &auth_result.reason,
+                auth_result
+                    .denial
+                    .unwrap_or(DenialReason::NoMatchingPermission),
             )
             .await;
             tracing::info!(

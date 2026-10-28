@@ -40,8 +40,27 @@ pub struct AuthResult {
     /// Name of the matched keeper, if identified.
     pub keeper: Option<String>,
 
-    /// Human-readable reason for the decision.
+    /// Human-readable reason for the decision, for the local log.
     pub reason: String,
+
+    /// Why the request was refused; `None` when allowed.
+    pub denial: Option<DenialReason>,
+}
+
+/// Why a request was refused, as published in `auth_denied`.
+///
+/// A closed set, so a published denial never carries requestor text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DenialReason {
+    /// No keeper has this identity.
+    UnknownIdentity,
+    /// The keeper has no permissions.
+    NoPermissions,
+    /// No permission matches the skill.
+    NoMatchingPermission,
+    /// The assigner may not assign this work.
+    AssignmentDenied,
 }
 
 impl AuthResult {
@@ -51,24 +70,27 @@ impl AuthResult {
             allowed: true,
             keeper: Some(keeper.to_string()),
             reason: reason.into(),
+            denial: None,
         }
     }
 
     /// Create a denied result.
-    pub fn denied(reason: impl Into<String>) -> Self {
+    pub fn denied(denial: DenialReason, reason: impl Into<String>) -> Self {
         Self {
             allowed: false,
             keeper: None,
             reason: reason.into(),
+            denial: Some(denial),
         }
     }
 
     /// Create a denied result for a known keeper.
-    pub fn denied_keeper(keeper: &str, reason: impl Into<String>) -> Self {
+    pub fn denied_keeper(keeper: &str, denial: DenialReason, reason: impl Into<String>) -> Self {
         Self {
             allowed: false,
             keeper: Some(keeper.to_string()),
             reason: reason.into(),
+            denial: Some(denial),
         }
     }
 }

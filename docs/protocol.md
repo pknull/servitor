@@ -45,11 +45,16 @@ Assignment authorization rules:
 - any other assigner must be authorized for `assign:<task_type>`
 - unauthorized offers and assignments emit `auth_denied`
 
+An `auth_denied` record carries a reason code (`unknown_identity`,
+`no_permissions`, `no_matching_permission` or `assignment_denied`) and a skill
+label. A `request:` or `assign:` label names the task type only when an
+`authority.toml` permission names that skill literally; any other reads as
+`request:other` or `assign:other`, since the task type is the requestor's text.
+
 ### Assignment command families
 
-Bare `task_assign` remains supported as Familiar's automated assignment path.
-The typed `assign_task/v1` family is the operator-command path used for an
-explicit assignment decision. In the current wire representation these RFC
+Familiar and Scry both assign through the typed `assign_task/v1` family.
+Servitor still accepts bare `task_assign`. In the current wire representation these RFC
 families use `type: "assign_task"` and `type: "assign_task_result"`, backed by
 the `AssignTaskV1` and `AssignTaskResultV1` schemas.
 
