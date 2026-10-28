@@ -119,6 +119,17 @@ roles = ["executor"]
             }
         }
 
+        // Scope policies are keyed by provider name; a name shared by an MCP
+        // server and an A2A agent would let one policy replace the other.
+        if let Some(name) = self.a2a.keys().find(|name| self.mcp.contains_key(*name)) {
+            return Err(ServitorError::Config {
+                reason: format!(
+                    "'{}' names both an MCP server and an A2A agent; provider names must be unique",
+                    name
+                ),
+            });
+        }
+
         // Validate scheduled tasks
         for task in &self.schedule {
             if task.cron.parse::<cron::Schedule>().is_err() {
@@ -438,5 +449,26 @@ kind = "docker_compose_project"
             .unwrap_err()
             .to_string()
             .contains("duplicate target_id 'staging-web'"));
+    }
+
+    #[test]
+    fn reject_provider_name_shared_by_mcp_and_a2a() {
+        // Scope policies are keyed by provider name, so a shared name would
+        // let the A2A agent's policy replace the MCP server's.
+        let toml = r#"
+[mcp.files]
+transport = "stdio"
+command = "files-mcp"
+scope.block = ["read:/etc/*"]
+
+[a2a.files]
+url = "http://127.0.0.1:8766"
+"#;
+        let result = Config::from_str(toml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("'files' names both an MCP server and an A2A agent"));
     }
 }
