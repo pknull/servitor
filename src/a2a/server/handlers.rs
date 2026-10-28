@@ -341,24 +341,34 @@ async fn execute_task(
 
     tracing::info!(task_id = %task_id, skill = %skill, "executing A2A task");
 
-    // Check scope enforcement (always, regardless of auth status)
-    if let Some(underscore_pos) = skill.find('_') {
-        let server_name = &skill[..underscore_pos];
-        let tool_name = &skill[underscore_pos + 1..];
-        if let Err(e) = state
-            .scope_enforcer
-            .check(server_name, tool_name, &input, None)
-        {
-            tracing::warn!(task_id = %task_id, error = %e, "task scope violation");
-            // The client learns which rule refused the call; the diagnostic,
-            // which quotes the matched pattern, stays in the local log.
-            let error = match e {
-                ServitorError::ScopeViolation { rule, .. } => format!("Scope violation: {rule}"),
-                _ => "Scope check failed".to_string(),
-            };
-            state.task_store.fail(&task_id, error).await;
-            return;
-        }
+    // Check scope enforcement (always, regardless of auth status). The policy
+    // key is the registered provider name, never a split of the skill name,
+    // which would miss providers whose names hold an underscore.
+    let registered = {
+        let mcp_pool = state.mcp_pool.read().await;
+        let a2a_pool = state.a2a_pool.read().await;
+        mcp_pool
+            .parse_tool_name(&skill)
+            .or_else(|| a2a_pool.parse_tool_name(&skill))
+            .map(|(provider, tool)| (provider.to_string(), tool.to_string()))
+    };
+    let Some((provider, tool)) = registered else {
+        state
+            .task_store
+            .fail(&task_id, format!("Unknown skill: {}", skill))
+            .await;
+        return;
+    };
+    if let Err(e) = state.scope_enforcer.check(&provider, &tool, &input, None) {
+        tracing::warn!(task_id = %task_id, error = %e, "task scope violation");
+        // The client learns which rule refused the call; the diagnostic,
+        // which quotes the matched pattern, stays in the local log.
+        let error = match e {
+            ServitorError::ScopeViolation { rule, .. } => format!("Scope violation: {rule}"),
+            _ => "Scope check failed".to_string(),
+        };
+        state.task_store.fail(&task_id, error).await;
+        return;
     }
 
     // Try MCP pool first
@@ -571,6 +581,22 @@ mod tests {
         assert!(
             !reply.contains("sentinel-pattern-*"),
             "tasks/get returns the block pattern: {reply}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_policy_applies_to_servers_whose_names_hold_an_underscore() {
+        let task = run_scoped_task(
+            "local_shell",
+            &["execute:/srv/*"],
+            serde_json::json!({ "command": "/srv/run" }),
+        )
+        .await;
+
+        assert_eq!(task.state, TaskState::Failed);
+        assert_eq!(
+            task.error.as_deref(),
+            Some("Scope violation: blocked by policy block rule 0")
         );
     }
 
