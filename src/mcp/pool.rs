@@ -12,6 +12,8 @@ use crate::egregore::{McpServerHealth, McpServerStatus};
 use crate::error::{Result, ServitorError};
 use thallus_core::mcp::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use thallus_core::mcp::client::{McpClient, McpNotification, ToolDefinition};
+
+use crate::public::is_public_name;
 use thallus_core::mcp::http::HttpMcpClient;
 use thallus_core::mcp::stdio::StdioMcpClient;
 
@@ -154,18 +156,8 @@ impl McpPool {
 
             // List and register tools
             let tools = client.list_tools().await?;
-            for tool in tools {
-                let prefixed_name = tool.prefixed_name(&name);
-                let validator = compile_validator(&tool)?;
-                self.tools.insert(
-                    prefixed_name,
-                    RegisteredTool {
-                        server_name: name.clone(),
-                        definition: tool,
-                        validator,
-                    },
-                );
-            }
+            drop(client);
+            self.register_server_tools(&name, tools)?;
 
             if let Some(runtime) = self.server_runtime.get_mut(&name) {
                 runtime.initialized = true;
@@ -178,6 +170,40 @@ impl McpPool {
             "initialized MCP pool"
         );
 
+        Ok(())
+    }
+
+    /// Register the tools `server` advertised. Their names reach the feed,
+    /// so a tool whose name is not a bounded identifier is skipped.
+    pub(crate) fn register_server_tools(
+        &mut self,
+        server: &str,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<()> {
+        let mut skipped = 0usize;
+        for tool in tools {
+            if !is_public_name(&tool.name) {
+                skipped += 1;
+                continue;
+            }
+            let prefixed_name = tool.prefixed_name(server);
+            let validator = compile_validator(&tool)?;
+            self.tools.insert(
+                prefixed_name,
+                RegisteredTool {
+                    server_name: server.to_string(),
+                    definition: tool,
+                    validator,
+                },
+            );
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                server,
+                skipped,
+                "skipped tools whose advertised names are not identifiers"
+            );
+        }
         Ok(())
     }
 
@@ -603,6 +629,34 @@ mod tests {
         );
 
         (pool, calls)
+    }
+
+    /// Advertised tool names reach the feed, so only bounded identifiers
+    /// are registered.
+    #[test]
+    fn registers_only_tools_with_identifier_names() {
+        let tool = |name: &str| ToolDefinition {
+            name: name.to_string(),
+            description: None,
+            input_schema: Some(serde_json::json!({ "type": "object" })),
+        };
+        let mut pool = McpPool::new();
+        pool.register_server_tools(
+            "shell",
+            vec![
+                tool("execute"),
+                tool("read.file-v2"),
+                tool("bad name"),
+                tool("line\nbreak"),
+                tool(&"x".repeat(65)),
+                tool(""),
+            ],
+        )
+        .unwrap();
+
+        let mut names: Vec<_> = pool.all_tools().into_iter().map(|(name, _)| name).collect();
+        names.sort();
+        assert_eq!(names, ["shell_execute", "shell_read.file-v2"]);
     }
 
     #[tokio::test]

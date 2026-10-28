@@ -44,6 +44,12 @@ files. The default is `~/.servitor`.
 
 Each named MCP section declares one tool server.
 
+Section names under `[mcp.*]` and `[a2a.*]` are published as provider names,
+so they must be 1 to 64 ASCII letters, digits, `_`, `.` or `-`, starting with
+a letter or digit. A tool or skill whose advertised name breaks the same rule
+is not registered, and the manifest publishes each description as one line of
+at most 200 characters.
+
 Supported transports:
 
 - `stdio`: requires `command`

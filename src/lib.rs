@@ -49,6 +49,7 @@ pub mod events;
 pub mod identity;
 pub mod mcp;
 pub mod metrics;
+pub mod public;
 pub mod runtime;
 pub mod scope;
 pub mod task;

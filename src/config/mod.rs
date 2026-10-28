@@ -119,6 +119,20 @@ roles = ["executor"]
             }
         }
 
+        // Provider names reach the feed in span names and the manifest.
+        if let Some(name) = self
+            .mcp
+            .keys()
+            .chain(self.a2a.keys())
+            .find(|name| !crate::public::is_public_name(name))
+        {
+            return Err(ServitorError::Config {
+                reason: format!(
+                    "provider name {name:?} must be 1-64 ASCII letters, digits, '_', '.' or '-', starting with a letter or digit"
+                ),
+            });
+        }
+
         // Scope policies are keyed by provider name; a name shared by an MCP
         // server and an A2A agent would let one policy replace the other.
         if let Some(name) = self.a2a.keys().find(|name| self.mcp.contains_key(*name)) {
@@ -470,5 +484,16 @@ url = "http://127.0.0.1:8766"
             .unwrap_err()
             .to_string()
             .contains("'files' names both an MCP server and an A2A agent"));
+    }
+
+    #[test]
+    fn reject_provider_names_that_are_not_identifiers() {
+        for name in ["\"bad name\"", "\"_hidden\""] {
+            let toml = format!("[mcp.{name}]\ntransport = \"stdio\"\ncommand = \"x\"\n");
+            let error = Config::from_str(&toml).unwrap_err().to_string();
+            assert!(error.contains("provider name"), "{name}: {error}");
+        }
+        let toml = "[a2a.\"bad name\"]\nurl = \"http://127.0.0.1:8766\"\n";
+        assert!(Config::from_str(toml).is_err());
     }
 }

@@ -1,5 +1,6 @@
 //! Profile building utilities for egregore network.
 
+use crate::public::public_description;
 use chrono::Utc;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -103,7 +104,7 @@ pub async fn build_manifest(
             });
         entry.tools.push(ToolSummary {
             name: name.to_string(),
-            title: tool.description.clone(),
+            title: tool.description.as_deref().map(public_description),
         });
     }
 
@@ -128,7 +129,7 @@ pub async fn build_manifest(
             });
         entry.tools.push(ToolSummary {
             name: tool.name,
-            title: tool.description,
+            title: tool.description.as_deref().map(public_description),
         });
     }
 
@@ -307,6 +308,31 @@ mod tests {
             build_environment_snapshots(&Identity::generate(), &pool, config, "manifest").await;
         assert_eq!(snapshots.len(), 1);
         snapshots[0].state["probe_results"].clone()
+    }
+
+    #[tokio::test]
+    async fn manifest_tool_titles_are_single_line_and_bounded() {
+        let mut pool = McpPool::new();
+        pool.register_server_tools(
+            "shell",
+            vec![thallus_core::mcp::client::ToolDefinition {
+                name: "execute".to_string(),
+                description: Some(format!("Run a\ncommand\u{202E} {}", "x".repeat(400))),
+                input_schema: None,
+            }],
+        )
+        .unwrap();
+        let config = Config::from_str("").unwrap();
+
+        let manifest = build_manifest(&Identity::generate(), &pool, &A2aPool::new(), &config).await;
+
+        let title = manifest.toolsets[0].tools[0].title.as_deref().unwrap();
+        assert!(title.starts_with("Run a command x"), "{title}");
+        assert!(
+            !title.contains('\n') && !title.contains('\u{202E}'),
+            "{title}"
+        );
+        assert_eq!(title.chars().count(), 200);
     }
 
     #[tokio::test]

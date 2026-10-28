@@ -146,8 +146,14 @@ impl A2aPool {
                 }
             };
 
-            // Register skills as tools
+            // Register skills as tools. Their names reach the feed, so a
+            // skill whose name is not a bounded identifier is skipped.
+            let mut skipped = 0usize;
             for skill in &card.skills {
+                if !crate::public::is_public_name(&skill.name) {
+                    skipped += 1;
+                    continue;
+                }
                 let prefixed_name = skill.prefixed_name(&name);
                 let validator = compile_skill_validator(skill)?;
 
@@ -158,6 +164,14 @@ impl A2aPool {
                         skill: skill.clone(),
                         validator,
                     },
+                );
+            }
+
+            if skipped > 0 {
+                tracing::warn!(
+                    agent = %name,
+                    skipped,
+                    "skipped skills whose advertised names are not identifiers"
                 );
             }
 
